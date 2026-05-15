@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "rdbstudio",
+  "version": "0.1.0",
+  "identifier": "self.smalltree.rdbstudio",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "rdbstudio",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "backgroundColor": "#0b0d12"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Modern cross-platform database GUI",
+    "longDescription": "rdbstudio is a Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis. Built with Tauri + React + sqlx.",
+    "homepage": "https://github.com/luckylee6666/rdbstudio",
+    "publisher": "rdbstudio contributors",
+    "copyright": "Copyright (c) 2026 rdbstudio contributors",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.13"
+    },
+    "windows": {
+      "wix": {
+        "language": ["en-US", "zh-CN"]
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  }
+}

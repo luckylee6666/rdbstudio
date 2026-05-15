@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 97%;
+    --foreground: 222 18% 12%;
+    --surface: 0 0% 100%;
+    --surface-muted: 220 15% 94%;
+    --surface-elevated: 0 0% 100%;
+    --muted: 220 14% 90%;
+    --muted-foreground: 220 10% 40%;
+    --border: 220 14% 88%;
+    --ring: 221 83% 53%;
+    --accent: 220 14% 92%;
+    --accent-foreground: 222 18% 12%;
+    --brand: 221 83% 53%;
+    --brand-foreground: 0 0% 100%;
+    --success: 152 60% 40%;
+    --warning: 38 92% 50%;
+    --danger: 0 72% 51%;
+  }
+
+  .dark {
+    --background: 222 18% 7%;
+    --foreground: 220 14% 92%;
+    --surface: 222 16% 10%;
+    --surface-muted: 222 14% 12%;
+    --surface-elevated: 222 16% 14%;
+    --muted: 222 12% 18%;
+    --muted-foreground: 220 10% 60%;
+    --border: 222 14% 18%;
+    --ring: 217 91% 60%;
+    --accent: 222 14% 16%;
+    --accent-foreground: 220 14% 92%;
+    --brand: 217 91% 60%;
+    --brand-foreground: 222 18% 7%;
+    --success: 152 60% 50%;
+    --warning: 38 92% 58%;
+    --danger: 0 72% 58%;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  body {
+    font-feature-settings: "cv11", "ss01", "ss03";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Refined scrollbars — subtle, modern */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+  }
+
+  /* Drag region for custom titlebar */
+  .drag-region {
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: hsl(var(--surface) / 0.72);
+    backdrop-filter: saturate(160%) blur(14px);
+    -webkit-backdrop-filter: saturate(160%) blur(14px);
+  }
+  .hairline {
+    box-shadow: inset 0 -1px 0 0 hsl(var(--border));
+  }
+}
