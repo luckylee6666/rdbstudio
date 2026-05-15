@@ -1,0 +1,44 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vite
+
+# tauri
+src-tauri/target
+src-tauri/gen/schemas
+
+# e2e-tests
+/e2e-tests/node_modules/
+/e2e-tests/.wdio/
+/e2e-tests/test-results/
+
+# secrets / env
+.env
+.env.*
+!.env.example
+
+# coverage
+coverage/
+
+# editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+
+# os
+Thumbs.db
+ehthumbs.db
+
+# typescript incremental build cache
+*.tsbuildinfo
+
+# playwright MCP scratch output
+.playwright-mcp/
+
+# ad-hoc test screenshots
+prompt-dialog-test.png
