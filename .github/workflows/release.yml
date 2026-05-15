@@ -105,5 +105,8 @@ jobs:
 
             See [CHANGELOG.md](https://github.com/luckylee6666/rdbstudio/blob/main/CHANGELOG.md).
           releaseDraft: true
-          prerelease: false
+          # Auto-detect pre-releases by tag suffix so v0.1.0-rc.1 doesn't get
+          # marked as a stable release. Add more markers (-pre, -dev, ...) here
+          # if we adopt them.
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
           args: ${{ matrix.args }}
