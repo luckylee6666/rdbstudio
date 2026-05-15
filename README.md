@@ -28,9 +28,19 @@ _Screenshots coming soon._
 
 ## Install
 
-### Pre-built (Beta — coming)
+### Pre-built (unsigned)
 
-Pre-built installers will be published on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page once code signing is set up. For now, build from source.
+Tagged releases publish unsigned installers to [Releases](https://github.com/luckylee6666/rdbstudio/releases):
+
+- **macOS arm64** — `.dmg` (Apple Silicon only for now)
+- **Windows x64** — `.msi` / `.exe`
+
+Because they're not code-signed yet, first launch needs one extra click:
+
+- **macOS**: right-click `rdbstudio.app` → **Open** (or System Settings → Privacy & Security → "Open Anyway"). Gatekeeper will refuse a plain double-click on an un-notarized app.
+- **Windows**: SmartScreen → "More info" → "Run anyway".
+
+Signed/notarized builds will land once code-signing certificates are in place.
 
 ### Build from source
 
