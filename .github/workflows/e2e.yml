@@ -1,9 +1,11 @@
 name: E2E
 
+# Manual-only for now. tauri-driver doesn't yet have a stable Tauri 2 build
+# (CI runs were hanging on "tauri-driver did not report listening within 30s"),
+# so we keep the spec around but don't block PRs on it. Re-enable `on.push` /
+# `on.pull_request` once tauri-driver 2.x ships.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   e2e-ubuntu:

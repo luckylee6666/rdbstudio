@@ -515,18 +515,18 @@ async fn synth_pg_ddl(
 
 fn fmt_pg_type(c: &ColumnDetail) -> String {
     let t = c.data_type.to_lowercase();
-    if (t == "character varying" || t == "varchar" || t == "character" || t == "char")
-        && c.char_max_length.is_some()
-    {
-        return format!(
-            "{}({})",
-            if t.starts_with("character var") {
-                "varchar"
-            } else {
-                &t
-            },
-            c.char_max_length.unwrap()
-        );
+    if let Some(len) = c.char_max_length {
+        if t == "character varying" || t == "varchar" || t == "character" || t == "char" {
+            return format!(
+                "{}({})",
+                if t.starts_with("character var") {
+                    "varchar"
+                } else {
+                    &t
+                },
+                len
+            );
+        }
     }
     if (t == "numeric" || t == "decimal") && c.numeric_precision.is_some() {
         return match (c.numeric_precision, c.numeric_scale) {

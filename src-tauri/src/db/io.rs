@@ -62,10 +62,7 @@ pub async fn export_table(
     let mut rows: u64 = 0;
     let mut first = true;
 
-    match opts.format {
-        ExportFormat::Json => w.write_all(b"[\n")?,
-        _ => {}
-    }
+    if let ExportFormat::Json = opts.format { w.write_all(b"[\n")? }
 
     loop {
         let q = TableQuery {
@@ -93,10 +90,7 @@ pub async fn export_table(
         offset += opts.batch_size;
     }
 
-    match opts.format {
-        ExportFormat::Json => w.write_all(b"\n]\n")?,
-        _ => {}
-    }
+    if let ExportFormat::Json = opts.format { w.write_all(b"\n]\n")? }
 
     w.flush()?;
     let size = std::fs::metadata(&opts.path).map(|m| m.len()).unwrap_or(0);
@@ -115,18 +109,15 @@ fn write_header(
     if !opts.include_header {
         return Ok(());
     }
-    match opts.format {
-        ExportFormat::Csv => {
-            let line = r
-                .columns
-                .iter()
-                .map(|c| csv_escape(&c.name, opts.delimiter, opts.quote_all))
-                .collect::<Vec<_>>()
-                .join(&opts.delimiter.to_string());
-            w.write_all(line.as_bytes())?;
-            w.write_all(b"\n")?;
-        }
-        _ => {}
+    if let ExportFormat::Csv = opts.format {
+        let line = r
+            .columns
+            .iter()
+            .map(|c| csv_escape(&c.name, opts.delimiter, opts.quote_all))
+            .collect::<Vec<_>>()
+            .join(&opts.delimiter.to_string());
+        w.write_all(line.as_bytes())?;
+        w.write_all(b"\n")?;
     }
     Ok(())
 }
