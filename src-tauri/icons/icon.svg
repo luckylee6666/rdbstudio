@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="rdbstudio app icon">
+  <defs>
+    <path id="squircle" d="M512 0C327.7 0 235.6 0 136.4 42.6C93.8 62.5 62.5 93.8 42.6 136.4C0 235.6 0 327.7 0 512C0 696.3 0 788.4 42.6 887.6C62.5 930.2 93.8 961.5 136.4 981.4C235.6 1024 327.7 1024 512 1024C696.3 1024 788.4 1024 887.6 981.4C930.2 961.5 961.5 930.2 981.4 887.6C1024 788.4 1024 696.3 1024 512C1024 327.7 1024 235.6 981.4 136.4C961.5 93.8 930.2 62.5 887.6 42.6C788.4 0 696.3 0 512 0Z"/>
+    <clipPath id="clip">
+      <use href="#squircle"/>
+    </clipPath>
+    <linearGradient id="bg" x1="138" y1="72" x2="874" y2="948" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334f77"/>
+      <stop offset="0.44" stop-color="#1d3555"/>
+      <stop offset="1" stop-color="#0b1323"/>
+    </linearGradient>
+    <radialGradient id="soft-top" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(415 152) rotate(63) scale(590 485)">
+      <stop offset="0" stop-color="#6787b3" stop-opacity="0.42"/>
+      <stop offset="0.7" stop-color="#203b5f" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#0b1323" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="310" y1="244" x2="792" y2="804" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.58" stop-color="#f2f7fc"/>
+      <stop offset="1" stop-color="#c9d8e9"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="402" y1="392" x2="814" y2="762" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dceafe" stop-opacity="0.64"/>
+      <stop offset="1" stop-color="#b9cce7" stop-opacity="0.86"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="424" y1="624" x2="520" y2="718" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#54ead8"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
+
+  <use href="#squircle" fill="url(#bg)"/>
+  <g clip-path="url(#clip)">
+    <rect width="1024" height="1024" fill="url(#soft-top)"/>
+    <path d="M668 402H758M668 504H758M668 606H758M668 708H758" fill="none" stroke="#d8e6f9" stroke-width="9" stroke-linecap="round" opacity="0.18"/>
+  </g>
+
+  <g fill="none" stroke="url(#flow)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M434 438H500C536 438 560 410 590 410H744"/>
+    <path d="M434 548C484 548 500 502 548 502H744"/>
+    <path d="M512 646H574C624 646 626 604 676 604H744"/>
+    <path d="M445 714C478 784 528 798 604 798H654C704 798 706 706 756 706"/>
+  </g>
+
+  <path d="M333 797V470C333 302 466 210 632 216C701 219 759 248 808 301" fill="none" stroke="url(#mark)" stroke-width="118" stroke-linecap="butt" stroke-linejoin="round"/>
+  <rect x="432" y="634" width="72" height="72" rx="14" fill="url(#accent)"/>
+  <g fill="url(#mark)">
+    <circle cx="772" cy="410" r="42"/>
+    <circle cx="772" cy="502" r="42"/>
+    <circle cx="772" cy="604" r="42"/>
+    <circle cx="772" cy="706" r="42"/>
+  </g>
+</svg>

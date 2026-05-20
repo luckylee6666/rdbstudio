@@ -7,9 +7,11 @@ name: Release
 #   git push origin v0.1.0
 #
 # UNSIGNED — first-launch UX:
-#   - macOS: users must right-click the .app → "Open" the first time (Gatekeeper
-#     will refuse a plain double-click on an un-notarized app). System
-#     Settings → Privacy & Security → "Open Anyway" also works.
+#   - macOS: ad-hoc signed (signingIdentity: "-" in tauri.conf.json) but not
+#     notarized, so first launch shows "Apple could not verify ... is free of
+#     malware". Click "Done", then System Settings → Privacy & Security →
+#     "Open Anyway". Without ad-hoc signing on Apple Silicon, Gatekeeper would
+#     refuse outright with "app is damaged" (no override available).
 #   - Windows: SmartScreen will show "Windows protected your PC" → "More info"
 #     → "Run anyway".
 # Once we have an Apple Developer ID + Windows code-signing cert, fill in the
@@ -98,10 +100,12 @@ jobs:
             ## rdbstudio ${{ github.ref_name }}
 
             > **Unsigned build** — first launch needs an extra step:
-            > - **macOS (arm64)**: right-click `rdbstudio.app` → **Open** the first time.
-            >   Or: System Settings → Privacy & Security → "Open Anyway".
+            > - **macOS (arm64)**: 双击会提示"无法验证…是否包含恶意软件" →
+            >   点 **完成** → **系统设置 → 隐私与安全性** → 滚到底部，
+            >   "已阻止使用 rdbstudio" 旁点 **仍要打开** → 再次双击即可。
+            >   （app 已做 ad-hoc 签名，**不会**出现"已损坏"。）
             > - **Windows (x64)**: SmartScreen → "More info" → "Run anyway".
-            > Signed builds will land once code-signing certificates are in place.
+            > Signed + notarized builds will land once code-signing certificates are in place.
 
             See [CHANGELOG.md](https://github.com/luckylee6666/rdbstudio/blob/main/CHANGELOG.md).
           releaseDraft: true
