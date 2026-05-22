@@ -37,6 +37,7 @@ import {
 import type { ConnectionConfig, DriverKind, TreeEntry } from "@/types";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { api } from "@/lib/api";
+import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
 import { ImportDialog } from "@/components/io/ImportDialog";
 import { useT } from "@/store/i18n";
@@ -565,10 +566,7 @@ function ConnectionBranch({
     const name = raw.trim();
     if (!name) return;
     setCreateDbError(null);
-    const quoted =
-      cfg.driver === "mysql"
-        ? "`" + name.replace(/`/g, "``") + "`"
-        : `"${name.replace(/"/g, '""')}"`;
+    const quoted = quoteIdent(cfg.driver, name);
     try {
       if (status !== "connected") await connect(cfg.id);
       await api.executeQuery(cfg.id, `CREATE DATABASE ${quoted}`);

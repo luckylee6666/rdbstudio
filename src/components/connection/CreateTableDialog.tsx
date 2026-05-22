@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AlertTriangle, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { quoteIdent } from "@/lib/sql";
 import { useT } from "@/store/i18n";
 import type { DriverKind } from "@/types";
 
@@ -39,9 +40,8 @@ const TYPE_OPTIONS: Record<DriverKind, string[]> = {
   redis: [],
 };
 
-let nextColId = 1;
-const blankColumn = (): ColumnDraft => ({
-  id: nextColId++,
+const blankColumn = (id: number): ColumnDraft => ({
+  id,
   name: "",
   type: "",
   notNull: false,
@@ -50,19 +50,34 @@ const blankColumn = (): ColumnDraft => ({
   defaultValue: "",
 });
 
-function quoteIdent(driver: DriverKind, name: string): string {
-  if (driver === "mysql") return `\`${name.replace(/`/g, "``")}\``;
-  // postgres + sqlite both accept double-quoted identifiers
-  return `"${name.replace(/"/g, '""')}"`;
+function pkType(driver: DriverKind): string {
+  return driver === "sqlite" ? "INTEGER" : "BIGINT";
 }
 
-function quoteStringLiteral(s: string): string {
-  return `'${s.replace(/'/g, "''")}'`;
+function defaultStringType(driver: DriverKind): string {
+  return driver === "sqlite" ? "TEXT" : "VARCHAR(255)";
 }
 
-// Heuristic: if the default looks like a number, a SQL function call, or one
-// of NULL/TRUE/FALSE/CURRENT_TIMESTAMP/DEFAULT, pass it through; otherwise
-// treat it as a string literal and quote it.
+function initialColumns(driver: DriverKind, alloc: () => number): ColumnDraft[] {
+  return [
+    {
+      ...blankColumn(alloc()),
+      name: "id",
+      type: pkType(driver),
+      primaryKey: true,
+      autoIncrement: true,
+      notNull: true,
+    },
+    {
+      ...blankColumn(alloc()),
+      name: "name",
+      type: defaultStringType(driver),
+    },
+  ];
+}
+
+// Number → number, NULL/TRUE/FALSE/CURRENT_*/NOW()/function-call: pass through;
+// otherwise treat as string literal and single-quote it.
 function formatDefault(raw: string): string {
   const v = raw.trim();
   if (!v) return "";
@@ -79,8 +94,8 @@ function formatDefault(raw: string): string {
     return upper;
   }
   if (/^-?\d+(\.\d+)?$/.test(v)) return v;
-  if (/^[A-Za-z_][\w]*\s*\(.*\)$/.test(v)) return v; // function call
-  return quoteStringLiteral(v);
+  if (/^[A-Za-z_][\w]*\s*\(.*\)$/.test(v)) return v;
+  return `'${v.replace(/'/g, "''")}'`;
 }
 
 interface BuildResult {
@@ -117,13 +132,11 @@ function buildSql(
     const parts: string[] = [quoteIdent(driver, c.name.trim())];
     let typeStr = c.type.trim();
 
-    // Auto-increment: emit driver-specific type/keyword.
     if (c.autoIncrement) {
       if (driver === "postgres") {
         typeStr = typeStr.toUpperCase().includes("BIG") ? "BIGSERIAL" : "SERIAL";
       } else if (driver === "sqlite") {
-        // SQLite: only INTEGER PRIMARY KEY supports AUTOINCREMENT, and the
-        // AUTOINCREMENT keyword must follow PRIMARY KEY on the same column.
+        // SQLite AUTOINCREMENT only works on INTEGER PRIMARY KEY columns.
         typeStr = "INTEGER";
       }
     }
@@ -135,8 +148,6 @@ function buildSql(
       if (def) parts.push(`DEFAULT ${def}`);
     }
 
-    // mysql/sqlite write AUTO_INCREMENT/AUTOINCREMENT inline; postgres handles
-    // it via the SERIAL pseudo-type above.
     if (c.autoIncrement) {
       if (driver === "mysql") parts.push("AUTO_INCREMENT");
       if (driver === "sqlite" && c.primaryKey && pkCols.length === 1)
@@ -186,25 +197,23 @@ export function CreateTableDialog({
   onCreated: () => void;
 }) {
   const t = useT();
+  const nextId = useRef(1);
+  const alloc = () => nextId.current++;
   const [tableName, setTableName] = useState("");
-  const [columns, setColumns] = useState<ColumnDraft[]>(() => {
-    const id = { ...blankColumn(), name: "id", type: driver === "postgres" ? "BIGINT" : driver === "mysql" ? "BIGINT" : "INTEGER", primaryKey: true, autoIncrement: true, notNull: true };
-    return [id, { ...blankColumn(), name: "name", type: driver === "sqlite" ? "TEXT" : "VARCHAR(255)" }];
-  });
+  const [columns, setColumns] = useState<ColumnDraft[]>(() =>
+    initialColumns(driver, alloc)
+  );
   const [saving, setSaving] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const { sql, error: buildError } = useMemo(
-    () => buildSql(driver, schema, tableName, columns),
-    [driver, schema, tableName, columns]
+    () => (open ? buildSql(driver, schema, tableName, columns) : { sql: "", error: null }),
+    [open, driver, schema, tableName, columns]
   );
 
   const reset = () => {
     setTableName("");
-    setColumns([
-      { ...blankColumn(), name: "id", type: driver === "postgres" ? "BIGINT" : driver === "mysql" ? "BIGINT" : "INTEGER", primaryKey: true, autoIncrement: true, notNull: true },
-      { ...blankColumn(), name: "name", type: driver === "sqlite" ? "TEXT" : "VARCHAR(255)" },
-    ]);
+    setColumns(initialColumns(driver, alloc));
     setSubmitError(null);
   };
 
@@ -239,7 +248,7 @@ export function CreateTableDialog({
   };
 
   const addCol = () => {
-    setColumns((cs) => [...cs, blankColumn()]);
+    setColumns((cs) => [...cs, blankColumn(alloc())]);
   };
 
   const typeOptions = TYPE_OPTIONS[driver] ?? [];

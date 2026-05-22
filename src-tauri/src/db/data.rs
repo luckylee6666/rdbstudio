@@ -168,8 +168,12 @@ pub async fn fetch(pool: &DbPool, q: &TableQuery) -> AppResult<QueryResult> {
     let mut r = rows_to_result(pool, rows, start)?;
     // sqlx decodes columns from the first row, so an empty result loses
     // column metadata. Backfill from the table's schema so freshly-created
-    // or empty tables still render headers (and stay editable).
-    if r.columns.is_empty() {
+    // tables still render headers — but only on the natural "empty table"
+    // path (first page, no filters); a filtered query that legitimately
+    // matches zero rows doesn't need the extra information_schema round-trip.
+    let unfiltered_first_page =
+        q.offset == 0 && q.filters.is_empty() && q.where_raw.as_deref().unwrap_or("").trim().is_empty();
+    if r.columns.is_empty() && unfiltered_first_page {
         if let Ok(cols) =
             crate::db::meta::list_columns(pool, q.schema.as_deref(), &q.table).await
         {

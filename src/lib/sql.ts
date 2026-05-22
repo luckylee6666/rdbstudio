@@ -1,3 +1,5 @@
+import type { DriverKind } from "@/types";
+
 // Split a SQL script into individual statements, respecting string literals
 // (single, double, backtick) and comments (-- line, /* block */). Returns
 // non-empty trimmed statements. Used by the query editor so users can paste
@@ -131,4 +133,10 @@ export function explainWrap(sql: string, driver: string): string {
     default:
       return `EXPLAIN ${body}`;
   }
+}
+
+// Mirrors `quote_ident` in src-tauri/src/db/data.rs.
+export function quoteIdent(driver: DriverKind, name: string): string {
+  if (driver === "mysql") return `\`${name.replace(/`/g, "``")}\``;
+  return `"${name.replace(/"/g, '""')}"`;
 }

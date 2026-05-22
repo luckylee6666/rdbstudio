@@ -165,22 +165,18 @@ export function ConnectionDialog({
                   {t("common.testing")}
                 </span>
               )}
-              {result &&
-                (result.ok ? (
-                  <span className="flex min-w-0 items-start gap-1.5 text-success">
-                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {result && (() => {
+                const Icon = result.ok ? CheckCircle2 : XCircle;
+                const tone = result.ok ? "text-success" : "text-danger";
+                return (
+                  <span className={`flex min-w-0 items-start gap-1.5 ${tone}`}>
+                    <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     <span className="break-words" title={result.msg}>
                       {result.msg}
                     </span>
                   </span>
-                ) : (
-                  <span className="flex min-w-0 items-start gap-1.5 text-danger">
-                    <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span className="break-words" title={result.msg}>
-                      {result.msg}
-                    </span>
-                  </span>
-                ))}
+                );
+              })()}
             </div>
           )}
           <div className="flex items-center justify-end gap-2">

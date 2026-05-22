@@ -241,11 +241,6 @@ function RedisScalarEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset draft when underlying value changes (e.g. after Refresh).
-  useEffect(() => {
-    if (!editing) setDraft(raw);
-  }, [raw, editing]);
-
   const beginEdit = () => {
     setDraft(raw);
     setError(null);
@@ -361,7 +356,6 @@ function RedisScalarEditor({
   );
 }
 
-// Cell editor — inline textarea overlaying a single table cell.
 function CellEditor({
   initial,
   onCancel,
@@ -374,12 +368,18 @@ function CellEditor({
   const [draft, setDraft] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Enter triggers commit() then blurs the textarea; without this guard, the
+  // follow-up onBlur fires a second commit() and double-issues the IPC.
+  const committedRef = useRef(false);
 
   const commit = async () => {
+    if (committedRef.current) return;
     if (draft === initial) {
+      committedRef.current = true;
       onCancel();
       return;
     }
+    committedRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -387,6 +387,7 @@ function CellEditor({
     } catch (e) {
       setError(String(e));
       setSaving(false);
+      committedRef.current = false;
     }
   };
 
@@ -445,7 +446,6 @@ function RedisTable({
         return ["index", "value"];
       case "set":
         return ["member"];
-      case "stream":
       default:
         return fallback;
     }
