@@ -9,8 +9,11 @@ interface Props extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
 }
 
+// shrink-0 + whitespace-nowrap keeps CJK labels like "测试连接" from getting
+// crushed into one-character-per-line columns when the parent flex row also
+// contains a long error message.
 const base =
-  "inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-50 disabled:pointer-events-none";
+  "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-50 disabled:pointer-events-none";
 
 const variants: Record<Variant, string> = {
   primary:

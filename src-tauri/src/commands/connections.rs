@@ -17,10 +17,12 @@ pub fn save_connection(
 ) -> AppResult<ConnectionConfig> {
     let password = config.password.clone();
     let saved = state.store.upsert(config)?;
+    // An empty password from the dialog means "leave the keychain entry
+    // alone" (edit mode shows ●●●● as a placeholder but the field is blank).
+    // Deleting the password is an explicit action — handled by remove or a
+    // future clear_password command, never inferred from a blank field.
     if let Some(pw) = password {
-        if pw.is_empty() {
-            secret::delete_password(&saved.id)?;
-        } else {
+        if !pw.is_empty() {
             secret::store_password(&saved.id, &pw)?;
         }
     }

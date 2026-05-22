@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   Copy,
   Loader2,
+  Pencil,
   RefreshCw,
+  X,
 } from "lucide-react";
 import type { WorkspaceTab } from "@/types";
 import { api, type QueryResult } from "@/lib/api";
@@ -16,14 +19,14 @@ type LoadState =
   | { kind: "ok"; result: QueryResult; ttlMs: number | null }
   | { kind: "error"; message: string };
 
-// Quote a Redis key for inclusion in a command, matching the parser in
-// src-tauri/src/db/redis_ops.rs::parse_args (double-quotes with \\ and \").
-function quoteKey(k: string): string {
-  return `"${k.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+// Quote a Redis arg for inclusion in a command, matching parse_args in
+// src-tauri/src/db/redis_ops.rs (double-quotes with \\ and \" escapes).
+function quoteArg(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function fetchCommandFor(type: string, key: string): string {
-  const k = quoteKey(key);
+  const k = quoteArg(key);
   switch (type) {
     case "string":
       return `GET ${k}`;
@@ -93,7 +96,7 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
     const myId = ++inflightRef.current;
     setState({ kind: "loading" });
     try {
-      const k = quoteKey(redisKey);
+      const k = quoteArg(redisKey);
       const cmd = fetchCommandFor(redisType, redisKey);
       // Run value + PTTL in parallel — they are independent reads.
       const [result, pttl] = await Promise.all([
@@ -175,47 +178,262 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
             <span className="whitespace-pre-wrap font-mono">{state.message}</span>
           </div>
         )}
-        {state.kind === "ok" && (
-          <RedisValueRender type={redisType ?? ""} result={state.result} />
+        {state.kind === "ok" && connectionId && redisKey && (
+          <RedisValueRender
+            type={redisType ?? ""}
+            result={state.result}
+            connectionId={connectionId}
+            redisKey={redisKey}
+            onReload={load}
+          />
         )}
       </div>
     </div>
   );
 }
 
+interface EditableProps {
+  connectionId: string;
+  redisKey: string;
+  onReload: () => Promise<void>;
+}
+
 function RedisValueRender({
   type,
   result,
-}: {
-  type: string;
-  result: QueryResult;
-}) {
-  // string: render the single cell as a preformatted block (auto-pretty JSON).
+  connectionId,
+  redisKey,
+  onReload,
+}: { type: string; result: QueryResult } & EditableProps) {
   if (type === "string" || type === "ReJSON-RL") {
-    const raw = cellToString(result.rows?.[0]?.[0] ?? "");
-    const display = maybePrettyJson(raw);
+    return (
+      <RedisScalarEditor
+        type={type}
+        result={result}
+        connectionId={connectionId}
+        redisKey={redisKey}
+        onReload={onReload}
+      />
+    );
+  }
+  return (
+    <RedisTable
+      type={type}
+      result={result}
+      connectionId={connectionId}
+      redisKey={redisKey}
+      onReload={onReload}
+    />
+  );
+}
+
+function RedisScalarEditor({
+  type,
+  result,
+  connectionId,
+  redisKey,
+  onReload,
+}: { type: string; result: QueryResult } & EditableProps) {
+  const raw = cellToString(result.rows?.[0]?.[0] ?? "");
+  const isJson = type === "ReJSON-RL";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(raw);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reset draft when underlying value changes (e.g. after Refresh).
+  useEffect(() => {
+    if (!editing) setDraft(raw);
+  }, [raw, editing]);
+
+  const beginEdit = () => {
+    setDraft(raw);
+    setError(null);
+    setEditing(true);
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setError(null);
+    setDraft(raw);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const k = quoteArg(redisKey);
+      const v = quoteArg(draft);
+      const cmd = isJson ? `JSON.SET ${k} $ ${v}` : `SET ${k} ${v}`;
+      await api.executeQuery(connectionId, cmd);
+      await onReload();
+      setEditing(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
     return (
       <div className="p-4">
         <div className="mb-2 flex items-center gap-3 text-[11px] text-muted-foreground">
-          <span>{raw.length} chars</span>
+          <span>editing</span>
           <span>•</span>
-          <span>{type === "ReJSON-RL" ? "JSON" : "string"}</span>
+          <span>{draft.length} chars</span>
         </div>
-        <pre className="overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/40 p-3 font-mono text-[12px] text-foreground/90">
-          {display}
-        </pre>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          autoFocus
+          spellCheck={false}
+          className="min-h-[200px] w-full resize-y rounded-md border border-border/60 bg-surface/40 p-3 font-mono text-[12px] text-foreground/90 outline-none focus:border-primary"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault();
+              void save();
+            }
+          }}
+        />
+        {error && (
+          <div className="mt-2 flex items-start gap-2 rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-[12px] text-rose-300">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="whitespace-pre-wrap font-mono">{error}</span>
+          </div>
+        )}
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            onClick={() => void save()}
+            disabled={saving}
+            className="flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+          >
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Check className="h-3.5 w-3.5" />
+            )}
+            Save
+          </button>
+          <button
+            onClick={cancel}
+            disabled={saving}
+            className="flex h-7 items-center gap-1.5 rounded-md border border-border/60 px-3 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-60"
+          >
+            <X className="h-3.5 w-3.5" />
+            Cancel
+          </button>
+          <span className="ml-2 text-[11px] text-muted-foreground">
+            ⌘/Ctrl+Enter to save · Esc to cancel
+          </span>
+        </div>
       </div>
     );
   }
 
-  // Map / list / set / zset / stream — render as a table built from QueryResult.
-  return <RedisTable type={type} result={result} />;
+  const display = maybePrettyJson(raw);
+  return (
+    <div className="p-4">
+      <div className="mb-2 flex items-center gap-3 text-[11px] text-muted-foreground">
+        <span>{raw.length} chars</span>
+        <span>•</span>
+        <span>{isJson ? "JSON" : "string"}</span>
+        <div className="flex-1" />
+        <button
+          onClick={beginEdit}
+          className="flex h-6 items-center gap-1 rounded px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <Pencil className="h-3 w-3" />
+          Edit
+        </button>
+      </div>
+      <pre
+        onDoubleClick={beginEdit}
+        title="Double-click to edit"
+        className="cursor-text overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/40 p-3 font-mono text-[12px] text-foreground/90"
+      >
+        {display}
+      </pre>
+    </div>
+  );
 }
 
-function RedisTable({ type, result }: { type: string; result: QueryResult }) {
-  // Decide column headers based on the value kind. Backend already returns the
-  // right shape (1 col for list/set, 2 cols for hash/zset), but we override the
-  // generic "field/value" labels with kind-specific ones.
+// Cell editor — inline textarea overlaying a single table cell.
+function CellEditor({
+  initial,
+  onCancel,
+  onCommit,
+}: {
+  initial: string;
+  onCancel: () => void;
+  onCommit: (next: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const commit = async () => {
+    if (draft === initial) {
+      onCancel();
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onCommit(draft);
+    } catch (e) {
+      setError(String(e));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        autoFocus
+        spellCheck={false}
+        rows={Math.min(6, Math.max(1, draft.split("\n").length))}
+        disabled={saving}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          } else if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void commit();
+          }
+        }}
+        onBlur={() => {
+          if (!saving) void commit();
+        }}
+        className="w-full resize-y rounded border border-primary/60 bg-background px-1.5 py-1 font-mono text-[12px] text-foreground outline-none focus:border-primary"
+      />
+      {error && (
+        <div className="text-[11px] text-rose-300">{error}</div>
+      )}
+    </div>
+  );
+}
+
+interface CellLocation {
+  row: number;
+  col: number;
+}
+
+function RedisTable({
+  type,
+  result,
+  connectionId,
+  redisKey,
+  onReload,
+}: { type: string; result: QueryResult } & EditableProps) {
+  // Column headers per kind. zset backend returns [member, score] already; do
+  // not swap — keep storage order so saves can address the right column.
   const columns = useMemo<string[]>(() => {
     const fallback = result.columns.map((c) => c.name);
     switch (type) {
@@ -228,7 +446,6 @@ function RedisTable({ type, result }: { type: string; result: QueryResult }) {
       case "set":
         return ["member"];
       case "stream":
-        return fallback;
       default:
         return fallback;
     }
@@ -236,8 +453,74 @@ function RedisTable({ type, result }: { type: string; result: QueryResult }) {
 
   const rows = result.rows;
   const showIndex = type === "list";
-  // zset: backend returns [member, score] pairs already; swap for readability.
-  const swap = type === "zset";
+  const [editing, setEditing] = useState<CellLocation | null>(null);
+
+  // Which (type, columnIndex) cells are editable. stream is read-only.
+  const isEditable = (col: number): boolean => {
+    if (type === "stream") return false;
+    if (type === "list") return col === 0; // single data column = value
+    if (type === "set") return col === 0;
+    return true; // hash: both, zset: both
+  };
+
+  const saveCell = async (
+    rowIdx: number,
+    colIdx: number,
+    next: string
+  ): Promise<void> => {
+    const row = rows[rowIdx];
+    if (!row) return;
+    const k = quoteArg(redisKey);
+    const commands: string[] = [];
+    switch (type) {
+      case "hash": {
+        const oldField = cellToString(row[0]);
+        const oldValue = cellToString(row[1]);
+        if (colIdx === 0) {
+          // Rename field: HSET k newField oldValue, then HDEL k oldField.
+          if (next === oldField) break;
+          commands.push(`HSET ${k} ${quoteArg(next)} ${quoteArg(oldValue)}`);
+          commands.push(`HDEL ${k} ${quoteArg(oldField)}`);
+        } else {
+          commands.push(`HSET ${k} ${quoteArg(oldField)} ${quoteArg(next)}`);
+        }
+        break;
+      }
+      case "list": {
+        // Use the table's own row index — LRANGE returns elements 0..N-1.
+        commands.push(`LSET ${k} ${rowIdx} ${quoteArg(next)}`);
+        break;
+      }
+      case "set": {
+        const oldMember = cellToString(row[0]);
+        if (next === oldMember) break;
+        commands.push(`SREM ${k} ${quoteArg(oldMember)}`);
+        commands.push(`SADD ${k} ${quoteArg(next)}`);
+        break;
+      }
+      case "zset": {
+        const oldMember = cellToString(row[0]);
+        const oldScore = cellToString(row[1]);
+        if (colIdx === 0) {
+          if (next === oldMember) break;
+          commands.push(`ZREM ${k} ${quoteArg(oldMember)}`);
+          commands.push(`ZADD ${k} ${oldScore} ${quoteArg(next)}`);
+        } else {
+          // Validate numeric score before sending.
+          if (!/^-?\d+(\.\d+)?$/.test(next.trim())) {
+            throw new Error("score must be a number");
+          }
+          commands.push(`ZADD ${k} ${next.trim()} ${quoteArg(oldMember)}`);
+        }
+        break;
+      }
+    }
+    for (const cmd of commands) {
+      await api.executeQuery(connectionId, cmd);
+    }
+    setEditing(null);
+    await onReload();
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -245,6 +528,11 @@ function RedisTable({ type, result }: { type: string; result: QueryResult }) {
         {rows.length} {rows.length === 1 ? "entry" : "entries"}
         {result.elapsed_ms != null && (
           <span className="ml-3">• {result.elapsed_ms}ms</span>
+        )}
+        {type !== "stream" && (
+          <span className="ml-3 text-muted-foreground/70">
+            · double-click a cell to edit
+          </span>
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
@@ -277,32 +565,50 @@ function RedisTable({ type, result }: { type: string; result: QueryResult }) {
                 </td>
               </tr>
             ) : (
-              rows.map((row, i) => {
-                const displayRow = swap && row.length >= 2 ? [row[0], row[1]] : row;
-                return (
-                  <tr
-                    key={i}
-                    className={cn(
-                      "border-b border-border/40 hover:bg-accent/30",
-                      i % 2 === 1 && "bg-surface/20"
-                    )}
-                  >
-                    {showIndex && (
-                      <td className="px-3 py-1 font-mono text-muted-foreground">
-                        {i}
-                      </td>
-                    )}
-                    {displayRow.map((v, j) => (
+              rows.map((row, i) => (
+                <tr
+                  key={i}
+                  className={cn(
+                    "border-b border-border/40 hover:bg-accent/30",
+                    i % 2 === 1 && "bg-surface/20"
+                  )}
+                >
+                  {showIndex && (
+                    <td className="px-3 py-1 font-mono text-muted-foreground">
+                      {i}
+                    </td>
+                  )}
+                  {row.map((v, j) => {
+                    const current = cellToString(v);
+                    const editable = isEditable(j);
+                    const isEditing =
+                      editing?.row === i && editing?.col === j;
+                    return (
                       <td
                         key={j}
-                        className="break-all px-3 py-1 align-top font-mono text-foreground/90"
+                        onDoubleClick={() => {
+                          if (editable) setEditing({ row: i, col: j });
+                        }}
+                        title={editable ? "Double-click to edit" : undefined}
+                        className={cn(
+                          "break-all px-3 py-1 align-top font-mono text-foreground/90",
+                          editable && !isEditing && "cursor-text"
+                        )}
                       >
-                        {cellToString(v)}
+                        {isEditing ? (
+                          <CellEditor
+                            initial={current}
+                            onCancel={() => setEditing(null)}
+                            onCommit={(next) => saveCell(i, j, next)}
+                          />
+                        ) : (
+                          current
+                        )}
                       </td>
-                    ))}
-                  </tr>
-                );
-              })
+                    );
+                  })}
+                </tr>
+              ))
             )}
           </tbody>
         </table>

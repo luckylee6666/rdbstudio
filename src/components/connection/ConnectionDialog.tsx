@@ -156,37 +156,45 @@ export function ConnectionDialog({
       title={initial ? t("conn.dialog.edit") : t("conn.dialog.new")}
       width={560}
       footer={
-        <>
-          <div className="mr-auto flex items-center gap-2 text-[12px]">
-            {testing && (
-              <span className="flex items-center gap-1.5 text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {t("common.testing")}
-              </span>
-            )}
-            {result &&
-              (result.ok ? (
-                <span className="flex items-center gap-1.5 text-success">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  <span className="max-w-[320px] truncate">{result.msg}</span>
+        <div className="flex w-full flex-col gap-2">
+          {(testing || result) && (
+            <div className="flex min-w-0 items-start gap-2 text-[12px]">
+              {testing && (
+                <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                  {t("common.testing")}
                 </span>
-              ) : (
-                <span className="flex items-center gap-1.5 text-danger">
-                  <XCircle className="h-3.5 w-3.5" />
-                  <span className="max-w-[320px] truncate">{result.msg}</span>
-                </span>
-              ))}
+              )}
+              {result &&
+                (result.ok ? (
+                  <span className="flex min-w-0 items-start gap-1.5 text-success">
+                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="break-words" title={result.msg}>
+                      {result.msg}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="flex min-w-0 items-start gap-1.5 text-danger">
+                    <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="break-words" title={result.msg}>
+                      {result.msg}
+                    </span>
+                  </span>
+                ))}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <Button onClick={onTest} disabled={testing || saving}>
+              {t("conn.dialog.test")}
+            </Button>
+            <Button variant="ghost" onClick={onClose} disabled={saving}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="primary" onClick={onSave} disabled={saving}>
+              {saving ? t("common.saving") : t("common.save")}
+            </Button>
           </div>
-          <Button onClick={onTest} disabled={testing || saving}>
-            {t("conn.dialog.test")}
-          </Button>
-          <Button variant="ghost" onClick={onClose} disabled={saving}>
-            {t("common.cancel")}
-          </Button>
-          <Button variant="primary" onClick={onSave} disabled={saving}>
-            {saving ? t("common.saving") : t("common.save")}
-          </Button>
-        </>
+        </div>
       }
     >
       <div className="space-y-4">
@@ -274,14 +282,14 @@ export function ConnectionDialog({
                 />
               </div>
               <div>
-                <Label hint={t("conn.dialog.password.hint")}>
+                <Label hint={initial ? t("conn.dialog.password.hint.edit") : t("conn.dialog.password.hint")}>
                   {t("conn.dialog.password")}
                 </Label>
                 <Input
                   type="password"
                   value={cfg.password ?? ""}
                   onChange={(e) => update("password", e.target.value)}
-                  placeholder="••••••••"
+                  placeholder={initial ? t("conn.dialog.password.placeholder.keep") : "••••••••"}
                 />
               </div>
             </div>
@@ -325,14 +333,14 @@ export function ConnectionDialog({
               </div>
             </div>
             <div>
-              <Label hint={t("conn.dialog.password.hint")}>
+              <Label hint={initial ? t("conn.dialog.password.hint.edit") : t("conn.dialog.password.hint")}>
                 {t("conn.dialog.password")}
               </Label>
               <Input
                 type="password"
                 value={cfg.password ?? ""}
                 onChange={(e) => update("password", e.target.value)}
-                placeholder="••••••••"
+                placeholder={initial ? t("conn.dialog.password.placeholder.keep") : "••••••••"}
               />
             </div>
           </>

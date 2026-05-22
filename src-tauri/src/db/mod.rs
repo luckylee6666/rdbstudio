@@ -23,7 +23,11 @@ pub fn build_url(cfg: &ConnectionConfig) -> AppResult<String> {
         DriverKind::Postgres => {
             let host = cfg.host.as_deref().unwrap_or("localhost");
             let port = cfg.port.unwrap_or(5432);
-            let db = cfg.database.as_deref().unwrap_or("postgres");
+            let db = cfg
+                .database
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("postgres");
             let user = cfg
                 .username
                 .as_deref()

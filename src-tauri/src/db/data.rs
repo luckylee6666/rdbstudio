@@ -166,8 +166,22 @@ pub async fn fetch(pool: &DbPool, q: &TableQuery) -> AppResult<QueryResult> {
     let start = Instant::now();
     let rows = run_with_binds(pool, &sql, &w.values).await?;
     let mut r = rows_to_result(pool, rows, start)?;
-    // reuse exec path for decoding: easier to just call exec::execute without binds
-    // — but we already have rows, so keep this structure.
+    // sqlx decodes columns from the first row, so an empty result loses
+    // column metadata. Backfill from the table's schema so freshly-created
+    // or empty tables still render headers (and stay editable).
+    if r.columns.is_empty() {
+        if let Ok(cols) =
+            crate::db::meta::list_columns(pool, q.schema.as_deref(), &q.table).await
+        {
+            r.columns = cols
+                .into_iter()
+                .map(|c| exec::ColumnMeta {
+                    name: c.name,
+                    data_type: c.data_type,
+                })
+                .collect();
+        }
+    }
     r.elapsed_ms = start.elapsed().as_millis() as u64;
     Ok(r)
 }

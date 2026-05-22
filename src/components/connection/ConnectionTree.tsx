@@ -34,7 +34,7 @@ import {
   Workflow,
   type LucideIcon,
 } from "lucide-react";
-import type { ConnectionConfig, TreeEntry } from "@/types";
+import type { ConnectionConfig, DriverKind, TreeEntry } from "@/types";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { api } from "@/lib/api";
 import { ExportDialog } from "@/components/io/ExportDialog";
@@ -43,6 +43,7 @@ import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
 import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
+import { CreateTableDialog } from "./CreateTableDialog";
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { useConnections, type ConnStatus } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
@@ -552,7 +553,30 @@ function ConnectionBranch({
   const [open, setOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [movePromptOpen, setMovePromptOpen] = useState(false);
+  const [rowCtx, setRowCtx] = useState<{ x: number; y: number } | null>(null);
+  const [createDbOpen, setCreateDbOpen] = useState(false);
+  const [createDbError, setCreateDbError] = useState<string | null>(null);
   const t = useT();
+
+  const supportsCreateDb =
+    cfg.driver === "postgres" || cfg.driver === "mysql";
+
+  const onCreateDbSubmit = async (raw: string) => {
+    const name = raw.trim();
+    if (!name) return;
+    setCreateDbError(null);
+    const quoted =
+      cfg.driver === "mysql"
+        ? "`" + name.replace(/`/g, "``") + "`"
+        : `"${name.replace(/"/g, '""')}"`;
+    try {
+      if (status !== "connected") await connect(cfg.id);
+      await api.executeQuery(cfg.id, `CREATE DATABASE ${quoted}`);
+      await refreshBranch(cfg.id);
+    } catch (e) {
+      setCreateDbError(String(e));
+    }
+  };
 
   // Suggest existing groups so the prompt doubles as a picker without us
   // having to build a full select-or-create combobox.
@@ -650,7 +674,13 @@ function ConnectionBranch({
       }}
       style={{ cursor: "grab" }}
     >
-      <div className="flex items-center gap-1 rounded-md hover:bg-accent/50">
+      <div
+        className="flex items-center gap-1 rounded-md hover:bg-accent/50"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setRowCtx({ x: e.clientX, y: e.clientY });
+        }}
+      >
         <button
           onClick={toggle}
           className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left"
@@ -769,7 +799,7 @@ function ConnectionBranch({
           ) : branch.error ? (
             <div className="px-2 py-1 text-[11px] text-danger">{branch.error}</div>
           ) : (
-            <DatabaseList connectionId={cfg.id} databases={branch.databases ?? []} />
+            <DatabaseList connectionId={cfg.id} driver={cfg.driver} databases={branch.databases ?? []} />
           )}
         </div>
       )}
@@ -786,6 +816,75 @@ function ConnectionBranch({
         onSubmit={onMoveSubmit}
         onClose={() => setMovePromptOpen(false)}
       />
+      <PromptDialog
+        open={createDbOpen}
+        title={t("conn.new_database")}
+        label={
+          createDbError
+            ? `${t("conn.new_database.prompt")}\n${createDbError}`
+            : t("conn.new_database.prompt")
+        }
+        placeholder="my_database"
+        submitLabel={t("common.save")}
+        cancelLabel={t("common.cancel")}
+        onSubmit={(v) => void onCreateDbSubmit(v)}
+        onClose={() => {
+          setCreateDbOpen(false);
+          setCreateDbError(null);
+        }}
+      />
+      {rowCtx && (
+        <ContextMenu
+          x={rowCtx.x}
+          y={rowCtx.y}
+          items={[
+            status === "connected"
+              ? {
+                  id: "disconnect",
+                  label: t("conn.disconnect"),
+                  icon: PlugZap,
+                  onClick: () => void disconnect(cfg.id),
+                }
+              : {
+                  id: "connect",
+                  label: t("common.connect"),
+                  icon: Plug,
+                  onClick: () => void connect(cfg.id),
+                },
+            {
+              id: "refresh",
+              label: t("common.refresh"),
+              icon: RefreshCw,
+              disabled: status !== "connected",
+              onClick: () => void refreshBranch(cfg.id),
+            },
+            {
+              id: "new_db",
+              label: t("conn.new_database"),
+              icon: Plus,
+              disabled: !supportsCreateDb,
+              onClick: () => {
+                setCreateDbError(null);
+                setCreateDbOpen(true);
+              },
+            },
+            {
+              id: "edit",
+              label: t("conn.edit"),
+              icon: Pencil,
+              onClick: onEdit,
+            },
+            {
+              id: "delete",
+              label: t("conn.delete"),
+              icon: Trash2,
+              danger: true,
+              onClick: onDelete,
+            },
+          ]}
+          onClose={() => setRowCtx(null)}
+        />
+      )}
     </div>
   );
 }
@@ -817,15 +916,22 @@ function MenuItem({
 
 function DatabaseList({
   connectionId,
+  driver,
   databases,
 }: {
   connectionId: string;
+  driver: DriverKind;
   databases: string[];
 }) {
   return (
     <>
       {databases.map((db) => (
-        <DatabaseNode key={db} connectionId={connectionId} database={db} />
+        <DatabaseNode
+          key={db}
+          connectionId={connectionId}
+          driver={driver}
+          database={db}
+        />
       ))}
     </>
   );
@@ -833,9 +939,11 @@ function DatabaseList({
 
 function DatabaseNode({
   connectionId,
+  driver,
   database,
 }: {
   connectionId: string;
+  driver: DriverKind;
   database: string;
 }) {
   const [open, setOpen] = useState(
@@ -853,6 +961,7 @@ function DatabaseNode({
   const passSchema = schemaKey === "main" ? undefined : schemaKey;
   const tables = branch?.tables?.[schemaKey];
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const t = useT();
 
   const openEr = () =>
@@ -904,6 +1013,16 @@ function DatabaseNode({
               onClick: openEr,
             },
             {
+              id: "new_table",
+              label: t("tree.new_table"),
+              icon: Plus,
+              disabled: driver === "redis",
+              onClick: () => {
+                if (!open) setOpen(true);
+                setCreateOpen(true);
+              },
+            },
+            {
               id: "query",
               label: t("tree.new_query"),
               icon: Terminal,
@@ -941,6 +1060,16 @@ function DatabaseNode({
           )}
         </div>
       )}
+      <CreateTableDialog
+        open={createOpen}
+        connectionId={connectionId}
+        driver={driver}
+        schema={passSchema}
+        onClose={() => setCreateOpen(false)}
+        onCreated={() => {
+          void loadTables(connectionId, schemaKey, passSchema);
+        }}
+      />
     </div>
   );
 }
@@ -1068,15 +1197,17 @@ function Folder({
     try {
       const ddl = await api.showDdl(connectionId, e.name, schema);
       const id = `query:ddl:${connectionId}:${schema ?? ""}:${e.name}`;
+      // Prime the editor buffer BEFORE opening the tab — QueryEditorView reads
+      // sessionStorage in its useState initializer at mount, so the value must
+      // be in place by then.
+      sessionStorage.setItem(`rdb:sql:${id}`, ddl);
       openTab({
         id,
         kind: "query",
         title: `${e.name} · DDL`,
-        subtitle: "DDL",
+        subtitle: schema,
         connectionId,
       });
-      // Prime the editor buffer via a lightweight sessionStorage channel
-      sessionStorage.setItem(`rdb:sql:${id}`, ddl);
     } catch (err) {
       console.error(err);
     }

@@ -4,6 +4,21 @@ use crate::error::AppResult;
 use crate::model::{ColumnInfo, TreeEntry};
 use sqlx::Row;
 
+/// Pull a UTF-8 string out of `row[idx]`, falling back through `Vec<u8>` for
+/// MySQL servers that expose information_schema / SHOW results as `varbinary`
+/// instead of `varchar`. Without this fallback `try_get::<String, _>` returns
+/// a decode error and the column gets silently dropped — which we hit in the
+/// wild as "list_databases returns 0 rows but `SHOW DATABASES` returns 6".
+fn row_string(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<String> {
+    if let Ok(s) = row.try_get::<String, _>(idx) {
+        return Some(s);
+    }
+    if let Ok(b) = row.try_get::<Vec<u8>, _>(idx) {
+        return Some(String::from_utf8_lossy(&b).into_owned());
+    }
+    None
+}
+
 pub async fn server_version(pool: &DbPool) -> AppResult<String> {
     let v = match pool {
         DbPool::Sqlite(p) => {
@@ -48,7 +63,7 @@ pub async fn list_databases(pool: &DbPool) -> AppResult<Vec<String>> {
             )
             .fetch_all(p)
             .await?;
-            Ok(rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect())
+            Ok(rows.iter().filter_map(|r| row_string(r, 0)).collect())
         }
     }
 }
@@ -135,8 +150,9 @@ pub async fn list_tables(
                 .iter()
                 .filter_map(|r| {
                     // First column is "Tables_in_<db>" — name varies per db, so use positional index.
-                    let name: String = r.try_get::<String, _>(0).ok()?;
-                    let ty: String = r.try_get::<String, _>(1).unwrap_or_default();
+                    // MySQL exposes these as `varbinary` on some servers; row_string covers both.
+                    let name = row_string(r, 0)?;
+                    let ty = row_string(r, 1).unwrap_or_default();
                     let kind = if ty.to_uppercase().contains("VIEW") { "view" } else { "table" };
                     Some(TreeEntry {
                         name,
