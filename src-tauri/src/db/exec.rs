@@ -357,36 +357,6 @@ where
         .map(|v| Json::String(base64_like(&v)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_readonly_recognizes_select() {
-        assert!(is_readonly("SELECT * FROM users"));
-        assert!(is_readonly("select 1"));
-        assert!(is_readonly("  SeLeCt 1"));
-    }
-
-    #[test]
-    fn is_readonly_recognizes_with_and_show_pragma() {
-        assert!(is_readonly("with x as (select 1) select * from x"));
-        assert!(is_readonly("SHOW TABLES"));
-        assert!(is_readonly("PRAGMA table_info(users)"));
-        assert!(is_readonly("EXPLAIN SELECT 1"));
-        assert!(is_readonly("describe users"));
-    }
-
-    #[test]
-    fn is_readonly_rejects_dml_and_ddl() {
-        assert!(!is_readonly("INSERT INTO users VALUES (1)"));
-        assert!(!is_readonly("update users set x=1"));
-        assert!(!is_readonly("  DELETE FROM users"));
-        assert!(!is_readonly("CREATE TABLE x (a int)"));
-        assert!(!is_readonly("DROP TABLE x"));
-    }
-}
-
 fn base64_like(bytes: &[u8]) -> String {
     const CHARS: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -415,4 +385,34 @@ fn base64_like(bytes: &[u8]) -> String {
         out.push('=');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_readonly_recognizes_select() {
+        assert!(is_readonly("SELECT * FROM users"));
+        assert!(is_readonly("select 1"));
+        assert!(is_readonly("  SeLeCt 1"));
+    }
+
+    #[test]
+    fn is_readonly_recognizes_with_and_show_pragma() {
+        assert!(is_readonly("with x as (select 1) select * from x"));
+        assert!(is_readonly("SHOW TABLES"));
+        assert!(is_readonly("PRAGMA table_info(users)"));
+        assert!(is_readonly("EXPLAIN SELECT 1"));
+        assert!(is_readonly("describe users"));
+    }
+
+    #[test]
+    fn is_readonly_rejects_dml_and_ddl() {
+        assert!(!is_readonly("INSERT INTO users VALUES (1)"));
+        assert!(!is_readonly("update users set x=1"));
+        assert!(!is_readonly("  DELETE FROM users"));
+        assert!(!is_readonly("CREATE TABLE x (a int)"));
+        assert!(!is_readonly("DROP TABLE x"));
+    }
 }

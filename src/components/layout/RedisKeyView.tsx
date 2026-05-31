@@ -25,6 +25,25 @@ function quoteArg(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+// How many entries we pull per collection type. Beyond this the viewer shows
+// a "truncated" banner so the user knows the key holds more than is on screen
+// (and that editing rows near the cap may address the wrong element).
+const RANGE_CAP = 1000; // LRANGE/ZRANGE 0..999
+const STREAM_CAP = 100; // XRANGE COUNT
+
+// Cap applied to a given type's fetch, or null when we always read the whole value.
+function fetchCapFor(type: string): number | null {
+  switch (type) {
+    case "list":
+    case "zset":
+      return RANGE_CAP;
+    case "stream":
+      return STREAM_CAP;
+    default:
+      return null;
+  }
+}
+
 function fetchCommandFor(type: string, key: string): string {
   const k = quoteArg(key);
   switch (type) {
@@ -33,14 +52,13 @@ function fetchCommandFor(type: string, key: string): string {
     case "hash":
       return `HGETALL ${k}`;
     case "list":
-      // Pull up to 1000 items; large lists are rare for inspection workflows.
-      return `LRANGE ${k} 0 999`;
+      return `LRANGE ${k} 0 ${RANGE_CAP - 1}`;
     case "set":
       return `SMEMBERS ${k}`;
     case "zset":
-      return `ZRANGE ${k} 0 999 WITHSCORES`;
+      return `ZRANGE ${k} 0 ${RANGE_CAP - 1} WITHSCORES`;
     case "stream":
-      return `XRANGE ${k} - + COUNT 100`;
+      return `XRANGE ${k} - + COUNT ${STREAM_CAP}`;
     case "ReJSON-RL":
       return `JSON.GET ${k}`;
     default:
@@ -455,6 +473,10 @@ function RedisTable({
   const showIndex = type === "list";
   const [editing, setEditing] = useState<CellLocation | null>(null);
 
+  // A full page likely means the collection holds more than we fetched.
+  const cap = fetchCapFor(type);
+  const maybeTruncated = cap != null && rows.length >= cap;
+
   // Which (type, columnIndex) cells are editable. stream is read-only.
   const isEditable = (col: number): boolean => {
     if (type === "stream") return false;
@@ -535,6 +557,15 @@ function RedisTable({
           </span>
         )}
       </div>
+      {maybeTruncated && (
+        <div className="flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-[11px] text-amber-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            Showing the first {cap} entries — this key holds more. Editing rows
+            here is limited to what's loaded.
+          </span>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-[12px]">
           <thead className="sticky top-0 z-10 bg-surface/95 backdrop-blur">

@@ -109,6 +109,8 @@ const en: Dict = {
   "conn.new_database": "New database…",
   "conn.new_database.prompt": "Database name:",
   "conn.new_database.unsupported": "{driver} doesn't support CREATE DATABASE",
+  "conn.new_schema": "New schema…",
+  "conn.new_schema.prompt": "Schema name:",
   "conn.delete_group": "Delete group",
   "conn.delete_group.confirm": "Delete this empty group?",
 
@@ -458,6 +460,8 @@ const zh: Dict = {
   "conn.new_database": "新建数据库…",
   "conn.new_database.prompt": "数据库名：",
   "conn.new_database.unsupported": "{driver} 不支持 CREATE DATABASE",
+  "conn.new_schema": "新建 Schema…",
+  "conn.new_schema.prompt": "Schema 名：",
   "conn.delete_group": "删除分组",
   "conn.delete_group.confirm": "确定删除该空分组？",
   "conn.disconnect": "断开",

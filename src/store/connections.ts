@@ -8,7 +8,6 @@ interface Branch {
   loading?: boolean;
   error?: string;
   databases?: string[];
-  schemas?: Record<string, string[]>;
   tables?: Record<string, TreeEntry[]>;
   /** Redis-only: last cursor returned by SCAN; 0 = exhausted. */
   redisCursor?: number;
@@ -38,7 +37,6 @@ interface ConnectionsState {
    *                while the cache still keys on the display label.
    */
   loadTables: (id: string, cacheKey: string, schema?: string) => Promise<void>;
-  loadSchemas: (id: string, database?: string) => Promise<void>;
   /** Redis-only: append next batch of keys using the saved cursor. */
   loadMoreRedisKeys: (id: string, cacheKey: string) => Promise<void>;
 }
@@ -135,24 +133,6 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
           [id]: { ...existing, error: String(e), loading: false },
         },
       });
-    }
-  },
-
-  loadSchemas: async (id, database) => {
-    const cur = get().branches[id] ?? {};
-    try {
-      const schemas = await api.listSchemas(id, database);
-      set({
-        branches: {
-          ...get().branches,
-          [id]: {
-            ...cur,
-            schemas: { ...(cur.schemas ?? {}), [database ?? "_"]: schemas },
-          },
-        },
-      });
-    } catch (e) {
-      console.error(e);
     }
   },
 

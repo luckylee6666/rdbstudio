@@ -561,6 +561,16 @@ function ConnectionBranch({
 
   const supportsCreateDb =
     cfg.driver === "postgres" || cfg.driver === "mysql";
+  // Postgres is "one connection, one database" here: the tree lists schemas
+  // (pg_namespace), so CREATE DATABASE would succeed but stay invisible.
+  // Create a schema instead, which shows up after refreshBranch.
+  const createsSchema = cfg.driver === "postgres";
+  const createLabel = createsSchema
+    ? t("conn.new_schema")
+    : t("conn.new_database");
+  const createPrompt = createsSchema
+    ? t("conn.new_schema.prompt")
+    : t("conn.new_database.prompt");
 
   const onCreateDbSubmit = async (raw: string) => {
     const name = raw.trim();
@@ -569,7 +579,10 @@ function ConnectionBranch({
     const quoted = quoteIdent(cfg.driver, name);
     try {
       if (status !== "connected") await connect(cfg.id);
-      await api.executeQuery(cfg.id, `CREATE DATABASE ${quoted}`);
+      const stmt = createsSchema
+        ? `CREATE SCHEMA ${quoted}`
+        : `CREATE DATABASE ${quoted}`;
+      await api.executeQuery(cfg.id, stmt);
       await refreshBranch(cfg.id);
     } catch (e) {
       setCreateDbError(String(e));
@@ -816,13 +829,9 @@ function ConnectionBranch({
       />
       <PromptDialog
         open={createDbOpen}
-        title={t("conn.new_database")}
-        label={
-          createDbError
-            ? `${t("conn.new_database.prompt")}\n${createDbError}`
-            : t("conn.new_database.prompt")
-        }
-        placeholder="my_database"
+        title={createLabel}
+        label={createDbError ? `${createPrompt}\n${createDbError}` : createPrompt}
+        placeholder={createsSchema ? "my_schema" : "my_database"}
         submitLabel={t("common.save")}
         cancelLabel={t("common.cancel")}
         onSubmit={(v) => void onCreateDbSubmit(v)}
@@ -858,7 +867,7 @@ function ConnectionBranch({
             },
             {
               id: "new_db",
-              label: t("conn.new_database"),
+              label: createLabel,
               icon: Plus,
               disabled: !supportsCreateDb,
               onClick: () => {

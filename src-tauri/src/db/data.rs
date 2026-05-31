@@ -480,6 +480,28 @@ fn bind_mysql(
     }
 }
 
+/// A grid Update/Delete targets exactly one row. If its WHERE matches more
+/// than one (e.g. a PK-less table where every column is used as the key and
+/// duplicate rows exist), applying it would silently clobber siblings — so we
+/// abort and surface the ambiguity instead. Inserts have no such expectation.
+fn expects_single_row(edit: &Edit) -> bool {
+    matches!(edit, Edit::Update { .. } | Edit::Delete { .. })
+}
+
+fn ambiguous_edit_result(idx: usize, n: u64, applied: u64) -> EditResult {
+    EditResult {
+        ok: false,
+        applied,
+        failed_at: Some(idx),
+        error: Some(format!(
+            "edit #{} matched {} rows but expected exactly 1 — aborted to avoid \
+             overwriting duplicate rows (this table likely has no unique key)",
+            idx + 1,
+            n
+        )),
+    }
+}
+
 pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResult> {
     let driver = pool.driver();
     let mut applied = 0u64;
@@ -496,7 +518,14 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                     bind_sqlite(&mut args, b)?;
                 }
                 match sqlx::query_with(&sql, args).execute(&mut *tx).await {
-                    Ok(r) => applied += r.rows_affected(),
+                    Ok(r) => {
+                        let n = r.rows_affected();
+                        if n > 1 && expects_single_row(e) {
+                            // tx is dropped without commit → rollback.
+                            return Ok(ambiguous_edit_result(idx, n, applied));
+                        }
+                        applied += n;
+                    }
                     Err(e) => {
                         return Ok(EditResult {
                             ok: false,
@@ -519,7 +548,14 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                     bind_pg(&mut args, b)?;
                 }
                 match sqlx::query_with(&sql, args).execute(&mut *tx).await {
-                    Ok(r) => applied += r.rows_affected(),
+                    Ok(r) => {
+                        let n = r.rows_affected();
+                        if n > 1 && expects_single_row(e) {
+                            // tx is dropped without commit → rollback.
+                            return Ok(ambiguous_edit_result(idx, n, applied));
+                        }
+                        applied += n;
+                    }
                     Err(e) => {
                         return Ok(EditResult {
                             ok: false,
@@ -542,7 +578,14 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                     bind_mysql(&mut args, b)?;
                 }
                 match sqlx::query_with(&sql, args).execute(&mut *tx).await {
-                    Ok(r) => applied += r.rows_affected(),
+                    Ok(r) => {
+                        let n = r.rows_affected();
+                        if n > 1 && expects_single_row(e) {
+                            // tx is dropped without commit → rollback.
+                            return Ok(ambiguous_edit_result(idx, n, applied));
+                        }
+                        applied += n;
+                    }
                     Err(e) => {
                         return Ok(EditResult {
                             ok: false,

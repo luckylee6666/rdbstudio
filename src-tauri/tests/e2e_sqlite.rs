@@ -199,6 +199,42 @@ async fn apply_edits_inserts_updates_and_deletes_then_persists() {
 }
 
 #[tokio::test]
+async fn apply_edits_aborts_when_update_matches_multiple_rows() {
+    // A PK-less table with duplicate rows: the grid sends every column as the
+    // "pk", so a single-row edit's WHERE matches both copies. The backend must
+    // refuse to clobber siblings and roll back.
+    let (_dir, pool) = setup().await;
+    exec::execute(&pool, "CREATE TABLE dup (label TEXT, n INTEGER)")
+        .await
+        .expect("create dup");
+    exec::execute(&pool, "INSERT INTO dup VALUES ('x', 1), ('x', 1)")
+        .await
+        .expect("seed dup");
+
+    let batch = EditBatch {
+        schema: None,
+        table: "dup".into(),
+        edits: vec![Edit::Update {
+            pk: vec![("label".into(), json!("x")), ("n".into(), json!(1))],
+            set: vec![("n".into(), json!(99))],
+        }],
+    };
+    let r = data::apply_edits(&pool, &batch).await.expect("apply_edits");
+    assert!(!r.ok, "ambiguous edit should be rejected");
+    assert_eq!(r.applied, 0);
+    assert_eq!(r.failed_at, Some(0));
+
+    // Rolled back: both rows still have n = 1.
+    let after = exec::execute(&pool, "SELECT n FROM dup")
+        .await
+        .expect("select after abort");
+    assert!(
+        after.rows.iter().all(|row| row[0].as_i64() == Some(1)),
+        "no row should have been mutated"
+    );
+}
+
+#[tokio::test]
 async fn describe_and_show_ddl_round_trip() {
     let (_dir, pool) = setup().await;
     let d = design::describe(&pool, None, "users")
