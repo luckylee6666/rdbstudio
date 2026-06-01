@@ -70,14 +70,7 @@ pub async fn drop_object(
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
-    let driver = pool.driver();
-    let q = |s: &str| crate::db::data::quote_ident(driver, s);
-    let target = match schema.as_deref() {
-        Some(s) if !s.is_empty() => format!("{}.{}", q(s), q(&name)),
-        _ => q(&name),
-    };
-    let kind = if view { "VIEW" } else { "TABLE" };
-    let sql = format!("DROP {} {}", kind, target);
+    let sql = crate::db::data::drop_sql(pool.driver(), schema.as_deref(), &name, view);
     alter::apply_statements(&pool, &[sql]).await?;
     Ok(())
 }

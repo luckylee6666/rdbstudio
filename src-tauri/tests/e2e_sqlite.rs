@@ -199,6 +199,45 @@ async fn apply_edits_inserts_updates_and_deletes_then_persists() {
 }
 
 #[tokio::test]
+async fn drop_object_removes_table_and_view() {
+    // Exercises the exact path the drop_object command uses: build the DROP
+    // statement with data::drop_sql, run it through alter::apply_statements.
+    let (_dir, pool) = setup().await;
+    exec::execute(&pool, "CREATE TABLE tmp_drop (id INTEGER PRIMARY KEY, n INTEGER)")
+        .await
+        .expect("create tmp_drop");
+    exec::execute(&pool, "CREATE VIEW v_tmp AS SELECT id FROM tmp_drop")
+        .await
+        .expect("create v_tmp");
+
+    let names = |entries: &[rdbstudio_lib::model::TreeEntry]| {
+        entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>()
+    };
+    let before = meta::list_tables(&pool, None).await.expect("list before");
+    assert!(names(&before).contains(&"tmp_drop".to_string()));
+    assert!(names(&before).contains(&"v_tmp".to_string()));
+
+    // Drop the view first, then the table — same SQL the command emits.
+    let drop_view = data::drop_sql(DriverKind::Sqlite, None, "v_tmp", true);
+    let drop_table = data::drop_sql(DriverKind::Sqlite, None, "tmp_drop", false);
+    assert_eq!(drop_view, "DROP VIEW \"v_tmp\"");
+    assert_eq!(drop_table, "DROP TABLE \"tmp_drop\"");
+    alter::apply_statements(&pool, &[drop_view, drop_table])
+        .await
+        .expect("apply drops");
+
+    let after = meta::list_tables(&pool, None).await.expect("list after");
+    assert!(
+        !names(&after).contains(&"tmp_drop".to_string()),
+        "table should be gone"
+    );
+    assert!(
+        !names(&after).contains(&"v_tmp".to_string()),
+        "view should be gone"
+    );
+}
+
+#[tokio::test]
 async fn apply_edits_aborts_when_update_matches_multiple_rows() {
     // A PK-less table with duplicate rows: the grid sends every column as the
     // "pk", so a single-row edit's WHERE matches both copies. The backend must

@@ -83,6 +83,14 @@ fn qualified(driver: DriverKind, schema: Option<&str>, table: &str) -> String {
     }
 }
 
+/// Build a `DROP TABLE`/`DROP VIEW` statement with the identifier quoted for
+/// the driver. Used by the `drop_object` command; kept here (next to the other
+/// identifier helpers) so it can be unit-tested without a live pool.
+pub fn drop_sql(driver: DriverKind, schema: Option<&str>, name: &str, view: bool) -> String {
+    let kind = if view { "VIEW" } else { "TABLE" };
+    format!("DROP {} {}", kind, qualified(driver, schema, name))
+}
+
 fn placeholder(driver: DriverKind, n: usize) -> String {
     match driver {
         DriverKind::Postgres => format!("${}", n),
@@ -682,6 +690,26 @@ mod tests {
         assert_eq!(
             qualified(DriverKind::Mysql, Some("db1"), "users"),
             "`db1`.`users`"
+        );
+    }
+
+    #[test]
+    fn drop_sql_table_and_view_quote_and_qualify() {
+        assert_eq!(
+            drop_sql(DriverKind::Postgres, Some("public"), "users", false),
+            "DROP TABLE \"public\".\"users\""
+        );
+        assert_eq!(
+            drop_sql(DriverKind::Postgres, Some("public"), "v_users", true),
+            "DROP VIEW \"public\".\"v_users\""
+        );
+        assert_eq!(
+            drop_sql(DriverKind::Sqlite, None, "users", false),
+            "DROP TABLE \"users\""
+        );
+        assert_eq!(
+            drop_sql(DriverKind::Mysql, Some("db1"), "ord`ers", false),
+            "DROP TABLE `db1`.`ord``ers`"
         );
     }
 
