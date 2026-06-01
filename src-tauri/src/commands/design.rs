@@ -55,3 +55,29 @@ pub async fn apply_alter_ddl(
         .ok_or_else(|| AppError::msg("not connected"))?;
     alter::apply_statements(&pool, &statements).await
 }
+
+/// Drop a table or view. The identifier is quoted server-side (never trust the
+/// frontend to escape it) and the statement runs through the same path as ALTER
+/// so Redis pools are rejected and the DDL is transactional where supported.
+#[tauri::command]
+pub async fn drop_object(
+    state: State<'_, AppState>,
+    id: String,
+    schema: Option<String>,
+    name: String,
+    view: bool,
+) -> AppResult<()> {
+    let pool = state
+        .get_pool(&id)
+        .ok_or_else(|| AppError::msg("not connected"))?;
+    let driver = pool.driver();
+    let q = |s: &str| crate::db::data::quote_ident(driver, s);
+    let target = match schema.as_deref() {
+        Some(s) if !s.is_empty() => format!("{}.{}", q(s), q(&name)),
+        _ => q(&name),
+    };
+    let kind = if view { "VIEW" } else { "TABLE" };
+    let sql = format!("DROP {} {}", kind, target);
+    alter::apply_statements(&pool, &[sql]).await?;
+    Ok(())
+}

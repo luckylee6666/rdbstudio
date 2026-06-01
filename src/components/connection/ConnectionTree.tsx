@@ -46,6 +46,7 @@ import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { CreateTableDialog } from "./CreateTableDialog";
 import { PromptDialog } from "@/components/ui/PromptDialog";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useConnections, type ConnStatus } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
 import { copyText } from "@/lib/clipboard";
@@ -1155,7 +1156,11 @@ function Folder({
   const [ctx, setCtx] = useState<{ x: number; y: number; entry: TreeEntry } | null>(null);
   const [exportTarget, setExportTarget] = useState<TreeEntry | null>(null);
   const [importTarget, setImportTarget] = useState<TreeEntry | null>(null);
+  const [dropTarget, setDropTarget] = useState<TreeEntry | null>(null);
+  const [dropError, setDropError] = useState<string | null>(null);
   const openTab = useWorkspace((s) => s.openTab);
+  const closeTab = useWorkspace((s) => s.closeTab);
+  const refreshBranch = useConnections((s) => s.refreshBranch);
   const branch = useConnections((s) => s.branches[connectionId]);
   const loadMoreRedisKeys = useConnections((s) => s.loadMoreRedisKeys);
   const isKeysFolder = label === "Keys";
@@ -1224,7 +1229,29 @@ function Folder({
     void copyText(name);
   };
 
-  const buildMenu = (e: TreeEntry): MenuEntry[] => [
+  const confirmDrop = async (e: TreeEntry) => {
+    setDropError(null);
+    try {
+      if (isRedisKeyKind(e.kind)) {
+        // DEL via the command path; quote to match redis_ops::parse_args.
+        const q = `"${e.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+        await api.executeQuery(connectionId, `DEL ${q}`);
+        closeTab(`redis:${connectionId}:${e.name}`);
+      } else {
+        await api.dropObject(connectionId, e.name, schema, e.kind === "view");
+        // Close any data/designer tabs pointing at the now-gone object.
+        closeTab(`data:${connectionId}:${schema ?? ""}:${e.name}`);
+        closeTab(`design:${connectionId}:${schema ?? ""}:${e.name}`);
+      }
+      await refreshBranch(connectionId);
+      setDropTarget(null);
+    } catch (err) {
+      setDropError(String(err));
+    }
+  };
+
+  const buildMenu = (e: TreeEntry): MenuEntry[] => {
+    const items: MenuEntry[] = [
     {
       id: "open",
       label: t("tree.open_data"),
@@ -1267,7 +1294,31 @@ function Folder({
       shortcut: "⌘C",
       onClick: () => copyName(e.name),
     },
-  ];
+    ];
+    // Destructive delete: DROP TABLE/VIEW for SQL, DEL for Redis keys.
+    const dropLabel =
+      e.kind === "view"
+        ? t("tree.drop_view")
+        : isRedisKeyKind(e.kind)
+        ? t("tree.drop_key")
+        : t("tree.drop_table");
+    if (e.kind === "table" || e.kind === "view" || isRedisKeyKind(e.kind)) {
+      items.push(
+        { id: "sep3", label: "", separator: true },
+        {
+          id: "drop",
+          label: dropLabel,
+          icon: Trash2,
+          danger: true,
+          onClick: () => {
+            setDropError(null);
+            setDropTarget(e);
+          },
+        }
+      );
+    }
+    return items;
+  };
 
   return (
     <div>
@@ -1370,6 +1421,43 @@ function Folder({
         table={importTarget?.name ?? ""}
         schema={schema}
         onClose={() => setImportTarget(null)}
+      />
+      {dropTarget && (
+        <ConfirmDialog
+          open={!!dropTarget}
+          title={t("tree.drop.title", {
+            kind: isRedisKeyKind(dropTarget.kind)
+              ? t("tree.kind.key")
+              : dropTarget.kind === "view"
+              ? t("tree.kind.view")
+              : t("tree.kind.table"),
+          })}
+          message={
+            isRedisKeyKind(dropTarget.kind)
+              ? t("tree.drop.key_confirm", { name: dropTarget.name })
+              : t("tree.drop.confirm", {
+                  kind:
+                    dropTarget.kind === "view"
+                      ? t("tree.kind.view")
+                      : t("tree.kind.table"),
+                  name: dropTarget.name,
+                })
+          }
+          confirmLabel={t("common.delete")}
+          cancelLabel={t("common.cancel")}
+          danger
+          onConfirm={() => void confirmDrop(dropTarget)}
+          onClose={() => setDropTarget(null)}
+        />
+      )}
+      <ConfirmDialog
+        open={!!dropError}
+        title={t("tree.drop.title", { kind: t("tree.kind.table") })}
+        message={t("tree.drop.failed", { error: dropError ?? "" })}
+        confirmLabel="OK"
+        cancelLabel={t("common.cancel")}
+        onConfirm={() => setDropError(null)}
+        onClose={() => setDropError(null)}
       />
     </div>
   );

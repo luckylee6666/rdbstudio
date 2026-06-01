@@ -49,6 +49,7 @@ pub fn run() {
             commands::design::show_ddl,
             commands::design::generate_alter_ddl,
             commands::design::apply_alter_ddl,
+            commands::design::drop_object,
             commands::io::export_table,
             commands::io::import_csv,
             commands::io::preview_csv,

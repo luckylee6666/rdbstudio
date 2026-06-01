@@ -108,6 +108,8 @@ export const api = {
     }),
   applyAlterDdl: (id: string, statements: string[]) =>
     invoke<string[]>("apply_alter_ddl", { id, statements }),
+  dropObject: (id: string, name: string, schema?: string, view = false) =>
+    invoke<void>("drop_object", { id, name, schema: schema ?? null, view }),
   describeSchema: (id: string, schema?: string, limit?: number) =>
     invoke<TableDescription[]>("describe_schema", {
       id,

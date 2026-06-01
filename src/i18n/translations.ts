@@ -124,6 +124,18 @@ const en: Dict = {
   "tree.open_er": "Open ER diagram",
   "tree.new_query": "New query",
   "tree.new_table": "New table…",
+  "tree.drop_table": "Drop table…",
+  "tree.drop_view": "Drop view…",
+  "tree.drop_key": "Delete key…",
+  "tree.drop.title": "Drop {kind}",
+  "tree.drop.confirm":
+    "Permanently drop {kind} \"{name}\"? This cannot be undone and all its data will be lost.",
+  "tree.drop.key_confirm":
+    "Permanently delete key \"{name}\"? This cannot be undone.",
+  "tree.drop.failed": "Drop failed: {error}",
+  "tree.kind.table": "table",
+  "tree.kind.view": "view",
+  "tree.kind.key": "key",
 
   // create-table dialog
   "create.table.title": "Create table",
@@ -476,6 +488,17 @@ const zh: Dict = {
   "tree.open_er": "打开 ER 图",
   "tree.new_query": "新建查询",
   "tree.new_table": "新建表…",
+  "tree.drop_table": "删除表…",
+  "tree.drop_view": "删除视图…",
+  "tree.drop_key": "删除 key…",
+  "tree.drop.title": "删除{kind}",
+  "tree.drop.confirm":
+    "确定永久删除{kind}「{name}」？此操作不可撤销，表内所有数据都会丢失。",
+  "tree.drop.key_confirm": "确定永久删除 key「{name}」？此操作不可撤销。",
+  "tree.drop.failed": "删除失败：{error}",
+  "tree.kind.table": "表",
+  "tree.kind.view": "视图",
+  "tree.kind.key": "key",
 
   // create-table dialog
   "create.table.title": "新建表",
