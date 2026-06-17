@@ -10,6 +10,14 @@ struct StoreFile {
     connections: Vec<ConnectionConfig>,
 }
 
+fn strip_connection_secrets(cfg: &mut ConnectionConfig) -> bool {
+    let mut stripped = cfg.password.take().is_some();
+    if let Some(ssh) = cfg.ssh.as_mut() {
+        stripped |= ssh.password.take().is_some();
+    }
+    stripped
+}
+
 #[derive(Clone)]
 pub struct ConnectionStore {
     path: PathBuf,
@@ -20,16 +28,24 @@ impl ConnectionStore {
     pub fn load(app_data: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(app_data)?;
         let path = app_data.join("connections.json");
-        let inner = if path.exists() {
+        let mut inner = if path.exists() {
             let raw = std::fs::read(&path)?;
             serde_json::from_slice(&raw).unwrap_or_default()
         } else {
             StoreFile::default()
         };
-        Ok(Self {
+        let mut had_plaintext_secrets = false;
+        for conn in &mut inner.connections {
+            had_plaintext_secrets |= strip_connection_secrets(conn);
+        }
+        let store = Self {
             path,
             inner: Arc::new(RwLock::new(inner)),
-        })
+        };
+        if had_plaintext_secrets {
+            store.flush()?;
+        }
+        Ok(store)
     }
 
     pub fn list(&self) -> Vec<ConnectionConfig> {
@@ -39,7 +55,7 @@ impl ConnectionStore {
             .iter()
             .map(|c| {
                 let mut c = c.clone();
-                c.password = None;
+                let _ = strip_connection_secrets(&mut c);
                 c
             })
             .collect()
@@ -61,7 +77,7 @@ impl ConnectionStore {
         let to_return = {
             let mut guard = self.inner.write();
             let mut persisted = cfg.clone();
-            persisted.password = None;
+            let _ = strip_connection_secrets(&mut persisted);
             if let Some(existing) = guard
                 .connections
                 .iter_mut()
@@ -96,6 +112,108 @@ impl ConnectionStore {
         let json = serde_json::to_vec_pretty(&*guard)?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &self.path).map_err(AppError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DriverKind, SshConfig};
+
+    fn connection_with_secrets() -> ConnectionConfig {
+        ConnectionConfig {
+            id: "conn-1".into(),
+            name: "Test".into(),
+            driver: DriverKind::Postgres,
+            host: Some("localhost".into()),
+            port: Some(5432),
+            database: Some("postgres".into()),
+            username: Some("user".into()),
+            file_path: None,
+            color: None,
+            pinned: false,
+            group: None,
+            ssl_mode: None,
+            ssh: Some(SshConfig {
+                host: "bastion".into(),
+                port: 22,
+                username: "ssh-user".into(),
+                auth: Some("password".into()),
+                key_path: None,
+                password: Some("ssh-secret".into()),
+            }),
+            password: Some("db-secret".into()),
+        }
+    }
+
+    #[test]
+    fn connection_store_never_persists_or_lists_nested_ssh_password() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConnectionStore::load(dir.path()).expect("load store");
+        let saved = store
+            .upsert(connection_with_secrets())
+            .expect("save connection");
+
+        assert!(saved.password.is_none());
+        assert!(saved.ssh.as_ref().and_then(|s| s.password.as_ref()).is_none());
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("connections.json")).expect("read store");
+        assert!(!raw.contains("db-secret"), "{raw}");
+        assert!(!raw.contains("ssh-secret"), "{raw}");
+
+        let listed = store.list();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].password.is_none());
+        assert!(listed[0]
+            .ssh
+            .as_ref()
+            .and_then(|s| s.password.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn connection_store_load_scrubs_plaintext_secrets_from_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("connections.json"),
+            r#"{
+              "connections": [
+                {
+                  "id": "conn-1",
+                  "name": "DB secret",
+                  "driver": "postgres",
+                  "username": "user",
+                  "password": "old-db-secret"
+                },
+                {
+                  "id": "conn-2",
+                  "name": "SSH secret",
+                  "driver": "postgres",
+                  "username": "user",
+                  "ssh": {
+                    "host": "bastion",
+                    "username": "ssh-user",
+                    "password": "old-ssh-secret"
+                  }
+                }
+              ]
+            }"#,
+        )
+        .expect("write old store");
+
+        let store = ConnectionStore::load(dir.path()).expect("load old store");
+        let listed = store.list();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|c| c.password.is_none()));
+        assert!(listed
+            .iter()
+            .all(|c| c.ssh.as_ref().and_then(|s| s.password.as_ref()).is_none()));
+
+        let raw =
+            std::fs::read_to_string(dir.path().join("connections.json")).expect("read store");
+        assert!(!raw.contains("old-db-secret"), "{raw}");
+        assert!(!raw.contains("old-ssh-secret"), "{raw}");
     }
 }
 
@@ -175,4 +293,3 @@ impl SnippetStore {
         std::fs::rename(&tmp, &self.path).map_err(AppError::from)
     }
 }
-

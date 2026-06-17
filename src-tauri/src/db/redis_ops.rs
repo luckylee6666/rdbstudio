@@ -118,7 +118,7 @@ pub async fn execute(handle: &RedisHandle, command_line: &str) -> AppResult<Quer
 }
 
 fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
-    let cmd_name = args.get(0).map(|s| s.as_str()).unwrap_or("");
+    let cmd_name = args.first().map(|s| s.as_str()).unwrap_or("");
     let elapsed = start.elapsed().as_millis() as u64;
     match v {
         // Status / Okay / Nil → single-cell "result" column so the user
@@ -202,7 +202,7 @@ fn is_map_reply(cmd: &str, args: &[String]) -> bool {
     let cmd_upper = cmd.to_ascii_uppercase();
     let cmd_str = cmd_upper.as_str();
     if cmd_str == "ZRANGE" || cmd_str == "ZREVRANGE" {
-        args.iter().any(|a| a.to_ascii_uppercase() == "WITHSCORES")
+        args.iter().any(|a| a.eq_ignore_ascii_case("WITHSCORES"))
     } else {
         matches!(
             cmd_str,
