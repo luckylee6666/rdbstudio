@@ -114,10 +114,11 @@ pub async fn execute(handle: &RedisHandle, command_line: &str) -> AppResult<Quer
     }
     let mut conn = handle.conn();
     let reply: RVal = cmd.query_async(&mut conn).await?;
-    Ok(reply_to_table(&args[0], reply, start))
+    Ok(reply_to_table(&args, reply, start))
 }
 
-fn reply_to_table(cmd_name: &str, v: RVal, start: Instant) -> QueryResult {
+fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
+    let cmd_name = args.get(0).map(|s| s.as_str()).unwrap_or("");
     let elapsed = start.elapsed().as_millis() as u64;
     match v {
         // Status / Okay / Nil → single-cell "result" column so the user
@@ -131,7 +132,7 @@ fn reply_to_table(cmd_name: &str, v: RVal, start: Instant) -> QueryResult {
             // HGETALL / CONFIG GET return a flat array of [k, v, k, v, …];
             // surface as a key/value table when the command is known to be
             // map-shaped, otherwise as a 1-col positional list.
-            if is_map_reply(cmd_name) && items.len() % 2 == 0 {
+            if is_map_reply(cmd_name, args) && items.len() % 2 == 0 {
                 let rows: Vec<Vec<Json>> = items
                     .chunks(2)
                     .map(|p| vec![rval_to_json(&p[0]), rval_to_json(&p[1])])
@@ -197,11 +198,17 @@ fn bytes_to_json(b: &[u8]) -> Json {
     }
 }
 
-fn is_map_reply(cmd: &str) -> bool {
-    matches!(
-        cmd.to_ascii_uppercase().as_str(),
-        "HGETALL" | "CONFIG" | "XRANGE" | "XREVRANGE" | "CLIENT"
-    )
+fn is_map_reply(cmd: &str, args: &[String]) -> bool {
+    let cmd_upper = cmd.to_ascii_uppercase();
+    let cmd_str = cmd_upper.as_str();
+    if cmd_str == "ZRANGE" || cmd_str == "ZREVRANGE" {
+        args.iter().any(|a| a.to_ascii_uppercase() == "WITHSCORES")
+    } else {
+        matches!(
+            cmd_str,
+            "HGETALL" | "CONFIG" | "XRANGE" | "XREVRANGE" | "CLIENT"
+        )
+    }
 }
 
 /// Whitespace-split with simple "double-quoted" literal support so users
@@ -330,14 +337,14 @@ mod tests {
 
     #[test]
     fn reply_to_table_okay_yields_single_ok_cell() {
-        let r = reply_to_table("SET", RVal::Okay, Instant::now());
+        let r = reply_to_table(&["SET".into()], RVal::Okay, Instant::now());
         assert_eq!(r.columns.len(), 1);
         assert_eq!(r.rows[0][0].as_str(), Some("OK"));
     }
 
     #[test]
     fn reply_to_table_int_yields_single_int_cell() {
-        let r = reply_to_table("INCR", RVal::Int(7), Instant::now());
+        let r = reply_to_table(&["INCR".into()], RVal::Int(7), Instant::now());
         assert_eq!(r.rows[0][0].as_i64(), Some(7));
     }
 
@@ -349,7 +356,7 @@ mod tests {
             RVal::BulkString(b"age".to_vec()),
             RVal::BulkString(b"30".to_vec()),
         ]);
-        let r = reply_to_table("HGETALL", arr, Instant::now());
+        let r = reply_to_table(&["HGETALL".into()], arr, Instant::now());
         assert_eq!(r.columns.len(), 2);
         assert_eq!(r.columns[0].name, "field");
         assert_eq!(r.rows.len(), 2);
@@ -363,14 +370,34 @@ mod tests {
             RVal::BulkString(b"a".to_vec()),
             RVal::BulkString(b"b".to_vec()),
         ]);
-        let r = reply_to_table("KEYS", arr, Instant::now());
+        let r = reply_to_table(&["KEYS".into()], arr, Instant::now());
         assert_eq!(r.columns.len(), 1);
         assert_eq!(r.rows.len(), 2);
     }
 
     #[test]
     fn reply_to_table_nil_yields_null_cell() {
-        let r = reply_to_table("GET", RVal::Nil, Instant::now());
+        let r = reply_to_table(&["GET".into()], RVal::Nil, Instant::now());
         assert!(r.rows[0][0].is_null());
+    }
+
+    #[test]
+    fn reply_to_table_zrange_withscores_pivots_to_member_score_table() {
+        let arr = RVal::Array(vec![
+            RVal::BulkString(b"Alice".to_vec()),
+            RVal::BulkString(b"100".to_vec()),
+            RVal::BulkString(b"Bob".to_vec()),
+            RVal::BulkString(b"95".to_vec()),
+        ]);
+        let r = reply_to_table(
+            &["ZRANGE".into(), "key".into(), "0".into(), "-1".into(), "WITHSCORES".into()],
+            arr,
+            Instant::now()
+        );
+        assert_eq!(r.columns.len(), 2);
+        assert_eq!(r.columns[0].name, "field");
+        assert_eq!(r.rows.len(), 2);
+        assert_eq!(r.rows[0][0].as_str(), Some("Alice"));
+        assert_eq!(r.rows[0][1].as_str(), Some("100"));
     }
 }

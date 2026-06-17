@@ -34,6 +34,7 @@ export function ExportDialog({
   const [delimiter, setDelimiter] = useState(",");
   const [header, setHeader] = useState(true);
   const [quoteAll, setQuoteAll] = useState(false);
+  const [includeDdl, setIncludeDdl] = useState(true);
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<ExportReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +74,7 @@ export function ExportDialog({
           delimiter,
           include_header: header,
           quote_all: quoteAll,
+          include_ddl: includeDdl,
         },
         schema
       );
@@ -189,9 +191,16 @@ export function ExportDialog({
         )}
 
         {format === "sql" && (
-          <p className="text-[12px] text-muted-foreground">
-            {t("export.sql_note")}
-          </p>
+          <div className="space-y-3 rounded-lg border border-border/70 bg-surface-muted/30 p-3">
+            <Check
+              label={t("export.include_ddl")}
+              checked={includeDdl}
+              onChange={setIncludeDdl}
+            />
+            <p className="text-[12px] text-muted-foreground">
+              {t("export.sql_note")}
+            </p>
+          </div>
         )}
       </div>
     </Modal>

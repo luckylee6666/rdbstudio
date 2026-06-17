@@ -44,9 +44,42 @@ pub struct ConnectionConfig {
     /// Single-level only; the UI does not nest groups.
     #[serde(default)]
     pub group: Option<String>,
+    /// TLS mode for PG/MySQL/Redis. None/"disable" = plaintext (default),
+    /// "require" = encrypted without cert verification, "verify-full" =
+    /// encrypted + verify server cert/hostname against system roots.
+    /// Ignored for SQLite.
+    #[serde(default)]
+    pub ssl_mode: Option<String>,
+    /// Optional SSH tunnel; when present, connections route through it.
+    #[serde(default)]
+    pub ssh: Option<SshConfig>,
     /// Transient: present on save/test requests, never persisted to disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+}
+
+/// SSH tunnel settings. The DB host/port in the parent config are resolved
+/// *from the SSH server's perspective* and forwarded to a local random port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConfig {
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    pub username: String,
+    /// "password" or "key".
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// Path to a private key file (auth = "key").
+    #[serde(default)]
+    pub key_path: Option<String>,
+    /// Transient: SSH password or key passphrase. Stored in the keychain under
+    /// "<id>::ssh", never persisted to the JSON config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,3 +113,13 @@ pub struct ConnectionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snippet {
+    pub id: String,
+    pub name: String,
+    pub sql: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+

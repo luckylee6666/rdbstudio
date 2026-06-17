@@ -13,6 +13,21 @@ export interface ConnectionConfig {
   pinned?: boolean;
   /** Optional sidebar group label. Empty/undefined = ungrouped. */
   group?: string | null;
+  /** TLS mode for PG/MySQL/Redis: "disable" | "require" | "verify-full". */
+  ssl_mode?: string | null;
+  /** Optional SSH tunnel; connections route through it when set. */
+  ssh?: SshConfig | null;
+  password?: string | null;
+}
+
+export interface SshConfig {
+  host: string;
+  port?: number;
+  username: string;
+  /** "password" | "key". */
+  auth?: string | null;
+  key_path?: string | null;
+  /** Transient: SSH password or key passphrase, never persisted. */
   password?: string | null;
 }
 
@@ -168,6 +183,8 @@ export interface ExportOptions {
   include_header?: boolean;
   quote_all?: boolean;
   batch_size?: number;
+  /** SQL format only: prepend CREATE TABLE DDL to make a self-contained dump. */
+  include_ddl?: boolean;
 }
 
 export interface ExportReport {
@@ -223,3 +240,11 @@ export interface WorkspaceTab {
   redisKey?: string;
   redisType?: string;
 }
+
+export interface Snippet {
+  id: string;
+  name: string;
+  sql: string;
+  description?: string;
+}
+

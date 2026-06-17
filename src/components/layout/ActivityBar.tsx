@@ -6,6 +6,7 @@ import {
   Star,
   Terminal,
   Workflow,
+  FileCode,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useLayout, type ActivityId } from "@/store/layout";
@@ -18,6 +19,7 @@ const items: { id: ActivityId; icon: typeof Database; labelKey: string }[] = [
   { id: "history", icon: History, labelKey: "activity.history" },
   { id: "favorites", icon: Star, labelKey: "activity.favorites" },
   { id: "models", icon: Workflow, labelKey: "activity.models" },
+  { id: "snippets", icon: FileCode, labelKey: "activity.snippets" },
 ];
 
 export function ActivityBar() {

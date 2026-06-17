@@ -5,6 +5,7 @@ pub mod io;
 pub mod meta;
 pub mod query;
 pub mod schema;
+pub mod snippets;
 
 #[tauri::command]
 pub fn app_version() -> &'static str {

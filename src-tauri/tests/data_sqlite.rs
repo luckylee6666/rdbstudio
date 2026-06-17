@@ -163,3 +163,56 @@ async fn preview_edit_sql_postgres_numbered_placeholders_replaced() {
     assert!(!sql.contains("$1"), "placeholder leaked: {}", sql);
     assert!(!sql.contains("$2"), "placeholder leaked: {}", sql);
 }
+
+#[tokio::test]
+async fn preview_edit_sql_with_special_chars_in_literal() {
+    let edit = Edit::Update {
+        pk: vec![("id".into(), json!(1))],
+        set: vec![
+            ("name".into(), json!("hello?")),
+            ("age".into(), json!(42)),
+        ],
+    };
+    let sql = data::preview_edit_sql(DriverKind::Sqlite, None, "users", &edit);
+    assert!(sql.contains("'hello?'"), "got: {}", sql);
+    assert!(sql.contains("42"), "got: {}", sql);
+    assert_eq!(sql, "UPDATE \"users\" SET \"name\" = 'hello?', \"age\" = 42 WHERE \"id\" = 1");
+}
+
+#[tokio::test]
+async fn preview_edit_sql_postgres_many_placeholders() {
+    let edit = Edit::Insert {
+        values: vec![
+            ("c1".into(), json!("a")),
+            ("c2".into(), json!("b")),
+            ("c3".into(), json!("c")),
+            ("c4".into(), json!("d")),
+            ("c5".into(), json!("e")),
+            ("c6".into(), json!("f")),
+            ("c7".into(), json!("g")),
+            ("c8".into(), json!("h")),
+            ("c9".into(), json!("i")),
+            ("c10".into(), json!("j")),
+            ("c11".into(), json!("k")),
+        ],
+    };
+    let sql = data::preview_edit_sql(DriverKind::Postgres, Some("public"), "users", &edit);
+    assert!(sql.contains("'j'"), "got: {}", sql);
+    assert!(sql.contains("'k'"), "got: {}", sql);
+}
+
+#[tokio::test]
+async fn preview_edit_sql_postgres_literal_with_placeholder() {
+    let edit = Edit::Update {
+        pk: vec![("id".into(), json!(1))],
+        set: vec![
+            ("name".into(), json!("my value $2")),
+            ("age".into(), json!(42)),
+        ],
+    };
+    let sql = data::preview_edit_sql(DriverKind::Postgres, Some("public"), "users", &edit);
+    assert_eq!(sql, "UPDATE \"public\".\"users\" SET \"name\" = 'my value $2', \"age\" = 42 WHERE \"id\" = 1");
+}
+
+
+

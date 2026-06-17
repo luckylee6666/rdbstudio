@@ -7,17 +7,22 @@ import {
   Play,
   Sparkles,
   TableProperties,
+  FileCode,
 } from "lucide-react";
 import { format as formatSql } from "sql-formatter";
 import type { WorkspaceTab } from "@/types";
 import { api, type QueryResult } from "@/lib/api";
 import { useConnections } from "@/store/connections";
+import { useWorkspace } from "@/store/workspace";
 import { CodeMirrorEditor } from "@/components/editor/CodeMirror";
 import { DataGrid, type GridColumn } from "@/components/grid/DataGrid";
 import { saveTextFile, toCSV } from "@/lib/csv";
 import { explainWrap, splitStatements } from "@/lib/sql";
+import { getSchemaColumns, setSchemaColumns } from "@/lib/schemaCache";
 import { cn } from "@/lib/cn";
 import { useT } from "@/store/i18n";
+import { Modal } from "@/components/ui/Modal";
+import { Button } from "@/components/ui/Button";
 
 type RunState =
   | { kind: "idle" }
@@ -57,6 +62,50 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const lastRunRef = useRef<number>(0);
   const t = useT();
 
+  const [saveSnippetOpen, setSaveSnippetOpen] = useState(false);
+  const [snippetName, setSnippetName] = useState("");
+  const [snippetDesc, setSnippetDesc] = useState("");
+  const [snippetError, setSnippetError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleInsert = (e: Event) => {
+      const customEvent = e as CustomEvent<string>;
+      if (useWorkspace.getState().activeTabId === tab.id) {
+        setSql((prev) => {
+          const trimmed = prev.trim();
+          if (!trimmed || trimmed === INITIAL.trim()) {
+            return customEvent.detail;
+          }
+          return prev + "\n\n" + customEvent.detail;
+        });
+      }
+    };
+    window.addEventListener("insert-sql", handleInsert as EventListener);
+    return () => window.removeEventListener("insert-sql", handleInsert as EventListener);
+  }, [tab.id]);
+
+  const handleSaveSnippet = async () => {
+    if (!snippetName.trim()) {
+      setSnippetError("Name is required");
+      return;
+    }
+    try {
+      await api.saveSnippet({
+        id: "",
+        name: snippetName.trim(),
+        sql: sql.trim(),
+        description: snippetDesc.trim() || undefined,
+      });
+      setSaveSnippetOpen(false);
+      setSnippetName("");
+      setSnippetDesc("");
+      setSnippetError(null);
+      window.dispatchEvent(new Event("snippets-updated"));
+    } catch (e) {
+      setSnippetError(String(e));
+    }
+  };
+
   const connected = useMemo(
     () => connections.filter((c) => statusMap[c.id] === "connected"),
     [connections, statusMap]
@@ -78,20 +127,63 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   );
 
   // Schema hint for SQL autocomplete: { tableName: [colName, ...] }.
-  // We have table names from the loaded branches; column names lazily fill in
-  // as the user opens table tabs (cached in branches[id].columns is not stored,
-  // so for now we ship table-name completion only — already a big productivity win).
+  // Table names come from the loaded branches (covers every loaded schema);
+  // column names are fetched once per connection via describe_schema and merged
+  // in, so completion suggests both `table` and `table.column` / columns.
   const branches = useConnections((s) => s.branches);
+  const [colMap, setColMap] = useState<Record<string, string[]>>({});
+
+  // Fetch column metadata for the target connection (cached per connection).
+  useEffect(() => {
+    if (!targetId) {
+      setColMap({});
+      return;
+    }
+    const cached = getSchemaColumns(targetId);
+    if (cached) {
+      setColMap(cached);
+      return;
+    }
+    // Redis has no tabular schema; skip the describe round-trip.
+    if (targetCfg?.driver === "redis") {
+      setColMap({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const tables = await api.describeSchema(targetId, undefined, 200);
+        const map: Record<string, string[]> = {};
+        for (const tbl of tables) {
+          map[tbl.name] = tbl.columns.map((c) => c.name);
+        }
+        setSchemaColumns(targetId, map);
+        if (!cancelled) setColMap(map);
+      } catch {
+        // Autocomplete is best-effort; ignore describe failures.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [targetId, targetCfg?.driver]);
+
   const sqlSchema = useMemo<Record<string, string[]>>(() => {
     if (!targetId) return {};
     const b = branches[targetId];
-    if (!b?.tables) return {};
     const out: Record<string, string[]> = {};
-    for (const entries of Object.values(b.tables)) {
-      for (const e of entries) out[e.name] = [];
+    // Start from loaded tree table names (all schemas), filling columns where known.
+    if (b?.tables) {
+      for (const entries of Object.values(b.tables)) {
+        for (const e of entries) out[e.name] = colMap[e.name] ?? [];
+      }
+    }
+    // Include any described tables not yet present in the tree cache.
+    for (const [name, cols] of Object.entries(colMap)) {
+      if (!(name in out)) out[name] = cols;
     }
     return out;
-  }, [branches, targetId]);
+  }, [branches, targetId, colMap]);
 
   // Clear stale "no target" errors as soon as a target becomes available
   // (e.g. user just connected to a DB after opening this tab).
@@ -272,6 +364,15 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           <Sparkles className="h-3.5 w-3.5" />
           Format
         </button>
+        <button
+          onClick={() => setSaveSnippetOpen(true)}
+          disabled={!sql.trim()}
+          title="Save as Snippet"
+          className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+        >
+          <FileCode className="h-3.5 w-3.5" />
+          Save Snippet
+        </button>
         <div className="mx-2 h-4 w-px bg-border" />
         <label className="flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
           {t("query.toolbar.target")}
@@ -353,6 +454,55 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           </div>
         </div>
       </div>
+
+      <Modal
+        open={saveSnippetOpen}
+        onClose={() => setSaveSnippetOpen(false)}
+        title={t("sidebar.snippets.new")}
+        width={460}
+        footer={
+          <>
+            <Button onClick={() => setSaveSnippetOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="primary" onClick={handleSaveSnippet}>
+              {t("common.save")}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3.5">
+          {snippetError && (
+            <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+              {snippetError}
+            </div>
+          )}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[12px] font-medium text-foreground">
+              {t("sidebar.snippets.name")} *
+            </label>
+            <input
+              type="text"
+              value={snippetName}
+              onChange={(e) => setSnippetName(e.target.value)}
+              className="h-8 rounded-md border border-border/70 bg-surface px-3 text-[12.5px] text-foreground focus:border-brand/60 focus:outline-none"
+              placeholder="e.g. Find users by email"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[12px] font-medium text-foreground">
+              {t("sidebar.snippets.desc")}
+            </label>
+            <input
+              type="text"
+              value={snippetDesc}
+              onChange={(e) => setSnippetDesc(e.target.value)}
+              className="h-8 rounded-md border border-border/70 bg-surface px-3 text-[12.5px] text-foreground focus:border-brand/60 focus:outline-none"
+              placeholder="Optional description"
+            />
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

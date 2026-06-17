@@ -33,6 +33,8 @@ fn cfg_for(path: &std::path::Path) -> ConnectionConfig {
         color: None,
         pinned: false,
         group: None,
+        ssl_mode: None,
+        ssh: None,
         password: None,
     }
 }
@@ -304,6 +306,7 @@ async fn export_csv_then_import_csv_round_trip() {
             include_header: true,
             quote_all: false,
             batch_size: 100,
+            include_ddl: false,
         },
     )
     .await

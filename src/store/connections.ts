@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api } from "@/lib/api";
+import { clearSchemaColumns } from "@/lib/schemaCache";
 import type { ConnectionConfig, TreeEntry } from "@/types";
 
 type ConnStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -61,6 +62,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   refreshBranch: async (id) => {
+    clearSchemaColumns(id);
     const branches = { ...get().branches };
     delete branches[id];
     set({ branches });
@@ -107,6 +109,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
 
   disconnect: async (id) => {
     await api.disconnect(id);
+    clearSchemaColumns(id);
     const branches = { ...get().branches };
     delete branches[id];
     set({

@@ -98,3 +98,81 @@ impl ConnectionStore {
         std::fs::rename(&tmp, &self.path).map_err(AppError::from)
     }
 }
+
+use crate::model::Snippet;
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct SnippetsFile {
+    #[serde(default)]
+    snippets: Vec<Snippet>,
+}
+
+#[derive(Clone)]
+pub struct SnippetStore {
+    path: PathBuf,
+    inner: Arc<RwLock<SnippetsFile>>,
+}
+
+impl SnippetStore {
+    pub fn load(app_data: &Path) -> AppResult<Self> {
+        std::fs::create_dir_all(app_data)?;
+        let path = app_data.join("snippets.json");
+        let inner = if path.exists() {
+            let raw = std::fs::read(&path)?;
+            serde_json::from_slice(&raw).unwrap_or_default()
+        } else {
+            SnippetsFile::default()
+        };
+        Ok(Self {
+            path,
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    pub fn list(&self) -> Vec<Snippet> {
+        self.inner.read().snippets.clone()
+    }
+
+    pub fn upsert(&self, mut snippet: Snippet) -> AppResult<Snippet> {
+        if snippet.id.is_empty() {
+            snippet.id = uuid::Uuid::new_v4().to_string();
+        }
+        let to_return = {
+            let mut guard = self.inner.write();
+            if let Some(existing) = guard
+                .snippets
+                .iter_mut()
+                .find(|s| s.id == snippet.id)
+            {
+                *existing = snippet.clone();
+            } else {
+                guard.snippets.push(snippet.clone());
+            }
+            snippet
+        };
+        self.flush()?;
+        Ok(to_return)
+    }
+
+    pub fn remove(&self, id: &str) -> AppResult<bool> {
+        let removed = {
+            let mut guard = self.inner.write();
+            let len = guard.snippets.len();
+            guard.snippets.retain(|s| s.id != id);
+            guard.snippets.len() != len
+        };
+        if removed {
+            self.flush()?;
+        }
+        Ok(removed)
+    }
+
+    fn flush(&self) -> AppResult<()> {
+        let guard = self.inner.read();
+        let tmp = self.path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(&*guard)?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.path).map_err(AppError::from)
+    }
+}
+

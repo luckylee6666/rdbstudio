@@ -460,8 +460,6 @@ function RedisTable({
         return ["field", "value"];
       case "zset":
         return ["member", "score"];
-      case "list":
-        return ["index", "value"];
       case "set":
         return ["member"];
       default:

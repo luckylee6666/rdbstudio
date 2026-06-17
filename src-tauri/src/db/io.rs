@@ -29,6 +29,10 @@ pub struct ExportOptions {
     pub quote_all: bool,
     #[serde(default = "default_batch")]
     pub batch_size: u32,
+    /// SQL format only: prepend the table's CREATE TABLE DDL so the file is a
+    /// self-contained dump rather than bare INSERTs. Ignored for CSV/JSON.
+    #[serde(default)]
+    pub include_ddl: bool,
 }
 
 fn default_delim() -> char {
@@ -62,6 +66,21 @@ pub async fn export_table(
     let mut rows: u64 = 0;
     let mut first = true;
 
+    // SQL dump: emit the CREATE TABLE statement up front (best-effort — a
+    // describe failure shouldn't abort the data export).
+    if let ExportFormat::Sql = opts.format {
+        if opts.include_ddl {
+            if let Ok(ddl) = crate::db::design::ddl(pool, schema, table).await {
+                let ddl = ddl.trim_end();
+                w.write_all(ddl.as_bytes())?;
+                if !ddl.ends_with(';') {
+                    w.write_all(b";")?;
+                }
+                w.write_all(b"\n\n")?;
+            }
+        }
+    }
+
     if let ExportFormat::Json = opts.format { w.write_all(b"[\n")? }
 
     loop {
@@ -82,7 +101,7 @@ pub async fn export_table(
         if r.rows.is_empty() {
             break;
         }
-        write_rows(&mut w, &r, opts, rows, schema, table)?;
+        write_rows(&mut w, &r, opts, rows, schema, table, pool.driver())?;
         rows += r.rows.len() as u64;
         if r.rows.len() < opts.batch_size as usize {
             break;
@@ -129,6 +148,7 @@ fn write_rows(
     prior_rows: u64,
     schema: Option<&str>,
     table: &str,
+    driver: DriverKind,
 ) -> AppResult<()> {
     match opts.format {
         ExportFormat::Csv => {
@@ -160,7 +180,9 @@ fn write_rows(
             if r.columns.is_empty() {
                 return Ok(());
             }
-            let driver = DriverKind::Postgres; // output uses double-quoted idents (PG/SQLite style)
+            // Quote identifiers in the source pool's dialect (MySQL → backticks,
+            // PG/SQLite → double quotes) so a MySQL dump round-trips and its
+            // INSERTs match the backtick-quoted CREATE TABLE prepended above.
             let target = match schema {
                 Some(s) if !s.is_empty() => format!(
                     "{}.{}",

@@ -6,11 +6,55 @@ pub mod design;
 pub mod io;
 pub mod alter;
 pub mod redis_ops;
+pub mod ssh;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{ConnectionConfig, DriverKind};
 
 pub fn build_url(cfg: &ConnectionConfig) -> AppResult<String> {
+    build_url_with(cfg, None)
+}
+
+/// The DB host/port a tunnel should forward to (from the SSH server's view),
+/// applying driver defaults. Not meaningful for SQLite.
+pub fn target_addr(cfg: &ConnectionConfig) -> (String, u16) {
+    let host = cfg.host.as_deref().unwrap_or("localhost").to_string();
+    let port = cfg
+        .port
+        .or_else(|| cfg.driver.default_port())
+        .unwrap_or(0);
+    (host, port)
+}
+
+/// Normalized TLS mode. `verify` controls whether the server certificate and
+/// hostname are checked; when `None` the connection is plaintext.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SslMode {
+    Require,
+    VerifyFull,
+}
+
+pub fn ssl_mode_of(cfg: &ConnectionConfig) -> Option<SslMode> {
+    match cfg.ssl_mode.as_deref().map(str::trim) {
+        Some("require") => Some(SslMode::Require),
+        Some("verify-full") | Some("verify_full") => Some(SslMode::VerifyFull),
+        _ => None,
+    }
+}
+
+/// Build a connection URL. When `addr_override` is set (an SSH tunnel's local
+/// endpoint) it replaces the configured host/port, and certificate hostname
+/// verification is relaxed to "require" since the client is dialing localhost.
+pub fn build_url_with(
+    cfg: &ConnectionConfig,
+    addr_override: Option<(&str, u16)>,
+) -> AppResult<String> {
+    // Through a tunnel we connect to 127.0.0.1, so a cert's hostname can never
+    // match — downgrade verify-full to encrypt-only there.
+    let ssl = match (ssl_mode_of(cfg), addr_override.is_some()) {
+        (Some(SslMode::VerifyFull), true) => Some(SslMode::Require),
+        (other, _) => other,
+    };
     match cfg.driver {
         DriverKind::Sqlite => {
             let path = cfg
@@ -21,8 +65,8 @@ pub fn build_url(cfg: &ConnectionConfig) -> AppResult<String> {
             Ok(format!("sqlite://{}?mode=rwc", path))
         }
         DriverKind::Postgres => {
-            let host = cfg.host.as_deref().unwrap_or("localhost");
-            let port = cfg.port.unwrap_or(5432);
+            let (host, port) = addr_override
+                .unwrap_or_else(|| (cfg.host.as_deref().unwrap_or("localhost"), cfg.port.unwrap_or(5432)));
             let db = cfg
                 .database
                 .as_deref()
@@ -33,36 +77,54 @@ pub fn build_url(cfg: &ConnectionConfig) -> AppResult<String> {
                 .as_deref()
                 .ok_or_else(|| AppError::msg("Postgres requires a username"))?;
             let pw = cfg.password.as_deref().unwrap_or("");
-            Ok(format!(
+            let mut url = format!(
                 "postgres://{}:{}@{}:{}/{}",
                 url_enc(user),
                 url_enc(pw),
                 host,
                 port,
                 url_enc(db)
-            ))
+            );
+            if let Some(mode) = ssl {
+                let v = match mode {
+                    SslMode::Require => "require",
+                    SslMode::VerifyFull => "verify-full",
+                };
+                url.push_str("?sslmode=");
+                url.push_str(v);
+            }
+            Ok(url)
         }
         DriverKind::Mysql => {
-            let host = cfg.host.as_deref().unwrap_or("localhost");
-            let port = cfg.port.unwrap_or(3306);
+            let (host, port) = addr_override
+                .unwrap_or_else(|| (cfg.host.as_deref().unwrap_or("localhost"), cfg.port.unwrap_or(3306)));
             let db = cfg.database.as_deref().unwrap_or("");
             let user = cfg
                 .username
                 .as_deref()
                 .ok_or_else(|| AppError::msg("MySQL requires a username"))?;
             let pw = cfg.password.as_deref().unwrap_or("");
-            Ok(format!(
+            let mut url = format!(
                 "mysql://{}:{}@{}:{}/{}",
                 url_enc(user),
                 url_enc(pw),
                 host,
                 port,
                 url_enc(db)
-            ))
+            );
+            if let Some(mode) = ssl {
+                let v = match mode {
+                    SslMode::Require => "REQUIRED",
+                    SslMode::VerifyFull => "VERIFY_IDENTITY",
+                };
+                url.push_str("?ssl-mode=");
+                url.push_str(v);
+            }
+            Ok(url)
         }
         DriverKind::Redis => {
-            let host = cfg.host.as_deref().unwrap_or("localhost");
-            let port = cfg.port.unwrap_or(6379);
+            let (host, port) = addr_override
+                .unwrap_or_else(|| (cfg.host.as_deref().unwrap_or("localhost"), cfg.port.unwrap_or(6379)));
             // ACL user (Redis 6+) goes in the userinfo segment; legacy
             // `requirepass`-only servers use empty user with the password.
             let user = cfg.username.as_deref().unwrap_or("");
@@ -81,7 +143,13 @@ pub fn build_url(cfg: &ConnectionConfig) -> AppResult<String> {
             } else {
                 format!("{}:{}@", url_enc(user), url_enc(pw))
             };
-            Ok(format!("redis://{}{}:{}/{}", auth, host, port, db_idx))
+            // rediss:// negotiates TLS; "#insecure" skips cert verification.
+            let (scheme, frag) = match ssl {
+                None => ("redis", ""),
+                Some(SslMode::Require) => ("rediss", "#insecure"),
+                Some(SslMode::VerifyFull) => ("rediss", ""),
+            };
+            Ok(format!("{}://{}{}:{}/{}{}", scheme, auth, host, port, db_idx, frag))
         }
     }
 }
@@ -117,6 +185,8 @@ mod tests {
             color: None,
             pinned: false,
             group: None,
+            ssl_mode: None,
+            ssh: None,
             password: None,
         }
     }
@@ -124,6 +194,52 @@ mod tests {
     #[test]
     fn url_enc_preserves_ascii_safe() {
         assert_eq!(url_enc("abcXYZ_0-9.~"), "abcXYZ_0-9.~");
+    }
+
+    #[test]
+    fn build_url_postgres_sslmode_require() {
+        let mut c = base_cfg(DriverKind::Postgres);
+        c.username = Some("u".into());
+        c.ssl_mode = Some("require".into());
+        let url = build_url(&c).unwrap();
+        assert!(url.ends_with("?sslmode=require"), "{url}");
+    }
+
+    #[test]
+    fn build_url_mysql_sslmode_verify_full() {
+        let mut c = base_cfg(DriverKind::Mysql);
+        c.username = Some("u".into());
+        c.ssl_mode = Some("verify-full".into());
+        let url = build_url(&c).unwrap();
+        assert!(url.ends_with("?ssl-mode=VERIFY_IDENTITY"), "{url}");
+    }
+
+    #[test]
+    fn build_url_redis_require_uses_rediss_insecure() {
+        let mut c = base_cfg(DriverKind::Redis);
+        c.ssl_mode = Some("require".into());
+        let url = build_url(&c).unwrap();
+        assert!(url.starts_with("rediss://"), "{url}");
+        assert!(url.ends_with("#insecure"), "{url}");
+    }
+
+    #[test]
+    fn build_url_disable_is_plaintext() {
+        let mut c = base_cfg(DriverKind::Postgres);
+        c.username = Some("u".into());
+        c.ssl_mode = Some("disable".into());
+        assert!(!build_url(&c).unwrap().contains("sslmode"));
+    }
+
+    #[test]
+    fn build_url_tunnel_override_relaxes_verify_full() {
+        let mut c = base_cfg(DriverKind::Postgres);
+        c.username = Some("u".into());
+        c.host = Some("db.internal".into());
+        c.ssl_mode = Some("verify-full".into());
+        let url = build_url_with(&c, Some(("127.0.0.1", 54321))).unwrap();
+        assert!(url.contains("@127.0.0.1:54321/"), "{url}");
+        assert!(url.ends_with("?sslmode=require"), "{url}");
     }
 
     #[test]

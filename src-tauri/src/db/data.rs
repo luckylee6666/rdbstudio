@@ -352,23 +352,25 @@ fn json_to_bind(v: &serde_json::Value) -> BindValue {
     }
 }
 
-fn build_edit_sql(
+fn build_edit_sql_impl<F>(
     driver: DriverKind,
     schema: Option<&str>,
     table: &str,
     edit: &Edit,
-) -> (String, Vec<BindValue>) {
+    mut get_ph_and_bind: F,
+) -> String
+where
+    F: FnMut(usize, &serde_json::Value) -> String,
+{
     let target = qualified(driver, schema, table);
-    let mut binds: Vec<BindValue> = Vec::new();
-    let sql = match edit {
+    match edit {
         Edit::Update { pk, set } => {
             let mut ph_n = 1usize;
             let set_parts: Vec<String> = set
                 .iter()
                 .map(|(c, v)| {
-                    let ph = placeholder(driver, ph_n);
+                    let ph = get_ph_and_bind(ph_n, v);
                     ph_n += 1;
-                    binds.push(json_to_bind(v));
                     format!("{} = {}", quote_ident(driver, c), ph)
                 })
                 .collect();
@@ -378,9 +380,8 @@ fn build_edit_sql(
                     if v.is_null() {
                         format!("{} IS NULL", quote_ident(driver, c))
                     } else {
-                        let ph = placeholder(driver, ph_n);
+                        let ph = get_ph_and_bind(ph_n, v);
                         ph_n += 1;
-                        binds.push(json_to_bind(v));
                         format!("{} = {}", quote_ident(driver, c), ph)
                     }
                 })
@@ -401,9 +402,8 @@ fn build_edit_sql(
             let phs: Vec<String> = values
                 .iter()
                 .map(|(_, v)| {
-                    let ph = placeholder(driver, ph_n);
+                    let ph = get_ph_and_bind(ph_n, v);
                     ph_n += 1;
-                    binds.push(json_to_bind(v));
                     ph
                 })
                 .collect();
@@ -422,16 +422,28 @@ fn build_edit_sql(
                     if v.is_null() {
                         format!("{} IS NULL", quote_ident(driver, c))
                     } else {
-                        let ph = placeholder(driver, ph_n);
+                        let ph = get_ph_and_bind(ph_n, v);
                         ph_n += 1;
-                        binds.push(json_to_bind(v));
                         format!("{} = {}", quote_ident(driver, c), ph)
                     }
                 })
                 .collect();
             format!("DELETE FROM {} WHERE {}", target, parts.join(" AND "))
         }
-    };
+    }
+}
+
+fn build_edit_sql(
+    driver: DriverKind,
+    schema: Option<&str>,
+    table: &str,
+    edit: &Edit,
+) -> (String, Vec<BindValue>) {
+    let mut binds = Vec::new();
+    let sql = build_edit_sql_impl(driver, schema, table, edit, |ph_n, v| {
+        binds.push(json_to_bind(v));
+        placeholder(driver, ph_n)
+    });
     (sql, binds)
 }
 
@@ -510,6 +522,40 @@ fn ambiguous_edit_result(idx: usize, n: u64, applied: u64) -> EditResult {
     }
 }
 
+fn no_match_edit_result(idx: usize, applied: u64) -> EditResult {
+    EditResult {
+        ok: false,
+        applied,
+        failed_at: Some(idx),
+        error: Some(format!(
+            "edit #{} matched 0 rows — the row may have been changed or removed \
+             since the grid was loaded. Refresh and try again.",
+            idx + 1
+        )),
+    }
+}
+
+/// Classify the affected-row count for a grid Update/Delete (which targets
+/// exactly one row). Returns an aborting result when the count is wrong:
+/// `0` means the WHERE matched nothing — the row changed/was removed under us,
+/// so silently reporting success would mislead the user; `>1` means it would
+/// clobber duplicate siblings. `Some(..)` aborts the batch (the open tx rolls
+/// back); `None` means the count is fine (exactly 1, or the edit is an Insert).
+///
+/// Note: sqlx negotiates `CLIENT_FOUND_ROWS` on MySQL (see sqlx-mysql
+/// `connection::stream`), so `rows_affected()` reflects *matched* rows on all
+/// four drivers — the `n == 0` / `n > 1` checks are reliable everywhere.
+fn single_row_violation(edit: &Edit, idx: usize, n: u64, applied: u64) -> Option<EditResult> {
+    if !expects_single_row(edit) {
+        return None;
+    }
+    match n {
+        0 => Some(no_match_edit_result(idx, applied)),
+        1 => None,
+        _ => Some(ambiguous_edit_result(idx, n, applied)),
+    }
+}
+
 pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResult> {
     let driver = pool.driver();
     let mut applied = 0u64;
@@ -528,9 +574,9 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                 match sqlx::query_with(&sql, args).execute(&mut *tx).await {
                     Ok(r) => {
                         let n = r.rows_affected();
-                        if n > 1 && expects_single_row(e) {
+                        if let Some(res) = single_row_violation(e, idx, n, applied) {
                             // tx is dropped without commit → rollback.
-                            return Ok(ambiguous_edit_result(idx, n, applied));
+                            return Ok(res);
                         }
                         applied += n;
                     }
@@ -558,9 +604,9 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                 match sqlx::query_with(&sql, args).execute(&mut *tx).await {
                     Ok(r) => {
                         let n = r.rows_affected();
-                        if n > 1 && expects_single_row(e) {
+                        if let Some(res) = single_row_violation(e, idx, n, applied) {
                             // tx is dropped without commit → rollback.
-                            return Ok(ambiguous_edit_result(idx, n, applied));
+                            return Ok(res);
                         }
                         applied += n;
                     }
@@ -588,9 +634,9 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                 match sqlx::query_with(&sql, args).execute(&mut *tx).await {
                     Ok(r) => {
                         let n = r.rows_affected();
-                        if n > 1 && expects_single_row(e) {
+                        if let Some(res) = single_row_violation(e, idx, n, applied) {
                             // tx is dropped without commit → rollback.
-                            return Ok(ambiguous_edit_result(idx, n, applied));
+                            return Ok(res);
                         }
                         applied += n;
                     }
@@ -622,28 +668,15 @@ pub fn preview_edit_sql(
     table: &str,
     edit: &Edit,
 ) -> String {
-    let (sql, binds) = build_edit_sql(driver, schema, table, edit);
-    // inline binds as readable literals (preview only; actual execution uses placeholders)
-    let mut out = sql.clone();
-    let mut i = 1usize;
-    while let Some(pos) = find_placeholder(&out, driver, i) {
-        let lit = match binds.get(i - 1) {
-            Some(BindValue::Null) | None => "NULL".into(),
-            Some(BindValue::Bool(b)) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-            Some(BindValue::Int(v)) => v.to_string(),
-            Some(BindValue::Float(v)) => v.to_string(),
-            Some(BindValue::Str(s)) => format!("'{}'", s.replace('\'', "''")),
-        };
-        let ph = placeholder(driver, i);
-        out.replace_range(pos..pos + ph.len(), &lit);
-        i += 1;
-    }
-    out
-}
-
-fn find_placeholder(s: &str, driver: DriverKind, n: usize) -> Option<usize> {
-    let ph = placeholder(driver, n);
-    s.find(&ph)
+    build_edit_sql_impl(driver, schema, table, edit, |_ph_n, v| {
+        match json_to_bind(v) {
+            BindValue::Null => "NULL".into(),
+            BindValue::Bool(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
+            BindValue::Int(v) => v.to_string(),
+            BindValue::Float(v) => v.to_string(),
+            BindValue::Str(s) => format!("'{}'", s.replace('\'', "''")),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -723,5 +756,32 @@ mod tests {
             qualified(DriverKind::Sqlite, Some(""), "users"),
             "\"users\""
         );
+    }
+
+    #[test]
+    fn single_row_violation_classifies_affected_count() {
+        let update = Edit::Update { pk: vec![], set: vec![] };
+        let delete = Edit::Delete { pk: vec![] };
+        let insert = Edit::Insert { values: vec![] };
+
+        // Exactly one matched row → fine.
+        assert!(single_row_violation(&update, 0, 1, 0).is_none());
+        assert!(single_row_violation(&delete, 0, 1, 0).is_none());
+
+        // Zero matched rows → surfaced as a stale-row error (not silent success).
+        let zero = single_row_violation(&update, 2, 0, 5).expect("0 rows must abort");
+        assert!(!zero.ok);
+        assert_eq!(zero.applied, 5);
+        assert_eq!(zero.failed_at, Some(2));
+        assert!(zero.error.unwrap().contains("0 rows"));
+
+        // More than one matched row → ambiguity guard.
+        let many = single_row_violation(&delete, 0, 3, 0).expect(">1 row must abort");
+        assert!(!many.ok);
+        assert!(many.error.unwrap().contains("matched 3 rows"));
+
+        // Inserts have no single-row expectation, even at 0 or many rows.
+        assert!(single_row_violation(&insert, 0, 0, 0).is_none());
+        assert!(single_row_violation(&insert, 0, 2, 0).is_none());
     }
 }

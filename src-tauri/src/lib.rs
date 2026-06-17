@@ -21,7 +21,8 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("no app data dir");
             let store = ConnectionStore::load(&data_dir)?;
             let history = HistoryStore::load(&data_dir)?;
-            app.manage(AppState::new(store, history));
+            let snippets = store::SnippetStore::load(&data_dir)?;
+            app.manage(AppState::new(store, history, snippets));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -33,6 +34,9 @@ pub fn run() {
             commands::connections::connect,
             commands::connections::disconnect,
             commands::connections::connection_status,
+            commands::snippets::list_snippets,
+            commands::snippets::save_snippet,
+            commands::snippets::delete_snippet,
             commands::meta::list_databases,
             commands::meta::list_schemas,
             commands::meta::list_tables,

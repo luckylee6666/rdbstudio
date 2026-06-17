@@ -13,6 +13,7 @@ import type {
   ImportCsvOptions,
   ImportReport,
   ScanPage,
+  Snippet,
   TableDescription,
   TableQuery,
   TreeEntry,
@@ -140,4 +141,10 @@ export const api = {
     }),
   writeTextFile: (path: string, contents: string) =>
     invoke<void>("write_text_file", { path, contents }),
+
+  listSnippets: () => invoke<Snippet[]>("list_snippets"),
+  saveSnippet: (snippet: Snippet) =>
+    invoke<Snippet>("save_snippet", { snippet }),
+  deleteSnippet: (id: string) =>
+    invoke<boolean>("delete_snippet", { id }),
 };

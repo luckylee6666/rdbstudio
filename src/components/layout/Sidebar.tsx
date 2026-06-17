@@ -4,6 +4,7 @@ import { useLayout } from "@/store/layout";
 import { FavoritesPanel } from "@/components/layout/FavoritesPanel";
 import { QueriesPanel } from "@/components/layout/QueriesPanel";
 import { ModelsPanel } from "@/components/layout/ModelsPanel";
+import { SnippetsPanel } from "@/components/layout/SnippetsPanel";
 
 export function Sidebar() {
   const activity = useLayout((s) => s.activity);
@@ -14,6 +15,7 @@ export function Sidebar() {
       {activity === "history" && <HistoryPanel />}
       {activity === "favorites" && <FavoritesPanel />}
       {activity === "models" && <ModelsPanel />}
+      {activity === "snippets" && <SnippetsPanel />}
     </aside>
   );
 }

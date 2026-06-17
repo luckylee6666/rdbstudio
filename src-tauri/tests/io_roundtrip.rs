@@ -12,6 +12,7 @@ fn csv_opts(path: &str) -> ExportOptions {
         include_header: true,
         quote_all: false,
         batch_size: 1000,
+        include_ddl: false,
     }
 }
 
@@ -116,6 +117,7 @@ async fn export_json_parses_back_as_array() {
         include_header: true,
         quote_all: false,
         batch_size: 1000,
+        include_ddl: false,
     };
     io::export_table(&pool, None, "users", &opts)
         .await
@@ -149,12 +151,19 @@ async fn export_sql_includes_insert_into_users() {
         include_header: false,
         quote_all: false,
         batch_size: 1000,
+        include_ddl: true,
     };
     io::export_table(&pool, None, "users", &opts)
         .await
         .expect("export");
 
     let text = std::fs::read_to_string(&path).expect("read sql");
+    // include_ddl: true should prepend the CREATE TABLE statement.
+    assert!(
+        text.contains("CREATE TABLE"),
+        "expected CREATE TABLE DDL header, got: {}",
+        text
+    );
     assert!(
         text.contains("INSERT INTO \"users\""),
         "unexpected SQL: {}",

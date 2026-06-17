@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type ActivityId = "connections" | "queries" | "history" | "favorites" | "models";
+export type ActivityId = "connections" | "queries" | "history" | "favorites" | "models" | "snippets";
 
 interface LayoutState {
   activity: ActivityId;

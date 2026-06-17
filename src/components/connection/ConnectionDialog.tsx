@@ -7,7 +7,7 @@ import { PromptDialog } from "@/components/ui/PromptDialog";
 import { DriverBadge } from "./driverIcon";
 import { api } from "@/lib/api";
 import { useConnections } from "@/store/connections";
-import type { ConnectionConfig, DriverKind } from "@/types";
+import type { ConnectionConfig, DriverKind, SshConfig } from "@/types";
 import { CheckCircle2, FolderOpen, Loader2, XCircle } from "lucide-react";
 import { useT } from "@/store/i18n";
 
@@ -119,6 +119,42 @@ export function ConnectionDialog({
       update("file_path", picked);
       if (!cfg.name) update("name", picked.split("/").pop() ?? "SQLite");
     }
+  };
+
+  // Toggle the SSH tunnel on/off. Enabling seeds sensible defaults.
+  const toggleSsh = (on: boolean) =>
+    setCfg((c) => ({
+      ...c,
+      ssh: on
+        ? c.ssh ?? {
+            host: "",
+            port: 22,
+            username: "",
+            auth: "password",
+            key_path: "",
+            password: "",
+          }
+        : null,
+    }));
+
+  const updateSsh = (patch: Partial<SshConfig>) =>
+    setCfg((c) => ({
+      ...c,
+      ssh: {
+        host: "",
+        port: 22,
+        username: "",
+        auth: "password",
+        ...(c.ssh ?? {}),
+        ...patch,
+      },
+    }));
+
+  const pickKey = async () => {
+    const picked = await openDialog({
+      filters: [{ name: "All", extensions: ["*"] }],
+    });
+    if (typeof picked === "string") updateSsh({ key_path: picked });
   };
 
   const onTest = async () => {
@@ -340,6 +376,123 @@ export function ConnectionDialog({
               />
             </div>
           </>
+        )}
+
+        {!isSqlite && (
+          <div className="space-y-3 rounded-lg border border-border/70 bg-surface-muted/20 p-3">
+            <div className="grid grid-cols-[120px_1fr] items-center gap-3">
+              <Label>{t("conn.dialog.ssl")}</Label>
+              <Select
+                value={cfg.ssl_mode ?? "disable"}
+                onChange={(e) => update("ssl_mode", e.target.value)}
+              >
+                <option value="disable">{t("conn.ssl.disable")}</option>
+                <option value="require">{t("conn.ssl.require")}</option>
+                <option value="verify-full">{t("conn.ssl.verify")}</option>
+              </Select>
+            </div>
+
+            <label className="flex cursor-pointer items-center gap-2 text-[12.5px]">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-brand"
+                checked={!!cfg.ssh}
+                onChange={(e) => toggleSsh(e.target.checked)}
+              />
+              {t("conn.ssh.enable")}
+            </label>
+
+            {cfg.ssh && (
+              <div className="space-y-3 border-t border-border/60 pt-3">
+                <div className="grid grid-cols-[1fr_100px] gap-3">
+                  <div>
+                    <Label required>{t("conn.ssh.host")}</Label>
+                    <Input
+                      value={cfg.ssh.host}
+                      onChange={(e) => updateSsh({ host: e.target.value })}
+                      placeholder="bastion.example.com"
+                    />
+                  </div>
+                  <div>
+                    <Label required>{t("conn.ssh.port")}</Label>
+                    <Input
+                      type="number"
+                      value={cfg.ssh.port ?? 22}
+                      onChange={(e) =>
+                        updateSsh({ port: e.target.value ? Number(e.target.value) : 22 })
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label required>{t("conn.ssh.user")}</Label>
+                    <Input
+                      value={cfg.ssh.username}
+                      onChange={(e) => updateSsh({ username: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <Label>{t("conn.ssh.auth")}</Label>
+                    <Select
+                      value={cfg.ssh.auth ?? "password"}
+                      onChange={(e) => updateSsh({ auth: e.target.value })}
+                    >
+                      <option value="password">{t("conn.ssh.auth.password")}</option>
+                      <option value="key">{t("conn.ssh.auth.key")}</option>
+                    </Select>
+                  </div>
+                </div>
+                {(cfg.ssh.auth ?? "password") === "key" ? (
+                  <>
+                    <div>
+                      <Label>{t("conn.ssh.key")}</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          value={cfg.ssh.key_path ?? ""}
+                          onChange={(e) => updateSsh({ key_path: e.target.value })}
+                          placeholder="~/.ssh/id_ed25519"
+                        />
+                        <Button onClick={pickKey}>
+                          <FolderOpen className="h-3.5 w-3.5" />
+                          {t("common.browse")}
+                        </Button>
+                      </div>
+                    </div>
+                    <div>
+                      <Label hint={initial ? t("conn.dialog.password.hint.edit") : undefined}>
+                        {t("conn.ssh.passphrase")}
+                      </Label>
+                      <Input
+                        type="password"
+                        value={cfg.ssh.password ?? ""}
+                        onChange={(e) => updateSsh({ password: e.target.value })}
+                        placeholder={
+                          initial
+                            ? t("conn.dialog.password.placeholder.keep")
+                            : t("conn.ssh.passphrase.opt")
+                        }
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <Label hint={initial ? t("conn.dialog.password.hint.edit") : undefined}>
+                      {t("conn.ssh.password")}
+                    </Label>
+                    <Input
+                      type="password"
+                      value={cfg.ssh.password ?? ""}
+                      onChange={(e) => updateSsh({ password: e.target.value })}
+                      placeholder={
+                        initial ? t("conn.dialog.password.placeholder.keep") : "••••••••"
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         <div>

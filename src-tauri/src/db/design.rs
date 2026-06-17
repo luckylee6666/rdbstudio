@@ -559,41 +559,22 @@ async fn describe_mysql_in(
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let type_str: String = r
-                .try_get::<String, _>("Type")
-                .or_else(|_| r.try_get::<String, _>(1))
-                .unwrap_or_default();
-            let key: String = r
-                .try_get::<String, _>("Key")
-                .or_else(|_| r.try_get::<String, _>(4))
-                .unwrap_or_default();
-            let extra: String = r
-                .try_get::<String, _>("Extra")
-                .or_else(|_| r.try_get::<String, _>(6))
-                .unwrap_or_default();
+            // SHOW FULL COLUMNS positions: 0=Field 1=Type 3=Null 4=Key 5=Default 6=Extra 8=Comment.
+            // Read via the varbinary-safe helper so servers that expose these as
+            // `varbinary` don't yield blank column names / types.
+            use crate::db::meta::mysql_show_str;
+            let type_str = mysql_show_str(r, "Type", 1).unwrap_or_default();
+            let key = mysql_show_str(r, "Key", 4).unwrap_or_default();
+            let extra = mysql_show_str(r, "Extra", 6).unwrap_or_default();
             let (char_max, num_prec, num_scale) = parse_mysql_type(&type_str);
             ColumnDetail {
-                name: r
-                    .try_get::<String, _>("Field")
-                    .or_else(|_| r.try_get::<String, _>(0))
-                    .unwrap_or_default(),
+                name: mysql_show_str(r, "Field", 0).unwrap_or_default(),
                 data_type: type_str,
-                nullable: r
-                    .try_get::<String, _>("Null")
-                    .or_else(|_| r.try_get::<String, _>(3))
+                nullable: mysql_show_str(r, "Null", 3)
                     .map(|s| s.eq_ignore_ascii_case("YES"))
                     .unwrap_or(true),
-                default: r
-                    .try_get::<Option<String>, _>("Default")
-                    .or_else(|_| r.try_get::<Option<String>, _>(5))
-                    .ok()
-                    .flatten(),
-                comment: r
-                    .try_get::<Option<String>, _>("Comment")
-                    .or_else(|_| r.try_get::<Option<String>, _>(8))
-                    .ok()
-                    .flatten()
-                    .filter(|s| !s.is_empty()),
+                default: mysql_show_str(r, "Default", 5),
+                comment: mysql_show_str(r, "Comment", 8).filter(|s| !s.is_empty()),
                 ordinal_position: (i + 1) as i32,
                 char_max_length: char_max,
                 numeric_precision: num_prec,

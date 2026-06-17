@@ -9,7 +9,10 @@ use sqlx::Row;
 /// instead of `varchar`. Without this fallback `try_get::<String, _>` returns
 /// a decode error and the column gets silently dropped — which we hit in the
 /// wild as "list_databases returns 0 rows but `SHOW DATABASES` returns 6".
-fn row_string(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<String> {
+pub(crate) fn row_string<I>(row: &sqlx::mysql::MySqlRow, idx: I) -> Option<String>
+where
+    I: sqlx::ColumnIndex<sqlx::mysql::MySqlRow> + Copy,
+{
     if let Ok(s) = row.try_get::<String, _>(idx) {
         return Some(s);
     }
@@ -17,6 +20,21 @@ fn row_string(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<String> {
         return Some(String::from_utf8_lossy(&b).into_owned());
     }
     None
+}
+
+/// Read a SHOW-result string by column name, falling back to a positional
+/// index, each with the `varbinary` fallback above. The positional fallback
+/// keeps us robust to column-order quirks; the byte fallback keeps us robust to
+/// servers that type these columns as `varbinary` instead of `varchar`. Reading
+/// only by name as `String` (the previous pattern) silently dropped the value
+/// on such servers, leaving empty column names in the designer / create-table
+/// dialog.
+pub(crate) fn mysql_show_str(
+    row: &sqlx::mysql::MySqlRow,
+    name: &str,
+    idx: usize,
+) -> Option<String> {
+    row_string(row, name).or_else(|| row_string(row, idx))
 }
 
 pub async fn server_version(pool: &DbPool) -> AppResult<String> {
@@ -242,30 +260,16 @@ pub async fn list_columns(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let key: String = r
-                        .try_get::<String, _>("Key")
-                        .or_else(|_| r.try_get::<String, _>(4))
-                        .unwrap_or_default();
+                    // SHOW FULL COLUMNS positions: 0=Field 1=Type 3=Null 4=Key 5=Default.
+                    let key = mysql_show_str(r, "Key", 4).unwrap_or_default();
                     ColumnInfo {
-                        name: r
-                            .try_get::<String, _>("Field")
-                            .or_else(|_| r.try_get::<String, _>(0))
-                            .unwrap_or_default(),
-                        data_type: r
-                            .try_get::<String, _>("Type")
-                            .or_else(|_| r.try_get::<String, _>(1))
-                            .unwrap_or_default(),
-                        nullable: r
-                            .try_get::<String, _>("Null")
-                            .or_else(|_| r.try_get::<String, _>(3))
+                        name: mysql_show_str(r, "Field", 0).unwrap_or_default(),
+                        data_type: mysql_show_str(r, "Type", 1).unwrap_or_default(),
+                        nullable: mysql_show_str(r, "Null", 3)
                             .map(|s| s.eq_ignore_ascii_case("YES"))
                             .unwrap_or(true),
                         is_primary_key: key == "PRI",
-                        default_value: r
-                            .try_get::<Option<String>, _>("Default")
-                            .or_else(|_| r.try_get::<Option<String>, _>(5))
-                            .ok()
-                            .flatten(),
+                        default_value: mysql_show_str(r, "Default", 5),
                     }
                 })
                 .collect())
