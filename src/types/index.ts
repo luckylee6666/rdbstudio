@@ -15,6 +15,8 @@ export interface ConnectionConfig {
   group?: string | null;
   /** TLS mode for PG/MySQL/Redis: "disable" | "require" | "verify-full". */
   ssl_mode?: string | null;
+  /** Safety switch: all writes (DML/DDL, grid edits, import) rejected server-side. */
+  read_only?: boolean;
   /** Optional SSH tunnel; connections route through it when set. */
   ssh?: SshConfig | null;
   password?: string | null;

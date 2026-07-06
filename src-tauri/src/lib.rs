@@ -55,6 +55,7 @@ pub fn run() {
             commands::design::generate_alter_ddl,
             commands::design::apply_alter_ddl,
             commands::design::drop_object,
+            commands::design::table_op,
             commands::io::export_table,
             commands::io::import_csv,
             commands::io::preview_csv,

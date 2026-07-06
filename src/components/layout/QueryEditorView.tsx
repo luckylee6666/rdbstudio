@@ -17,7 +17,9 @@ import { useConnections } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
 import { CodeMirrorEditor } from "@/components/editor/CodeMirror";
 import { DataGrid, type GridColumn } from "@/components/grid/DataGrid";
+import { ContextMenu } from "@/components/ui/ContextMenu";
 import { saveTextFile, toCSV } from "@/lib/csv";
+import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
 import { explainWrap, splitStatements } from "@/lib/sql";
 import { getSchemaColumns, setSchemaColumns } from "@/lib/schemaCache";
 import { cn } from "@/lib/cn";
@@ -66,6 +68,9 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const runSessionRef = useRef<{ qid: string; cancelled: boolean } | null>(null);
   const t = useT();
 
+  const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(
+    null
+  );
   const [saveSnippetOpen, setSaveSnippetOpen] = useState(false);
   const [snippetName, setSnippetName] = useState("");
   const [snippetDesc, setSnippetDesc] = useState("");
@@ -290,14 +295,22 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     });
   }, []);
 
-  const onExport = async () => {
+  const onExport = async (format: "csv" | "json" | "sql") => {
     if (state.kind !== "ok" || state.result.rows.length === 0) return;
-    const csv = toCSV(
-      state.result.columns.map((c) => c.name),
-      state.result.rows
-    );
+    const names = state.result.columns.map((c) => c.name);
+    const base = (tab.title || "result").replace(/[^\w.-]+/g, "_");
+    let text: string;
+    if (format === "json") {
+      text = toJSONRows(names, state.result.rows);
+    } else if (format === "sql") {
+      // No real table behind an ad-hoc result — use the sanitized tab title
+      // as the INSERT target; trivial to search-replace after pasting.
+      text = toInsertSql(targetCfg?.driver, base, names, state.result.rows);
+    } else {
+      text = toCSV(names, state.result.rows);
+    }
     try {
-      await saveTextFile(`${tab.title || "result"}.csv`, csv, "csv");
+      await saveTextFile(`${base}.${format}`, text, format);
     } catch (e) {
       setState({ kind: "error", message: `Export failed: ${String(e)}` });
     }
@@ -427,13 +440,37 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         </label>
         <div className="flex-1" />
         <button
-          onClick={onExport}
+          onClick={(e) => setExportMenu({ x: e.clientX, y: e.clientY })}
           disabled={state.kind !== "ok" || state.result.rows.length === 0}
           className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
         >
           <Download className="h-3.5 w-3.5" />
-          {t("query.toolbar.export_csv")}
+          {t("query.toolbar.export")}
         </button>
+        {exportMenu && (
+          <ContextMenu
+            x={exportMenu.x}
+            y={exportMenu.y}
+            items={[
+              {
+                id: "csv",
+                label: t("query.toolbar.export_csv"),
+                onClick: () => void onExport("csv"),
+              },
+              {
+                id: "json",
+                label: t("query.toolbar.export_json"),
+                onClick: () => void onExport("json"),
+              },
+              {
+                id: "sql",
+                label: t("query.toolbar.export_sql"),
+                onClick: () => void onExport("sql"),
+              },
+            ]}
+            onClose={() => setExportMenu(null)}
+          />
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
@@ -455,7 +492,11 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           )}
           <div className="min-h-0 flex-1">
             {state.kind === "ok" && state.result.columns.length > 0 && (
-              <DataGrid columns={gridColumns} rows={gridRows} />
+              <DataGrid
+                columns={gridColumns}
+                rows={gridRows}
+                driver={targetCfg?.driver}
+              />
             )}
             {state.kind === "ok" && state.result.columns.length === 0 && (
               <div className="flex h-full items-center justify-center text-[12px] text-muted-foreground">

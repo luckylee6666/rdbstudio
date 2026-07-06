@@ -91,6 +91,55 @@ pub fn drop_sql(driver: DriverKind, schema: Option<&str>, name: &str, view: bool
     format!("DROP {} {}", kind, qualified(driver, schema, name))
 }
 
+/// Rename a table. MySQL renames via `RENAME TABLE a TO b` (both sides
+/// qualified); PG/SQLite use `ALTER TABLE ... RENAME TO <bare-name>` — the new
+/// name must NOT be schema-qualified there.
+pub fn rename_sql(driver: DriverKind, schema: Option<&str>, name: &str, new_name: &str) -> String {
+    match driver {
+        DriverKind::Mysql => format!(
+            "RENAME TABLE {} TO {}",
+            qualified(driver, schema, name),
+            qualified(driver, schema, new_name)
+        ),
+        _ => format!(
+            "ALTER TABLE {} RENAME TO {}",
+            qualified(driver, schema, name),
+            quote_ident(driver, new_name)
+        ),
+    }
+}
+
+/// Empty a table. SQLite has no TRUNCATE — `DELETE FROM` is its idiom (we
+/// deliberately skip resetting sqlite_sequence: the table only exists when
+/// some table uses AUTOINCREMENT, and referencing it when absent errors the
+/// whole transaction).
+pub fn truncate_sql(driver: DriverKind, schema: Option<&str>, name: &str) -> String {
+    let q = qualified(driver, schema, name);
+    match driver {
+        DriverKind::Sqlite => format!("DELETE FROM {}", q),
+        _ => format!("TRUNCATE TABLE {}", q),
+    }
+}
+
+/// Copy a table's structure (no data) to `new_name` in the same schema.
+/// PG copies constraints/indexes via `LIKE ... INCLUDING ALL`; MySQL's
+/// `CREATE TABLE ... LIKE` does the same natively. SQLite has neither — a
+/// zero-row CTAS copies the column set/types but not PK/constraints.
+pub fn copy_structure_sql(
+    driver: DriverKind,
+    schema: Option<&str>,
+    name: &str,
+    new_name: &str,
+) -> String {
+    let from = qualified(driver, schema, name);
+    let to = qualified(driver, schema, new_name);
+    match driver {
+        DriverKind::Postgres => format!("CREATE TABLE {} (LIKE {} INCLUDING ALL)", to, from),
+        DriverKind::Mysql => format!("CREATE TABLE {} LIKE {}", to, from),
+        _ => format!("CREATE TABLE {} AS SELECT * FROM {} WHERE 0", to, from),
+    }
+}
+
 fn placeholder(driver: DriverKind, n: usize) -> String {
     match driver {
         DriverKind::Postgres => format!("${}", n),
@@ -755,6 +804,55 @@ mod tests {
         assert_eq!(
             qualified(DriverKind::Sqlite, Some(""), "users"),
             "\"users\""
+        );
+    }
+
+    #[test]
+    fn rename_sql_per_driver() {
+        assert_eq!(
+            rename_sql(DriverKind::Postgres, Some("public"), "users", "users2"),
+            "ALTER TABLE \"public\".\"users\" RENAME TO \"users2\""
+        );
+        assert_eq!(
+            rename_sql(DriverKind::Sqlite, None, "users", "users2"),
+            "ALTER TABLE \"users\" RENAME TO \"users2\""
+        );
+        assert_eq!(
+            rename_sql(DriverKind::Mysql, Some("db1"), "users", "users2"),
+            "RENAME TABLE `db1`.`users` TO `db1`.`users2`"
+        );
+    }
+
+    #[test]
+    fn truncate_sql_per_driver() {
+        assert_eq!(
+            truncate_sql(DriverKind::Postgres, Some("public"), "users"),
+            "TRUNCATE TABLE \"public\".\"users\""
+        );
+        assert_eq!(
+            truncate_sql(DriverKind::Mysql, None, "users"),
+            "TRUNCATE TABLE `users`"
+        );
+        // SQLite has no TRUNCATE.
+        assert_eq!(
+            truncate_sql(DriverKind::Sqlite, None, "users"),
+            "DELETE FROM \"users\""
+        );
+    }
+
+    #[test]
+    fn copy_structure_sql_per_driver() {
+        assert_eq!(
+            copy_structure_sql(DriverKind::Postgres, Some("public"), "users", "users_copy"),
+            "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL)"
+        );
+        assert_eq!(
+            copy_structure_sql(DriverKind::Mysql, None, "users", "users_copy"),
+            "CREATE TABLE `users_copy` LIKE `users`"
+        );
+        assert_eq!(
+            copy_structure_sql(DriverKind::Sqlite, None, "users", "users_copy"),
+            "CREATE TABLE \"users_copy\" AS SELECT * FROM \"users\" WHERE 0"
         );
     }
 

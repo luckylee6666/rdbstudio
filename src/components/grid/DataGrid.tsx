@@ -1,9 +1,14 @@
 import { useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Check, Clipboard, X } from "lucide-react";
+import { Braces, Check, Clipboard, FileText, Terminal, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
+import { toCSV } from "@/lib/csv";
+import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
+import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
+import { useT } from "@/store/i18n";
+import type { DriverKind } from "@/types";
 
 export interface GridColumn {
   name: string;
@@ -14,6 +19,10 @@ interface Props {
   columns: GridColumn[];
   rows: unknown[][];
   emptyMessage?: string;
+  /** Table name used by "Copy row as INSERT" (falls back to "my_table"). */
+  tableName?: string;
+  /** Driver for identifier quoting in generated INSERTs. */
+  driver?: DriverKind;
 }
 
 interface CellSel {
@@ -21,17 +30,70 @@ interface CellSel {
   col: number;
 }
 
+/** Cell value as the same text the grid shows (NULL for null). */
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return JSON.stringify(value);
+}
+
 const MIN_COL_WIDTH = 60;
 const DEFAULT_COL_WIDTH = 160;
 const ROW_HEIGHT = 26;
 
-export function DataGrid({ columns, rows, emptyMessage = "No rows" }: Props) {
+export function DataGrid({
+  columns,
+  rows,
+  emptyMessage = "No rows",
+  tableName,
+  driver,
+}: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [widths, setWidths] = useState<number[]>(() =>
     columns.map(() => DEFAULT_COL_WIDTH)
   );
   const [selected, setSelected] = useState<CellSel | null>(null);
   const [viewer, setViewer] = useState<CellSel | null>(null);
+  const [ctx, setCtx] = useState<(CellSel & { x: number; y: number }) | null>(
+    null
+  );
+  const t = useT();
+
+  const copyMenu = (sel: CellSel): MenuEntry[] => {
+    const row = rows[sel.row] ?? [];
+    const names = columns.map((c) => c.name);
+    return [
+      {
+        id: "copy-cell",
+        label: t("grid.copy_cell"),
+        icon: Clipboard,
+        onClick: () => void copyText(cellText(row[sel.col])),
+      },
+      { id: "sep", label: "", separator: true },
+      {
+        id: "copy-insert",
+        label: t("grid.copy_insert"),
+        icon: Terminal,
+        onClick: () =>
+          void copyText(
+            toInsertSql(driver, tableName ?? "my_table", names, [row])
+          ),
+      },
+      {
+        id: "copy-csv",
+        label: t("grid.copy_csv"),
+        icon: FileText,
+        onClick: () => void copyText(toCSV(names, [row])),
+      },
+      {
+        id: "copy-json",
+        label: t("grid.copy_json"),
+        icon: Braces,
+        onClick: () => void copyText(toJSONRows(names, [row])),
+      },
+    ];
+  };
 
   // keep widths in sync if columns change length
   useMemo(() => {
@@ -154,6 +216,16 @@ export function DataGrid({ columns, rows, emptyMessage = "No rows" }: Props) {
                       }
                       onClick={() => setSelected({ row: vr.index, col: i })}
                       onDoubleClick={() => setViewer({ row: vr.index, col: i })}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setSelected({ row: vr.index, col: i });
+                        setCtx({
+                          row: vr.index,
+                          col: i,
+                          x: e.clientX,
+                          y: e.clientY,
+                        });
+                      }}
                     />
                   ))}
                 </div>
@@ -169,6 +241,14 @@ export function DataGrid({ columns, rows, emptyMessage = "No rows" }: Props) {
           onClose={() => setViewer(null)}
         />
       )}
+      {ctx && (
+        <ContextMenu
+          x={ctx.x}
+          y={ctx.y}
+          items={copyMenu(ctx)}
+          onClose={() => setCtx(null)}
+        />
+      )}
     </div>
   );
 }
@@ -179,12 +259,14 @@ function Cell({
   selected,
   onClick,
   onDoubleClick,
+  onContextMenu,
 }: {
   width: number;
   value: unknown;
   selected?: boolean;
   onClick?: () => void;
   onDoubleClick?: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   const isNull = value === null || value === undefined;
   const isNumeric = typeof value === "number" || typeof value === "bigint";
@@ -201,6 +283,7 @@ function Cell({
     <div
       onClick={onClick}
       onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
       className={cn(
         "flex cursor-default select-text items-center overflow-hidden border-r border-border/60 px-2 font-mono leading-[26px]",
         isNumeric && "justify-end tabular-nums",

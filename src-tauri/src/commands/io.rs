@@ -25,6 +25,7 @@ pub async fn import_csv(
     id: String,
     options: ImportCsvOptions,
 ) -> AppResult<ImportReport> {
+    crate::commands::ensure_writable(&state, &id)?;
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;

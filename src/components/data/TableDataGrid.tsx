@@ -4,11 +4,20 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Braces,
+  Clipboard,
+  FileText,
   RotateCcw,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import type { ColumnInfo, OrderBy } from "@/types";
+import { copyText } from "@/lib/clipboard";
+import { toCSV } from "@/lib/csv";
+import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
+import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
+import { useT } from "@/store/i18n";
+import type { ColumnInfo, DriverKind, OrderBy } from "@/types";
 
 export interface GridRow {
   key: string;
@@ -24,10 +33,22 @@ interface Props {
   rows: GridRow[];
   order?: OrderBy;
   editable: boolean;
+  /** Real table name for "Copy row as INSERT". */
+  tableName?: string;
+  /** Driver for identifier quoting in generated INSERTs. */
+  driver?: DriverKind;
   onSortClick: (col: string) => void;
   onCellEdit: (rowKey: string, colIndex: number, value: unknown) => void;
   onRowRevert: (rowKey: string) => void;
   onRowDelete: (rowKey: string) => void;
+}
+
+/** Cell value as the same text the grid shows (NULL for null). */
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
 }
 
 const MIN_COL_WIDTH = 80;
@@ -39,6 +60,8 @@ export function TableDataGrid({
   rows,
   order,
   editable,
+  tableName,
+  driver,
   onSortClick,
   onCellEdit,
   onRowRevert,
@@ -51,6 +74,48 @@ export function TableDataGrid({
   const [editing, setEditing] = useState<{ row: string; col: number } | null>(
     null
   );
+  const [ctx, setCtx] = useState<{
+    x: number;
+    y: number;
+    rowIndex: number;
+    col: number;
+  } | null>(null);
+  const t = useT();
+
+  const copyMenu = (sel: { rowIndex: number; col: number }): MenuEntry[] => {
+    const values = rows[sel.rowIndex]?.values ?? [];
+    const names = columns.map((c) => c.name);
+    return [
+      {
+        id: "copy-cell",
+        label: t("grid.copy_cell"),
+        icon: Clipboard,
+        onClick: () => void copyText(cellText(values[sel.col])),
+      },
+      { id: "sep", label: "", separator: true },
+      {
+        id: "copy-insert",
+        label: t("grid.copy_insert"),
+        icon: Terminal,
+        onClick: () =>
+          void copyText(
+            toInsertSql(driver, tableName ?? "my_table", names, [values])
+          ),
+      },
+      {
+        id: "copy-csv",
+        label: t("grid.copy_csv"),
+        icon: FileText,
+        onClick: () => void copyText(toCSV(names, [values])),
+      },
+      {
+        id: "copy-json",
+        label: t("grid.copy_json"),
+        icon: Braces,
+        onClick: () => void copyText(toJSONRows(names, [values])),
+      },
+    ];
+  };
 
   useEffect(() => {
     setWidths((prev) =>
@@ -179,6 +244,15 @@ export function TableDataGrid({
                           setEditing(null);
                           onCellEdit(row.key, i, v);
                         }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setCtx({
+                            x: e.clientX,
+                            y: e.clientY,
+                            rowIndex: vr.index,
+                            col: i,
+                          });
+                        }}
                       />
                     );
                   })}
@@ -188,6 +262,14 @@ export function TableDataGrid({
           </div>
         )}
       </div>
+      {ctx && (
+        <ContextMenu
+          x={ctx.x}
+          y={ctx.y}
+          items={copyMenu(ctx)}
+          onClose={() => setCtx(null)}
+        />
+      )}
     </div>
   );
 }
@@ -309,6 +391,7 @@ function EditableCell({
   onStartEdit,
   onStopEdit,
   onCommit,
+  onContextMenu,
 }: {
   column: ColumnInfo;
   width: number;
@@ -321,6 +404,7 @@ function EditableCell({
   onStartEdit: () => void;
   onStopEdit: () => void;
   onCommit: (v: unknown) => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   const isNull = value === null || value === undefined;
   const isNumeric = /int|numeric|decimal|float|double|real/i.test(
@@ -354,6 +438,7 @@ function EditableCell({
   return (
     <div
       onDoubleClick={onStartEdit}
+      onContextMenu={onContextMenu}
       className={cn(
         "flex items-center overflow-hidden border-r border-border/60 px-2 font-mono",
         isNumeric && "justify-end tabular-nums",

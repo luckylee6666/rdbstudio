@@ -50,6 +50,7 @@ pub async fn apply_alter_ddl(
     id: String,
     statements: Vec<String>,
 ) -> AppResult<Vec<String>> {
+    crate::commands::ensure_writable(&state, &id)?;
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
@@ -67,10 +68,49 @@ pub async fn drop_object(
     name: String,
     view: bool,
 ) -> AppResult<()> {
+    crate::commands::ensure_writable(&state, &id)?;
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
     let sql = crate::db::data::drop_sql(pool.driver(), schema.as_deref(), &name, view);
+    alter::apply_statements(&pool, &[sql]).await?;
+    Ok(())
+}
+
+/// Table maintenance ops from the tree context menu: rename, truncate, copy
+/// structure. SQL is synthesized server-side (same quoting as drop_object)
+/// and runs through `alter::apply_statements` so Redis pools are rejected and
+/// DDL is transactional where the driver supports it.
+#[tauri::command]
+pub async fn table_op(
+    state: State<'_, AppState>,
+    id: String,
+    op: String,
+    schema: Option<String>,
+    name: String,
+    new_name: Option<String>,
+) -> AppResult<()> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let pool = state
+        .get_pool(&id)
+        .ok_or_else(|| AppError::msg("not connected"))?;
+    let driver = pool.driver();
+    let schema = schema.as_deref();
+    let require_new_name = || {
+        new_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::msg("new table name is required"))
+    };
+    let sql = match op.as_str() {
+        "rename" => crate::db::data::rename_sql(driver, schema, &name, require_new_name()?),
+        "truncate" => crate::db::data::truncate_sql(driver, schema, &name),
+        "copy_structure" => {
+            crate::db::data::copy_structure_sql(driver, schema, &name, require_new_name()?)
+        }
+        other => return Err(AppError::msg(format!("unknown table op: {other}"))),
+    };
     alter::apply_statements(&pool, &[sql]).await?;
     Ok(())
 }

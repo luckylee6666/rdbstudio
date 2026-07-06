@@ -34,6 +34,7 @@ fn cfg_for(path: &std::path::Path) -> ConnectionConfig {
         pinned: false,
         group: None,
         ssl_mode: None,
+        read_only: false,
         ssh: None,
         password: None,
     }

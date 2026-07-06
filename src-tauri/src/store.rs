@@ -155,6 +155,7 @@ mod tests {
             pinned: false,
             group: None,
             ssl_mode: None,
+            read_only: false,
             ssh: Some(SshConfig {
                 host: "bastion".into(),
                 port: 22,

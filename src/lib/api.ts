@@ -77,6 +77,20 @@ export const api = {
   executeQuery: (id: string, sql: string, queryId?: string) =>
     invoke<QueryResult>("execute_query", { id, sql, queryId: queryId ?? null }),
   cancelQuery: (queryId: string) => invoke<boolean>("cancel_query", { queryId }),
+  tableOp: (
+    id: string,
+    op: "rename" | "truncate" | "copy_structure",
+    name: string,
+    schema?: string,
+    newName?: string
+  ) =>
+    invoke<void>("table_op", {
+      id,
+      op,
+      name,
+      schema: schema ?? null,
+      newName: newName ?? null,
+    }),
   listHistory: (limit?: number) =>
     invoke<HistoryEntry[]>("list_history", { limit: limit ?? null }),
   clearHistory: () => invoke<void>("clear_history"),

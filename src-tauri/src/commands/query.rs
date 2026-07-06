@@ -14,6 +14,22 @@ pub async fn execute_query(
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
+
+    // Connection-level read-only mode: classify the statement and reject
+    // writes before anything reaches the driver. SQL uses the same detector
+    // as the result-shape branch; Redis gets a command whitelist.
+    if state.store.get(&id).map(|c| c.read_only).unwrap_or(false) {
+        let readonly_stmt = match &pool {
+            crate::db::pool::DbPool::Redis(_) => crate::db::redis_ops::line_is_readonly(&sql),
+            _ => crate::db::exec::is_readonly(&sql),
+        };
+        if !readonly_stmt {
+            return Err(AppError::msg(
+                "connection is read-only — write statements are blocked",
+            ));
+        }
+    }
+
     let at = chrono::Utc::now().to_rfc3339();
 
     // Run the query on its own task so `cancel_query` can abort it mid-flight.

@@ -5,7 +5,9 @@ import {
   Braces,
   ChevronRight,
   Clipboard,
+  CopyPlus,
   Database,
+  Eraser,
   FileDown,
   FileUp,
   FolderClosed,
@@ -16,6 +18,7 @@ import {
   Key,
   List,
   Loader2,
+  Lock,
   MoreHorizontal,
   Pencil,
   Plug,
@@ -42,6 +45,7 @@ import { ExportDialog } from "@/components/io/ExportDialog";
 import { ImportDialog } from "@/components/io/ImportDialog";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
+import { connColorValue } from "@/lib/connColors";
 import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { CreateTableDialog } from "./CreateTableDialog";
@@ -704,10 +708,22 @@ function ConnectionBranch({
               open && status === "connected" && "rotate-90"
             )}
           />
+          {connColorValue(cfg.color) && (
+            <span
+              className="h-6 w-[3px] shrink-0 rounded-full"
+              style={{ background: connColorValue(cfg.color) ?? undefined }}
+            />
+          )}
           <DriverBadge driver={cfg.driver} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1 truncate text-[13px] font-medium">
               <span className="truncate">{cfg.name}</span>
+              {cfg.read_only && (
+                <Lock
+                  className="h-3 w-3 shrink-0 text-warning"
+                  aria-label={t("conn.badge.read_only")}
+                />
+              )}
               {cfg.pinned && (
                 <Star className="h-3 w-3 shrink-0 fill-warning text-warning" />
               )}
@@ -1160,6 +1176,9 @@ function Folder({
   const [importTarget, setImportTarget] = useState<TreeEntry | null>(null);
   const [dropTarget, setDropTarget] = useState<TreeEntry | null>(null);
   const [dropError, setDropError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<TreeEntry | null>(null);
+  const [copyTarget, setCopyTarget] = useState<TreeEntry | null>(null);
+  const [truncateTarget, setTruncateTarget] = useState<TreeEntry | null>(null);
   const openTab = useWorkspace((s) => s.openTab);
   const closeTab = useWorkspace((s) => s.closeTab);
   const refreshBranch = useConnections((s) => s.refreshBranch);
@@ -1231,6 +1250,28 @@ function Folder({
     void copyText(name);
   };
 
+  // Rename / truncate / copy-structure from the context menu. SQL is built
+  // server-side (table_op); errors land in the shared failure dialog.
+  const runTableOp = async (
+    op: "rename" | "truncate" | "copy_structure",
+    e: TreeEntry,
+    newName?: string
+  ) => {
+    setDropError(null);
+    try {
+      await api.tableOp(connectionId, op, e.name, schema, newName);
+      if (op === "rename") {
+        // Open tabs point at the old name; close them rather than surface
+        // stale data/designers.
+        closeTab(`data:${connectionId}:${schema ?? ""}:${e.name}`);
+        closeTab(`design:${connectionId}:${schema ?? ""}:${e.name}`);
+      }
+      if (op !== "truncate") await refreshBranch(connectionId);
+    } catch (err) {
+      setDropError(String(err));
+    }
+  };
+
   const confirmDrop = async (e: TreeEntry) => {
     setDropError(null);
     try {
@@ -1297,6 +1338,33 @@ function Folder({
       onClick: () => copyName(e.name),
     },
     ];
+    if (e.kind === "table") {
+      items.push(
+        { id: "sep-table", label: "", separator: true },
+        {
+          id: "rename",
+          label: t("tree.rename_table"),
+          icon: Pencil,
+          onClick: () => setRenameTarget(e),
+        },
+        {
+          id: "copy_structure",
+          label: t("tree.copy_structure"),
+          icon: CopyPlus,
+          onClick: () => setCopyTarget(e),
+        },
+        {
+          id: "truncate",
+          label: t("tree.truncate_table"),
+          icon: Eraser,
+          danger: true,
+          onClick: () => {
+            setDropError(null);
+            setTruncateTarget(e);
+          },
+        }
+      );
+    }
     // Destructive delete: DROP TABLE/VIEW for SQL, DEL for Redis keys.
     const dropLabel =
       e.kind === "view"
@@ -1452,9 +1520,51 @@ function Folder({
           onClose={() => setDropTarget(null)}
         />
       )}
+      <PromptDialog
+        open={!!renameTarget}
+        title={t("tree.rename_table")}
+        label={t("tree.rename.prompt")}
+        initialValue={renameTarget?.name ?? ""}
+        submitLabel={t("common.save")}
+        cancelLabel={t("common.cancel")}
+        onSubmit={(v) => {
+          const trimmed = v.trim();
+          if (renameTarget && trimmed && trimmed !== renameTarget.name) {
+            void runTableOp("rename", renameTarget, trimmed);
+          }
+        }}
+        onClose={() => setRenameTarget(null)}
+      />
+      <PromptDialog
+        open={!!copyTarget}
+        title={t("tree.copy_structure")}
+        label={t("tree.copy_structure.prompt")}
+        initialValue={copyTarget ? `${copyTarget.name}_copy` : ""}
+        submitLabel={t("common.save")}
+        cancelLabel={t("common.cancel")}
+        onSubmit={(v) => {
+          const trimmed = v.trim();
+          if (copyTarget && trimmed) {
+            void runTableOp("copy_structure", copyTarget, trimmed);
+          }
+        }}
+        onClose={() => setCopyTarget(null)}
+      />
+      {truncateTarget && (
+        <ConfirmDialog
+          open={!!truncateTarget}
+          title={t("tree.truncate.title")}
+          message={t("tree.truncate.confirm", { name: truncateTarget.name })}
+          confirmLabel={t("tree.truncate.go")}
+          cancelLabel={t("common.cancel")}
+          danger
+          onConfirm={() => void runTableOp("truncate", truncateTarget)}
+          onClose={() => setTruncateTarget(null)}
+        />
+      )}
       <ConfirmDialog
         open={!!dropError}
-        title={t("tree.drop.title", { kind: t("tree.kind.table") })}
+        title={t("tree.op.failed")}
         message={t("tree.drop.failed", { error: dropError ?? "" })}
         confirmLabel="OK"
         cancelLabel={t("common.cancel")}

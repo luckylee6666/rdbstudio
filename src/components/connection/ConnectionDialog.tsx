@@ -6,9 +6,11 @@ import { Input, Label, Select } from "@/components/ui/Field";
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { DriverBadge } from "./driverIcon";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { CONN_COLORS } from "@/lib/connColors";
 import { useConnections } from "@/store/connections";
 import type { ConnectionConfig, DriverKind, SshConfig } from "@/types";
-import { CheckCircle2, FolderOpen, Loader2, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, FolderOpen, Loader2, XCircle } from "lucide-react";
 import { useT } from "@/store/i18n";
 
 // Sentinel value used by the group <Select> to mean "open the create-group
@@ -518,6 +520,53 @@ export function ConnectionDialog({
               + {t("conn.new_group")}
             </option>
           </Select>
+        </div>
+
+        <div className="grid grid-cols-2 items-start gap-3">
+          <div>
+            <Label>{t("conn.dialog.color")}</Label>
+            <div className="flex items-center gap-1.5 pt-1">
+              <button
+                type="button"
+                onClick={() => update("color", null)}
+                title={t("conn.dialog.color.none")}
+                className={cn(
+                  "grid h-5 w-5 place-items-center rounded-full border border-border/80 text-muted-foreground hover:border-foreground/40",
+                  !cfg.color && "ring-2 ring-brand/70 ring-offset-2 ring-offset-surface"
+                )}
+              >
+                <Ban className="h-3 w-3" />
+              </button>
+              {Object.entries(CONN_COLORS).map(([token, hex]) => (
+                <button
+                  key={token}
+                  type="button"
+                  onClick={() => update("color", token)}
+                  title={token}
+                  className={cn(
+                    "h-5 w-5 rounded-full border border-black/20 transition-transform hover:scale-110",
+                    cfg.color === token &&
+                      "ring-2 ring-brand/70 ring-offset-2 ring-offset-surface"
+                  )}
+                  style={{ background: hex }}
+                />
+              ))}
+            </div>
+          </div>
+          <div>
+            <Label hint={t("conn.dialog.read_only.hint")}>
+              {t("conn.dialog.read_only")}
+            </Label>
+            <label className="flex h-8 cursor-pointer items-center gap-2 text-[12.5px]">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-brand"
+                checked={!!cfg.read_only}
+                onChange={(e) => update("read_only", e.target.checked)}
+              />
+              {t("conn.dialog.read_only.label")}
+            </label>
+          </div>
         </div>
       </div>
 

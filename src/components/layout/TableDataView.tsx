@@ -27,6 +27,7 @@ import { FilterBuilder } from "@/components/data/FilterBuilder";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
+import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { toast } from "@/store/toasts";
 
@@ -56,6 +57,9 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
   const connectionId = tab.connectionId!;
   const schema = tab.schema;
   const table = tab.table ?? tab.title;
+  const driver = useConnections(
+    (s) => s.list.find((c) => c.id === connectionId)?.driver
+  );
 
   const [columns, setColumns] = useState<ColumnInfo[]>([]);
   const [rows, setRows] = useState<unknown[][]>([]);
@@ -427,6 +431,8 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
             rows={gridRows}
             order={order}
             editable={editable}
+            tableName={table}
+            driver={driver}
             onSortClick={onSortClick}
             onCellEdit={onCellEdit}
             onRowRevert={onRowRevert}

@@ -298,6 +298,53 @@ pub fn unsupported<T>(action: &str) -> AppResult<T> {
     )))
 }
 
+/// True when a raw editor command line is a read-only Redis command. Used by
+/// the connection-level read-only guard. Unknown or unparsable commands are
+/// treated as writes — deny by default.
+pub fn line_is_readonly(line: &str) -> bool {
+    let args = match parse_args(line) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let Some(cmd) = args.first() else {
+        return false;
+    };
+    match cmd.to_uppercase().as_str() {
+        // strings / generic
+        "GET" | "MGET" | "GETRANGE" | "STRLEN" | "EXISTS" | "TYPE" | "TTL" | "PTTL"
+        | "SCAN" | "KEYS" | "RANDOMKEY" | "DBSIZE" | "DUMP" | "MEMORY" | "OBJECT"
+        // hash
+        | "HGET" | "HGETALL" | "HMGET" | "HLEN" | "HKEYS" | "HVALS" | "HSCAN" | "HEXISTS"
+        | "HSTRLEN" | "HRANDFIELD"
+        // list
+        | "LRANGE" | "LLEN" | "LINDEX" | "LPOS"
+        // set
+        | "SMEMBERS" | "SCARD" | "SISMEMBER" | "SMISMEMBER" | "SSCAN" | "SRANDMEMBER"
+        // sorted set
+        | "ZRANGE" | "ZRANGEBYSCORE" | "ZRANGEBYLEX" | "ZREVRANGE" | "ZCARD" | "ZCOUNT"
+        | "ZSCORE" | "ZMSCORE" | "ZRANK" | "ZREVRANK" | "ZSCAN" | "ZRANDMEMBER"
+        // stream
+        | "XRANGE" | "XREVRANGE" | "XLEN" | "XINFO" | "XREAD"
+        // bit / hll
+        | "BITCOUNT" | "BITPOS" | "GETBIT" | "PFCOUNT"
+        // server / introspection
+        | "INFO" | "PING" | "ECHO" | "TIME" | "COMMAND" | "SLOWLOG" | "LASTSAVE"
+        // RedisJSON reads
+        | "JSON.GET" | "JSON.MGET" | "JSON.TYPE" | "JSON.STRLEN" | "JSON.ARRLEN"
+        | "JSON.OBJKEYS" | "JSON.OBJLEN" => true,
+        // Mixed-mode commands: only their read subcommands pass.
+        "CONFIG" => matches!(
+            args.get(1).map(|s| s.to_uppercase()).as_deref(),
+            Some("GET")
+        ),
+        "CLIENT" => matches!(
+            args.get(1).map(|s| s.to_uppercase()).as_deref(),
+            Some("LIST") | Some("INFO") | Some("GETNAME") | Some("ID")
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +383,29 @@ mod tests {
     fn parse_args_empty_input_returns_empty_vec() {
         assert!(parse_args("").unwrap().is_empty());
         assert!(parse_args("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn line_is_readonly_allows_reads_denies_writes() {
+        assert!(line_is_readonly("GET foo"));
+        assert!(line_is_readonly("get foo"));
+        assert!(line_is_readonly("HGETALL user:1"));
+        assert!(line_is_readonly("SCAN 0 MATCH * COUNT 100"));
+        assert!(line_is_readonly("CONFIG GET maxmemory"));
+        assert!(line_is_readonly("CLIENT LIST"));
+        assert!(line_is_readonly("JSON.GET doc $"));
+
+        assert!(!line_is_readonly("SET foo bar"));
+        assert!(!line_is_readonly("DEL foo"));
+        assert!(!line_is_readonly("HSET user:1 name x"));
+        assert!(!line_is_readonly("FLUSHALL"));
+        assert!(!line_is_readonly("EXPIRE foo 10"));
+        assert!(!line_is_readonly("CONFIG SET maxmemory 0"));
+        assert!(!line_is_readonly("CLIENT KILL ID 5"));
+        // Unknown / unparsable → treated as writes.
+        assert!(!line_is_readonly("SOMEFUTURECMD foo"));
+        assert!(!line_is_readonly("GET \"unterminated"));
+        assert!(!line_is_readonly(""));
     }
 
     #[test]

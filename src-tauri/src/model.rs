@@ -50,6 +50,11 @@ pub struct ConnectionConfig {
     /// Ignored for SQLite.
     #[serde(default)]
     pub ssl_mode: Option<String>,
+    /// Safety switch: when set, every write path (DML/DDL in the editor, grid
+    /// edits, ALTER, DROP, CSV import, Redis write commands) is rejected
+    /// server-side. Pair with `color` to mark production connections.
+    #[serde(default)]
+    pub read_only: bool,
     /// Optional SSH tunnel; when present, connections route through it.
     #[serde(default)]
     pub ssh: Option<SshConfig>,
