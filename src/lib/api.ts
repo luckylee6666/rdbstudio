@@ -29,6 +29,8 @@ export interface QueryResult {
   rows: unknown[][];
   rows_affected: number | null;
   elapsed_ms: number;
+  /** SELECT produced more rows than the backend cap; the tail was dropped. */
+  truncated: boolean;
 }
 
 export interface HistoryEntry {
@@ -72,8 +74,9 @@ export const api = {
       limit: limit ?? null,
     }),
 
-  executeQuery: (id: string, sql: string) =>
-    invoke<QueryResult>("execute_query", { id, sql }),
+  executeQuery: (id: string, sql: string, queryId?: string) =>
+    invoke<QueryResult>("execute_query", { id, sql, queryId: queryId ?? null }),
+  cancelQuery: (queryId: string) => invoke<boolean>("cancel_query", { queryId }),
   listHistory: (limit?: number) =>
     invoke<HistoryEntry[]>("list_history", { limit: limit ?? null }),
   clearHistory: () => invoke<void>("clear_history"),

@@ -615,6 +615,7 @@ function ConnectionBranch({
   };
 
   const toggle = async () => {
+    if (status === "connecting") return;
     if (status !== "connected") {
       try {
         await connect(cfg.id);
@@ -857,6 +858,7 @@ function ConnectionBranch({
                   id: "connect",
                   label: t("common.connect"),
                   icon: Plug,
+                  disabled: status === "connecting",
                   onClick: () => void connect(cfg.id),
                 },
             {

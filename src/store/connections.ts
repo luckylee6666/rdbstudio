@@ -90,6 +90,9 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   connect: async (id) => {
+    // One attempt at a time — a second click during a slow (e.g. SSH) connect
+    // would race the first and leave status reflecting whichever finished last.
+    if (get().status[id] === "connecting") return;
     set({ status: { ...get().status, [id]: "connecting" }, errors: { ...get().errors, [id]: undefined } });
     try {
       const s = await api.connect(id);

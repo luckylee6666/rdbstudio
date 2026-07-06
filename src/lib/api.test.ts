@@ -67,14 +67,40 @@ describe("api", () => {
       rows: [[1]],
       rows_affected: null,
       elapsed_ms: 3,
+      truncated: false,
     };
     const calls = installRecorder(() => result);
 
     const got = await api.executeQuery("c1", "SELECT 1 AS a");
 
     expect(calls[0].cmd).toBe("execute_query");
-    expect(calls[0].payload).toEqual({ id: "c1", sql: "SELECT 1 AS a" });
+    expect(calls[0].payload).toEqual({
+      id: "c1",
+      sql: "SELECT 1 AS a",
+      queryId: null,
+    });
     expect(got).toEqual(result);
+  });
+
+  it("executeQuery forwards the cancel token as queryId", async () => {
+    const calls = installRecorder(() => ({
+      columns: [],
+      rows: [],
+      rows_affected: null,
+      elapsed_ms: 0,
+      truncated: false,
+    }));
+
+    await api.executeQuery("c1", "SELECT 1", "tok-1");
+    expect(calls[0].payload).toEqual({
+      id: "c1",
+      sql: "SELECT 1",
+      queryId: "tok-1",
+    });
+
+    await api.cancelQuery("tok-1");
+    expect(calls[1].cmd).toBe("cancel_query");
+    expect(calls[1].payload).toEqual({ queryId: "tok-1" });
   });
 
   it("listSchemas passes database: null when omitted", async () => {

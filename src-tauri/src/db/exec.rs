@@ -18,11 +18,37 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Json>>,
     pub rows_affected: Option<u64>,
     pub elapsed_ms: u64,
+    /// True when a SELECT produced more than `MAX_ROWS` rows and the tail was
+    /// dropped to protect memory / the IPC bridge.
+    pub truncated: bool,
+}
+
+/// Hard cap on rows a single editor query returns. Anything above this is cut
+/// off and flagged via `QueryResult::truncated` — an unbounded `SELECT *` on a
+/// large table would otherwise decode fully into memory and freeze the UI.
+pub const MAX_ROWS: usize = 10_000;
+
+/// Skip leading whitespace, SQL comments (`--`, `/* */`), and opening parens
+/// so scripts like `-- note\nSELECT 1` or `(SELECT 1)` classify like a plain
+/// SELECT instead of falling into the write branch (which returns no rows).
+fn skip_leading_trivia(sql: &str) -> &str {
+    let mut s = sql;
+    loop {
+        let t = s.trim_start();
+        if let Some(rest) = t.strip_prefix("--") {
+            s = rest.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        } else if let Some(rest) = t.strip_prefix("/*") {
+            s = rest.split_once("*/").map(|(_, r)| r).unwrap_or("");
+        } else if let Some(rest) = t.strip_prefix('(') {
+            s = rest;
+        } else {
+            return t;
+        }
+    }
 }
 
 pub fn is_readonly(sql: &str) -> bool {
-    let lead: String = sql
-        .trim_start()
+    let lead: String = skip_leading_trivia(sql)
         .chars()
         .take_while(|c| c.is_alphabetic())
         .collect::<String>()
@@ -31,6 +57,24 @@ pub fn is_readonly(sql: &str) -> bool {
         lead.as_str(),
         "SELECT" | "WITH" | "SHOW" | "PRAGMA" | "EXPLAIN" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE"
     )
+}
+
+/// Drain up to `MAX_ROWS` rows from a fetch stream; returns the rows plus
+/// whether the stream had more (i.e. the result was truncated).
+async fn fetch_capped<T>(
+    mut stream: futures::stream::BoxStream<'_, Result<T, sqlx::Error>>,
+) -> AppResult<(Vec<T>, bool)> {
+    use futures::TryStreamExt;
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = stream.try_next().await? {
+        if rows.len() >= MAX_ROWS {
+            truncated = true;
+            break;
+        }
+        rows.push(row);
+    }
+    Ok((rows, truncated))
 }
 
 pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
@@ -58,6 +102,7 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
             rows: vec![],
             rows_affected: Some(rows_affected),
             elapsed_ms: start.elapsed().as_millis() as u64,
+            truncated: false,
         })
     }
 }
@@ -67,8 +112,10 @@ async fn sqlite_select(
     sql: &str,
     start: Instant,
 ) -> AppResult<QueryResult> {
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
-    Ok(decode_sqlite(rows, start))
+    let (rows, truncated) = fetch_capped(sqlx::query(sql).fetch(pool)).await?;
+    let mut out = decode_sqlite(rows, start);
+    out.truncated = truncated;
+    Ok(out)
 }
 
 pub fn decode_sqlite(rows: Vec<sqlx::sqlite::SqliteRow>, start: Instant) -> QueryResult {
@@ -97,6 +144,7 @@ pub fn decode_sqlite(rows: Vec<sqlx::sqlite::SqliteRow>, start: Instant) -> Quer
         rows: data,
         rows_affected: None,
         elapsed_ms: start.elapsed().as_millis() as u64,
+        truncated: false,
     }
 }
 
@@ -132,8 +180,10 @@ async fn pg_select(
     sql: &str,
     start: Instant,
 ) -> AppResult<QueryResult> {
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
-    Ok(decode_postgres(rows, start))
+    let (rows, truncated) = fetch_capped(sqlx::query(sql).fetch(pool)).await?;
+    let mut out = decode_postgres(rows, start);
+    out.truncated = truncated;
+    Ok(out)
 }
 
 pub fn decode_postgres(rows: Vec<sqlx::postgres::PgRow>, start: Instant) -> QueryResult {
@@ -162,6 +212,7 @@ pub fn decode_postgres(rows: Vec<sqlx::postgres::PgRow>, start: Instant) -> Quer
         rows: data,
         rows_affected: None,
         elapsed_ms: start.elapsed().as_millis() as u64,
+        truncated: false,
     }
 }
 
@@ -232,8 +283,10 @@ async fn mysql_select(
     sql: &str,
     start: Instant,
 ) -> AppResult<QueryResult> {
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
-    Ok(decode_mysql(rows, start))
+    let (rows, truncated) = fetch_capped(sqlx::query(sql).fetch(pool)).await?;
+    let mut out = decode_mysql(rows, start);
+    out.truncated = truncated;
+    Ok(out)
 }
 
 pub fn decode_mysql(rows: Vec<sqlx::mysql::MySqlRow>, start: Instant) -> QueryResult {
@@ -262,6 +315,7 @@ pub fn decode_mysql(rows: Vec<sqlx::mysql::MySqlRow>, start: Instant) -> QueryRe
         rows: data,
         rows_affected: None,
         elapsed_ms: start.elapsed().as_millis() as u64,
+        truncated: false,
     }
 }
 
@@ -414,5 +468,19 @@ mod tests {
         assert!(!is_readonly("  DELETE FROM users"));
         assert!(!is_readonly("CREATE TABLE x (a int)"));
         assert!(!is_readonly("DROP TABLE x"));
+    }
+
+    #[test]
+    fn is_readonly_sees_past_comments_and_parens() {
+        assert!(is_readonly("-- note\nSELECT 1"));
+        assert!(is_readonly("/* block */ SELECT 1"));
+        assert!(is_readonly("/* multi\nline */\n-- and line\nSELECT 1"));
+        assert!(is_readonly("(SELECT 1)"));
+        assert!(is_readonly("((select 1))"));
+        assert!(!is_readonly("-- note\nDELETE FROM x"));
+        assert!(!is_readonly("/* c */ UPDATE x SET a=1"));
+        // Unterminated trivia degrades to "not readonly", never panics.
+        assert!(!is_readonly("-- only a comment"));
+        assert!(!is_readonly("/* unterminated"));
     }
 }

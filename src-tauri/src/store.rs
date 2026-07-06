@@ -10,6 +10,32 @@ struct StoreFile {
     connections: Vec<ConnectionConfig>,
 }
 
+/// Read + parse a JSON store file. A corrupt file is moved aside to
+/// `<file>.json.corrupt` — so the next flush can't overwrite the user's only
+/// copy — and the caller starts from `T::default()` instead of silently
+/// wiping the data or failing app boot.
+pub(crate) fn load_json_or_quarantine<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> AppResult<T> {
+    if !path.exists() {
+        return Ok(T::default());
+    }
+    let raw = std::fs::read(path)?;
+    match serde_json::from_slice(&raw) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let quarantine = path.with_extension("json.corrupt");
+            let _ = std::fs::rename(path, &quarantine);
+            eprintln!(
+                "rdbstudio: {} is corrupt ({e}); moved to {} and starting fresh",
+                path.display(),
+                quarantine.display()
+            );
+            Ok(T::default())
+        }
+    }
+}
+
 fn strip_connection_secrets(cfg: &mut ConnectionConfig) -> bool {
     let mut stripped = cfg.password.take().is_some();
     if let Some(ssh) = cfg.ssh.as_mut() {
@@ -28,12 +54,7 @@ impl ConnectionStore {
     pub fn load(app_data: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(app_data)?;
         let path = app_data.join("connections.json");
-        let mut inner = if path.exists() {
-            let raw = std::fs::read(&path)?;
-            serde_json::from_slice(&raw).unwrap_or_default()
-        } else {
-            StoreFile::default()
-        };
+        let mut inner: StoreFile = load_json_or_quarantine(&path)?;
         let mut had_plaintext_secrets = false;
         for conn in &mut inner.connections {
             had_plaintext_secrets |= strip_connection_secrets(conn);
@@ -173,6 +194,29 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_store_is_quarantined_not_wiped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, b"{ definitely not json").expect("write corrupt");
+
+        let store = ConnectionStore::load(dir.path()).expect("load survives corruption");
+        assert!(store.list().is_empty());
+
+        // The damaged bytes must survive in the quarantine file so the user
+        // can recover manually; a subsequent flush must not clobber them.
+        let quarantined =
+            std::fs::read(dir.path().join("connections.json.corrupt")).expect("quarantine exists");
+        assert_eq!(quarantined, b"{ definitely not json");
+
+        store
+            .upsert(connection_with_secrets())
+            .expect("store usable after quarantine");
+        let quarantined_after =
+            std::fs::read(dir.path().join("connections.json.corrupt")).expect("still there");
+        assert_eq!(quarantined_after, b"{ definitely not json");
+    }
+
+    #[test]
     fn connection_store_load_scrubs_plaintext_secrets_from_existing_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -235,12 +279,7 @@ impl SnippetStore {
     pub fn load(app_data: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(app_data)?;
         let path = app_data.join("snippets.json");
-        let inner = if path.exists() {
-            let raw = std::fs::read(&path)?;
-            serde_json::from_slice(&raw).unwrap_or_default()
-        } else {
-            SnippetsFile::default()
-        };
+        let inner: SnippetsFile = load_json_or_quarantine(&path)?;
         Ok(Self {
             path,
             inner: Arc::new(RwLock::new(inner)),

@@ -145,6 +145,7 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
                     rows,
                     rows_affected: None,
                     elapsed_ms: elapsed,
+                    truncated: false,
                 }
             } else {
                 let rows: Vec<Vec<Json>> =
@@ -157,6 +158,7 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
                     rows,
                     rows_affected: None,
                     elapsed_ms: elapsed,
+                    truncated: false,
                 }
             }
         }
@@ -174,6 +176,7 @@ fn single_cell(col: &str, v: Json, elapsed_ms: u64) -> QueryResult {
         rows: vec![vec![v]],
         rows_affected: None,
         elapsed_ms,
+        truncated: false,
     }
 }
 

@@ -34,11 +34,7 @@ impl HistoryStore {
     pub fn load(app_data: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(app_data)?;
         let path = app_data.join("history.json");
-        let inner = if path.exists() {
-            serde_json::from_slice(&std::fs::read(&path)?).unwrap_or_default()
-        } else {
-            File::default()
-        };
+        let inner: File = crate::store::load_json_or_quarantine(&path)?;
         Ok(Self {
             path,
             inner: Arc::new(RwLock::new(inner)),

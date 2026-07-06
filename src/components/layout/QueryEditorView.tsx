@@ -6,6 +6,7 @@ import {
   Loader2,
   Play,
   Sparkles,
+  Square,
   TableProperties,
   FileCode,
 } from "lucide-react";
@@ -60,6 +61,9 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     tab.connectionId
   );
   const lastRunRef = useRef<number>(0);
+  // Current run: backend query id (for cancel_query) + a cancelled flag the
+  // statement loop checks so Stop also halts multi-statement scripts.
+  const runSessionRef = useRef<{ qid: string; cancelled: boolean } | null>(null);
   const t = useT();
 
   const [saveSnippetOpen, setSaveSnippetOpen] = useState(false);
@@ -223,15 +227,26 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         if (statements.length === 0) statements = [source];
       }
 
+      const session = { qid: crypto.randomUUID(), cancelled: false };
+      runSessionRef.current = session;
+
       setState({ kind: "running" });
       try {
         let last: QueryResult | null = null;
         let affected_total = 0;
         for (let i = 0; i < statements.length; i++) {
+          if (session.cancelled) {
+            setState({ kind: "error", message: t("query.err.cancelled") });
+            return;
+          }
           try {
-            last = await api.executeQuery(targetId, statements[i]);
+            last = await api.executeQuery(targetId, statements[i], session.qid);
             if (last.rows_affected != null) affected_total += last.rows_affected;
           } catch (e) {
+            if (session.cancelled) {
+              setState({ kind: "error", message: t("query.err.cancelled") });
+              return;
+            }
             // Tag which statement of the batch broke so the UI can hint at it.
             const prefix =
               statements.length > 1
@@ -259,10 +274,21 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         });
       } catch (e) {
         setState({ kind: "error", message: String(e) });
+      } finally {
+        if (runSessionRef.current === session) runSessionRef.current = null;
       }
     },
     [sql, targetId, targetCfg, t]
   );
+
+  const onStop = useCallback(() => {
+    const session = runSessionRef.current;
+    if (!session) return;
+    session.cancelled = true;
+    void api.cancelQuery(session.qid).catch(() => {
+      /* the statement may have just finished; the cancelled flag still stops the loop */
+    });
+  }, []);
 
   const onExport = async () => {
     if (state.kind !== "ok" || state.result.rows.length === 0) return;
@@ -316,24 +342,25 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 bg-surface/30 px-3">
-        <button
-          onClick={() => void run()}
-          disabled={state.kind === "running" || !targetId}
-          className={cn(
-            "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] font-medium transition-colors",
-            state.kind === "running"
-              ? "bg-brand/40 text-brand-foreground"
-              : "bg-brand text-brand-foreground hover:bg-brand/90 disabled:opacity-50"
-          )}
-        >
-          {state.kind === "running" ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
+        {state.kind === "running" ? (
+          <button
+            onClick={onStop}
+            className="flex h-7 items-center gap-1.5 rounded-md bg-danger/90 px-2.5 text-[12px] font-medium text-white transition-colors hover:bg-danger"
+          >
+            <Square className="h-3 w-3 fill-current" />
+            {t("query.toolbar.stop")}
+          </button>
+        ) : (
+          <button
+            onClick={() => void run()}
+            disabled={!targetId}
+            className="flex h-7 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[12px] font-medium text-brand-foreground transition-colors hover:bg-brand/90 disabled:opacity-50"
+          >
             <Play className="h-3.5 w-3.5" />
-          )}
-          {t("query.toolbar.run")}
-          <span className="ml-1 rounded bg-black/20 px-1 text-[10px]">⌘↵</span>
-        </button>
+            {t("query.toolbar.run")}
+            <span className="ml-1 rounded bg-black/20 px-1 text-[10px]">⌘↵</span>
+          </button>
+        )}
         <button
           onClick={() => void run({ explain: true })}
           disabled={
@@ -420,6 +447,12 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         </div>
         <div className="flex h-[40%] min-h-[180px] shrink-0 flex-col bg-background">
           <ResultHeader state={state} tab={tab} />
+          {state.kind === "ok" && state.result.truncated && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-warning/40 bg-warning/10 px-3 py-1.5 text-[11.5px] text-warning">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              {t("query.result.truncated", { n: state.result.rows.length })}
+            </div>
+          )}
           <div className="min-h-0 flex-1">
             {state.kind === "ok" && state.result.columns.length > 0 && (
               <DataGrid columns={gridColumns} rows={gridRows} />

@@ -43,6 +43,7 @@ pub fn run() {
             commands::meta::list_columns,
             commands::meta::scan_redis_keys,
             commands::query::execute_query,
+            commands::query::cancel_query,
             commands::query::list_history,
             commands::query::clear_history,
             commands::data::fetch_table_data,

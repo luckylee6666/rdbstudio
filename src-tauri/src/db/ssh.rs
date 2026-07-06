@@ -46,6 +46,26 @@ impl Drop for Tunnel {
     }
 }
 
+/// Temp files created while setting up a tunnel. Owns cleanup until the
+/// `Tunnel` takes over; if `open()` errors out before the tunnel exists
+/// (e.g. `ssh` fails to spawn), dropping this removes the files instead of
+/// leaking them into the OS temp dir on every failed attempt.
+struct TempFiles(Vec<PathBuf>);
+
+impl TempFiles {
+    fn take(mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Pick a free loopback port by binding to :0 and immediately releasing it.
 /// There's a small race before `ssh` rebinds it, but it's tolerable for a
 /// desktop app establishing one tunnel at a time.
@@ -104,7 +124,7 @@ pub async fn open(
     cmd.arg(format!("{}@{}", ssh.username, ssh.host));
 
     // Temp files we must clean up (askpass script + captured stderr).
-    let mut cleanup: Vec<PathBuf> = Vec::new();
+    let mut cleanup = TempFiles(Vec::new());
 
     // Feed password / passphrase non-interactively via SSH_ASKPASS.
     let needs_secret = (auth == "password") || (auth == "key" && secret.is_some());
@@ -119,14 +139,14 @@ pub async fn open(
         if auth == "password" {
             cmd.arg("-o").arg("PreferredAuthentications=password,keyboard-interactive");
         }
-        cleanup.push(script);
+        cleanup.0.push(script);
     }
 
     // Capture stderr to a temp file so we can surface ssh's error on failure.
     let err_path = std::env::temp_dir().join(format!("rdb-ssh-{}.log", local_port));
     let err_file = std::fs::File::create(&err_path)
         .map_err(|e| AppError::msg(format!("ssh stderr temp: {e}")))?;
-    cleanup.push(err_path.clone());
+    cleanup.0.push(err_path.clone());
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -138,7 +158,7 @@ pub async fn open(
 
     let tunnel = Tunnel {
         child: Mutex::new(Some(child)),
-        cleanup,
+        cleanup: cleanup.take(),
         local_host: local_host.clone(),
         local_port,
     };

@@ -79,28 +79,40 @@ pub async fn test_connection(config: ConnectionConfig) -> AppResult<String> {
 
 #[tauri::command]
 pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<ConnectionSummary> {
+    // A second connect for the same id while one is in flight (double-click,
+    // impatient retry during a slow SSH handshake) would stack a duplicate
+    // tunnel/pool and race the state inserts — reject it instead.
+    if !state.begin_connect(&id) {
+        return Err(AppError::msg("a connection attempt is already in progress"));
+    }
+    let result = connect_inner(&state, &id).await;
+    state.end_connect(&id);
+    result
+}
+
+async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummary> {
     let mut cfg = state
         .store
-        .get(&id)
+        .get(id)
         .ok_or_else(|| AppError::msg(format!("connection {} not found", id)))?;
-    cfg.password = secret::read_password(&id)?;
+    cfg.password = secret::read_password(id)?;
 
     // If this id is already connected (frontend double-click, retry, or a
     // reconnect that didn't go through `disconnect`), tear down the existing
     // pool/tunnel first. A plain re-insert would drop the old DbPool without
     // running its async `close()`, leaking sqlx connections / server sessions,
     // and would stack a second SSH forward. Mirrors `disconnect`'s ordering.
-    if let Some(old) = state.remove_pool(&id) {
+    if let Some(old) = state.remove_pool(id) {
         old.close().await;
     }
-    let _ = state.remove_tunnel(&id);
+    let _ = state.remove_tunnel(id);
 
     // Establish an SSH tunnel first if configured, then point the pool at the
     // local forwarded endpoint. The tunnel is stored alongside the pool so it
     // lives exactly as long as the connection.
     let mut tunnel: Option<Arc<ssh::Tunnel>> = None;
     let url = if let Some(ssh_cfg) = cfg.ssh.clone() {
-        let secret = secret::read_password(&ssh_secret_id(&id))?;
+        let secret = secret::read_password(&ssh_secret_id(id))?;
         let (db_host, db_port) = target_addr(&cfg);
         let t = ssh::open(&ssh_cfg, &db_host, db_port, secret.as_deref()).await?;
         let local = (t.local_host.clone(), t.local_port);
@@ -114,11 +126,11 @@ pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<Connec
     let pool = DbPool::connect(cfg.driver, &url).await?;
     let version = crate::db::meta::server_version(&pool).await.ok();
     if let Some(t) = tunnel {
-        state.insert_tunnel(id.clone(), t);
+        state.insert_tunnel(id.to_string(), t);
     }
-    state.insert_pool(id.clone(), pool);
+    state.insert_pool(id.to_string(), pool);
     Ok(ConnectionSummary {
-        id,
+        id: id.to_string(),
         connected: true,
         server_version: version,
     })

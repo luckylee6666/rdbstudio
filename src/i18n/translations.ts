@@ -270,6 +270,7 @@ const en: Dict = {
 
   // query editor
   "query.toolbar.run": "Run",
+  "query.toolbar.stop": "Stop",
   "query.toolbar.explain": "Explain",
   "query.toolbar.target": "Target",
   "query.toolbar.pick_target": "— pick a target —",
@@ -288,7 +289,10 @@ const en: Dict = {
   "query.result.executed_affected":
     "Statement executed. {{n}} row(s) affected.",
   "query.result.executed": "Statement executed.",
+  "query.result.truncated":
+    "Results truncated — showing the first {{n}} rows. Add a LIMIT to narrow the query.",
   "query.err.title": "Query failed",
+  "query.err.cancelled": "Query cancelled.",
 
   // designer
   "design.editing": "editing",
@@ -656,6 +660,7 @@ const zh: Dict = {
 
   // query editor
   "query.toolbar.run": "运行",
+  "query.toolbar.stop": "停止",
   "query.toolbar.explain": "Explain",
   "query.toolbar.target": "目标",
   "query.toolbar.pick_target": "— 选择目标 —",
@@ -673,7 +678,9 @@ const zh: Dict = {
   "query.result.idle": "运行查询以查看结果。",
   "query.result.executed_affected": "已执行。影响 {{n}} 行。",
   "query.result.executed": "已执行。",
+  "query.result.truncated": "结果已截断，仅显示前 {{n}} 行。可加 LIMIT 缩小查询范围。",
   "query.err.title": "查询失败",
+  "query.err.cancelled": "查询已取消。",
 
   // designer
   "design.editing": "编辑中",

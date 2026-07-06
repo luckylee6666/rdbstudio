@@ -44,4 +44,30 @@ async fn execute_select_returns_all_rows() {
         .expect("execute select all");
     assert_eq!(r.rows.len(), 3);
     assert_eq!(r.columns.len(), 2);
+    assert!(!r.truncated, "small result must not be flagged truncated");
+}
+
+#[tokio::test]
+async fn execute_select_caps_huge_results_and_flags_truncation() {
+    let pool = common::mem_pool().await;
+
+    // Recursive CTE generates MAX_ROWS + 1 rows without inserting anything.
+    let over = exec::MAX_ROWS + 1;
+    let sql = format!(
+        "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < {over}) \
+         SELECT x FROM cnt"
+    );
+    let r = exec::execute(&pool, &sql).await.expect("capped select");
+    assert_eq!(r.rows.len(), exec::MAX_ROWS, "rows must stop at the cap");
+    assert!(r.truncated, "over-cap result must be flagged truncated");
+
+    // Exactly at the cap: full result, no false-positive truncation flag.
+    let at = exec::MAX_ROWS;
+    let sql = format!(
+        "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < {at}) \
+         SELECT x FROM cnt"
+    );
+    let r = exec::execute(&pool, &sql).await.expect("at-cap select");
+    assert_eq!(r.rows.len(), exec::MAX_ROWS);
+    assert!(!r.truncated, "exactly-at-cap must not be flagged truncated");
 }
