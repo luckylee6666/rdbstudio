@@ -48,6 +48,22 @@ async fn execute_select_returns_all_rows() {
 }
 
 #[tokio::test]
+async fn execute_insert_returning_yields_rows() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let r = exec::execute(
+        &pool,
+        "INSERT INTO users (name, age) VALUES ('Dave', 40) RETURNING id, name",
+    )
+    .await
+    .expect("insert returning");
+    assert_eq!(r.rows.len(), 1, "RETURNING must surface the row");
+    assert_eq!(r.columns.len(), 2);
+    assert_eq!(r.rows[0][1].as_str(), Some("Dave"));
+}
+
+#[tokio::test]
 async fn execute_select_caps_huge_results_and_flags_truncation() {
     let pool = common::mem_pool().await;
 

@@ -237,6 +237,8 @@ export interface WorkspaceTab {
   table?: string;
   subtitle?: string;
   dirty?: boolean;
+  /** Pre-applied filters for table-data tabs (e.g. FK jumps). */
+  initialFilters?: Filter[];
   // Set when kind === "redis-key": the raw key name and its Redis value type
   // (string/hash/list/set/zset/stream/ReJSON-RL/...).
   redisKey?: string;

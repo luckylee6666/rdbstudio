@@ -66,6 +66,18 @@ pub async fn export_table(
     let mut rows: u64 = 0;
     let mut first = true;
 
+    // Deterministic paging: without a stable ORDER BY, LIMIT/OFFSET batches
+    // can overlap or skip rows mid-export. Order by the first PK column when
+    // the table has one; a table without a PK keeps the old best-effort scan.
+    let order_by = crate::db::meta::list_columns(pool, schema, table)
+        .await
+        .ok()
+        .and_then(|cols| cols.into_iter().find(|c| c.is_primary_key))
+        .map(|c| data::OrderBy {
+            column: c.name,
+            direction: data::SortDir::Asc,
+        });
+
     // SQL dump: emit the CREATE TABLE statement up front (best-effort — a
     // describe failure shouldn't abort the data export).
     if let ExportFormat::Sql = opts.format {
@@ -89,7 +101,7 @@ pub async fn export_table(
             table: table.to_string(),
             limit: opts.batch_size,
             offset,
-            order_by: None,
+            order_by: order_by.clone(),
             filters: vec![],
             where_raw: None,
         };

@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  ArrowUpRight,
   Braces,
   Clipboard,
   FileText,
@@ -37,6 +38,9 @@ interface Props {
   tableName?: string;
   /** Driver for identifier quoting in generated INSERTs. */
   driver?: DriverKind;
+  /** Column names that are single-column FKs → jump affordance in the cell. */
+  fkColumns?: Record<string, unknown>;
+  onFkJump?: (colName: string, value: unknown) => void;
   onSortClick: (col: string) => void;
   onCellEdit: (rowKey: string, colIndex: number, value: unknown) => void;
   onRowRevert: (rowKey: string) => void;
@@ -62,6 +66,8 @@ export function TableDataGrid({
   editable,
   tableName,
   driver,
+  fkColumns,
+  onFkJump,
   onSortClick,
   onCellEdit,
   onRowRevert,
@@ -240,6 +246,12 @@ export function TableDataGrid({
                           setEditing({ row: row.key, col: i });
                         }}
                         onStopEdit={() => setEditing(null)}
+                        isFk={!!fkColumns?.[c.name]}
+                        onFkJump={
+                          onFkJump
+                            ? () => onFkJump(c.name, row.values[i])
+                            : undefined
+                        }
                         onCommit={(v) => {
                           setEditing(null);
                           onCellEdit(row.key, i, v);
@@ -388,6 +400,8 @@ function EditableCell({
   isInsert,
   deleted,
   readOnly,
+  isFk,
+  onFkJump,
   onStartEdit,
   onStopEdit,
   onCommit,
@@ -401,11 +415,14 @@ function EditableCell({
   isInsert: boolean;
   deleted?: boolean;
   readOnly: boolean;
+  isFk?: boolean;
+  onFkJump?: () => void;
   onStartEdit: () => void;
   onStopEdit: () => void;
   onCommit: (v: unknown) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
+  const t = useT();
   const isNull = value === null || value === undefined;
   const isNumeric = /int|numeric|decimal|float|double|real/i.test(
     column.data_type
@@ -440,7 +457,7 @@ function EditableCell({
       onDoubleClick={onStartEdit}
       onContextMenu={onContextMenu}
       className={cn(
-        "flex items-center overflow-hidden border-r border-border/60 px-2 font-mono",
+        "group/cell flex items-center overflow-hidden border-r border-border/60 px-2 font-mono",
         isNumeric && "justify-end tabular-nums",
         isNull && "italic text-muted-foreground/50",
         dirty && "bg-amber-500/10",
@@ -452,6 +469,19 @@ function EditableCell({
       title={isNull ? "NULL" : display}
     >
       <span className="truncate">{display}</span>
+      {isFk && !isNull && onFkJump && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onFkJump();
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+          title={t("grid.fk_jump")}
+          className="ml-auto hidden h-4 w-4 shrink-0 place-items-center rounded text-brand hover:bg-brand/20 group-hover/cell:grid"
+        >
+          <ArrowUpRight className="h-3 w-3" />
+        </button>
+      )}
     </div>
   );
 }

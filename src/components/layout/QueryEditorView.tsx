@@ -93,6 +93,18 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     return () => window.removeEventListener("insert-sql", handleInsert as EventListener);
   }, [tab.id]);
 
+  // Buffer refresh for reused tabs: "Show DDL" / history re-open an existing
+  // tab id, which never remounts — the sessionStorage prime is only read in
+  // the mount initializer, so senders also dispatch this event.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent<{ tabId: string; sql: string }>;
+      if (ce.detail?.tabId === tab.id) setSql(ce.detail.sql);
+    };
+    window.addEventListener("set-editor-sql", handler);
+    return () => window.removeEventListener("set-editor-sql", handler);
+  }, [tab.id]);
+
   const handleSaveSnippet = async () => {
     if (!snippetName.trim()) {
       setSnippetError("Name is required");
@@ -316,7 +328,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     }
   };
 
-  const onFormat = () => {
+  const onFormat = useCallback(() => {
     const language: Parameters<typeof formatSql>[1] = (() => {
       switch (targetCfg?.driver) {
         case "postgres":
@@ -341,7 +353,16 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     } catch {
       /* keep as-is; user will see no change rather than a destroyed buffer */
     }
-  };
+  }, [sql, targetCfg?.driver]);
+
+  // ⌘⇧F from the global shortcut layer formats the active tab's buffer.
+  useEffect(() => {
+    const handler = () => {
+      if (useWorkspace.getState().activeTabId === tab.id) onFormat();
+    };
+    window.addEventListener("format-sql", handler);
+    return () => window.removeEventListener("format-sql", handler);
+  }, [tab.id, onFormat]);
 
   const gridColumns: GridColumn[] =
     state.kind === "ok"

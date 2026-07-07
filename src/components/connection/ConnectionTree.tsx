@@ -3,6 +3,7 @@ import {
   Activity,
   Binary,
   Braces,
+  AlertTriangle,
   ChevronRight,
   Clipboard,
   CopyPlus,
@@ -986,6 +987,7 @@ function DatabaseNode({
   const schemaKey = database;
   const passSchema = schemaKey === "main" ? undefined : schemaKey;
   const tables = branch?.tables?.[schemaKey];
+  const tablesError = branch?.tablesError?.[schemaKey];
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const t = useT();
@@ -1001,10 +1003,10 @@ function DatabaseNode({
     });
 
   useEffect(() => {
-    if (open && !tables) {
+    if (open && !tables && !tablesError) {
       void loadTables(connectionId, schemaKey, passSchema);
     }
-  }, [open, tables, loadTables, connectionId, schemaKey, passSchema]);
+  }, [open, tables, tablesError, loadTables, connectionId, schemaKey, passSchema]);
 
   const Icon = Database;
 
@@ -1067,14 +1069,24 @@ function DatabaseNode({
       )}
       {open && (
         <div className="ml-4 border-l border-border/60 pl-1">
-          {!tables ? (
+          {!tables && tablesError ? (
+            <button
+              onClick={() => void loadTables(connectionId, schemaKey, passSchema)}
+              title={tablesError}
+              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] text-danger hover:bg-danger/10"
+            >
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{t("tree.load_failed")}</span>
+              <span className="ml-auto shrink-0 underline">{t("tree.retry")}</span>
+            </button>
+          ) : !tables ? (
             <div className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
-              loading…
+              {t("common.loading")}
             </div>
           ) : tables.length === 0 ? (
             <div className="px-2 py-1 text-[11px] text-muted-foreground">
-              (no tables)
+              {t("tree.no_tables")}
             </div>
           ) : (
             <TableGroup
@@ -1179,6 +1191,9 @@ function Folder({
   const [renameTarget, setRenameTarget] = useState<TreeEntry | null>(null);
   const [copyTarget, setCopyTarget] = useState<TreeEntry | null>(null);
   const [truncateTarget, setTruncateTarget] = useState<TreeEntry | null>(null);
+  // Entry name with a drop/rename/truncate in flight — its row shows a
+  // spinner so slow DDL isn't silent until the refresh lands.
+  const [opBusy, setOpBusy] = useState<string | null>(null);
   const openTab = useWorkspace((s) => s.openTab);
   const closeTab = useWorkspace((s) => s.closeTab);
   const refreshBranch = useConnections((s) => s.refreshBranch);
@@ -1241,8 +1256,13 @@ function Folder({
         subtitle: schema,
         connectionId,
       });
+      // The tab may already exist (openTab only activates it, no remount) —
+      // push the fresh DDL into its live buffer too.
+      window.dispatchEvent(
+        new CustomEvent("set-editor-sql", { detail: { tabId: id, sql: ddl } })
+      );
     } catch (err) {
-      console.error(err);
+      setDropError(String(err));
     }
   };
 
@@ -1258,6 +1278,7 @@ function Folder({
     newName?: string
   ) => {
     setDropError(null);
+    setOpBusy(e.name);
     try {
       await api.tableOp(connectionId, op, e.name, schema, newName);
       if (op === "rename") {
@@ -1269,11 +1290,14 @@ function Folder({
       if (op !== "truncate") await refreshBranch(connectionId);
     } catch (err) {
       setDropError(String(err));
+    } finally {
+      setOpBusy(null);
     }
   };
 
   const confirmDrop = async (e: TreeEntry) => {
     setDropError(null);
+    setOpBusy(e.name);
     try {
       if (isRedisKeyKind(e.kind)) {
         // DEL via the command path; quote to match redis_ops::parse_args.
@@ -1290,6 +1314,8 @@ function Folder({
       setDropTarget(null);
     } catch (err) {
       setDropError(String(err));
+    } finally {
+      setOpBusy(null);
     }
   };
 
@@ -1426,14 +1452,18 @@ function Folder({
                 className="group/key flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[13px] text-foreground/85 hover:bg-accent/50"
               >
                 <span className="w-3.5" />
-                <Icon
-                  className={cn(
-                    "h-3.5 w-3.5 shrink-0",
-                    e.kind === "table" && "text-sky-400",
-                    e.kind === "view" && "text-emerald-400",
-                    isRedisKeyKind(e.kind) && "text-rose-300/90"
-                  )}
-                />
+                {opBusy === e.name ? (
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+                ) : (
+                  <Icon
+                    className={cn(
+                      "h-3.5 w-3.5 shrink-0",
+                      e.kind === "table" && "text-sky-400",
+                      e.kind === "view" && "text-emerald-400",
+                      isRedisKeyKind(e.kind) && "text-rose-300/90"
+                    )}
+                  />
+                )}
                 <span className="min-w-0 flex-1 truncate">{e.name}</span>
                 {isRedisKeyKind(e.kind) && e.ttl_ms != null && (
                   <span
@@ -1461,10 +1491,10 @@ function Folder({
               {loadingMore ? (
                 <>
                   <Loader2 className="h-3 w-3 animate-spin" />
-                  scanning…
+                  {t("tree.scanning")}
                 </>
               ) : (
-                <>+ Load more keys</>
+                <>{t("tree.load_more")}</>
               )}
             </button>
           )}

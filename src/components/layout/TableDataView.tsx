@@ -28,6 +28,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 import { useConnections } from "@/store/connections";
+import { useWorkspace } from "@/store/workspace";
 import { useT } from "@/store/i18n";
 import { toast } from "@/store/toasts";
 
@@ -66,7 +67,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
   const [rowCount, setRowCount] = useState<number | null>(null);
   const [page, setPage] = useState(0);
   const [order, setOrder] = useState<OrderBy | undefined>();
-  const [filters, setFilters] = useState<Filter[]>([]);
+  const [filters, setFilters] = useState<Filter[]>(tab.initialFilters ?? []);
   const [whereRaw, setWhereRaw] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +82,62 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
   const t = useT();
 
   const pkCols = useMemo(() => columns.filter((c) => c.is_primary_key), [columns]);
+  const openTab = useWorkspace((s) => s.openTab);
+
+  // Single-column foreign keys, keyed by local column name — powers the
+  // "jump to referenced row" affordance in the grid. Best-effort metadata.
+  const [fkByCol, setFkByCol] = useState<
+    Record<string, { table: string; schema?: string | null; column: string }>
+  >({});
+  useEffect(() => {
+    let cancelled = false;
+    setFkByCol({});
+    api
+      .describeTable(connectionId, table, schema)
+      .then((d) => {
+        if (cancelled) return;
+        const map: Record<
+          string,
+          { table: string; schema?: string | null; column: string }
+        > = {};
+        for (const fk of d.foreign_keys) {
+          if (fk.columns.length === 1 && fk.referenced_columns.length === 1) {
+            map[fk.columns[0]] = {
+              table: fk.referenced_table,
+              schema: fk.referenced_schema,
+              column: fk.referenced_columns[0],
+            };
+          }
+        }
+        setFkByCol(map);
+      })
+      .catch(() => {
+        /* FK jump is an extra affordance, not a load requirement */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionId, schema, table]);
+
+  const onFkJump = useCallback(
+    (colName: string, value: unknown) => {
+      const fk = fkByCol[colName];
+      if (!fk || value == null) return;
+      const refSchema = fk.schema ?? schema;
+      const val = String(value);
+      openTab({
+        id: `data:${connectionId}:${refSchema ?? ""}:${fk.table}:fk:${fk.column}=${val}`,
+        kind: "table-data",
+        title: fk.table,
+        subtitle: `${fk.column} = ${val}`,
+        connectionId,
+        schema: refSchema ?? undefined,
+        table: fk.table,
+        initialFilters: [{ column: fk.column, op: "eq", value: val }],
+      });
+    },
+    [fkByCol, connectionId, schema, openTab]
+  );
   // Row identity columns: PK if present, else fall back to every column.
   const identCols = pkCols.length > 0 ? pkCols : columns;
   const editable = columns.length > 0;
@@ -433,6 +490,8 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
             editable={editable}
             tableName={table}
             driver={driver}
+            fkColumns={fkByCol}
+            onFkJump={onFkJump}
             onSortClick={onSortClick}
             onCellEdit={onCellEdit}
             onRowRevert={onRowRevert}

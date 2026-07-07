@@ -59,6 +59,60 @@ pub fn is_readonly(sql: &str) -> bool {
     )
 }
 
+/// True when a DML statement carries a RETURNING clause (PG/SQLite). Those
+/// produce rows and must go through the fetch path — the execute branch would
+/// drop them and the user would only see "N affected". Scans word-by-word,
+/// skipping string/identifier literals and comments so `'RETURNING'` inside a
+/// value can't false-positive.
+fn has_returning(sql: &str) -> bool {
+    let mut chars = sql.chars().peekable();
+    let mut word = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' | '"' | '`' => {
+                // Skip the quoted literal/identifier; a doubled quote escapes.
+                while let Some(n) = chars.next() {
+                    if n == c {
+                        if chars.peek() == Some(&c) {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                word.clear();
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        break;
+                    }
+                }
+                word.clear();
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                word.clear();
+            }
+            c if c.is_alphanumeric() || c == '_' => word.push(c.to_ascii_uppercase()),
+            _ => {
+                if word == "RETURNING" {
+                    return true;
+                }
+                word.clear();
+            }
+        }
+    }
+    word == "RETURNING"
+}
+
 /// Drain up to `MAX_ROWS` rows from a fetch stream; returns the rows plus
 /// whether the stream had more (i.e. the result was truncated).
 async fn fetch_capped<T>(
@@ -83,7 +137,7 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
         return redis_ops::execute(h, sql).await;
     }
     let start = Instant::now();
-    if is_readonly(sql) {
+    if is_readonly(sql) || has_returning(sql) {
         match pool {
             DbPool::Sqlite(p) => sqlite_select(p, sql, start).await,
             DbPool::Postgres(p) => pg_select(p, sql, start).await,
@@ -482,5 +536,20 @@ mod tests {
         // Unterminated trivia degrades to "not readonly", never panics.
         assert!(!is_readonly("-- only a comment"));
         assert!(!is_readonly("/* unterminated"));
+    }
+
+    #[test]
+    fn has_returning_detects_clause_outside_literals() {
+        assert!(has_returning("INSERT INTO t (a) VALUES (1) RETURNING id"));
+        assert!(has_returning("update t set a=1 returning *"));
+        assert!(has_returning("DELETE FROM t WHERE id=1 RETURNING id;"));
+        assert!(has_returning("insert into t values (1)\nRETURNING id"));
+
+        assert!(!has_returning("INSERT INTO t (a) VALUES ('RETURNING')"));
+        assert!(!has_returning("INSERT INTO t (a) VALUES (1) -- returning?"));
+        assert!(!has_returning("/* returning */ INSERT INTO t VALUES (1)"));
+        assert!(!has_returning("UPDATE t SET returning1 = 2"));
+        assert!(!has_returning("UPDATE \"returning\" SET a = 2"));
+        assert!(!has_returning("SELECT 1"));
     }
 }

@@ -39,14 +39,21 @@ export function HistoryPanel() {
   }, [entries, q]);
 
   const onOpen = (e: HistoryEntry) => {
+    const id = `query:hist:${e.id}`;
+    // Prime BEFORE openTab (a fresh tab reads sessionStorage in its mount
+    // initializer), then also dispatch for an already-open tab that won't
+    // remount.
+    sessionStorage.setItem(`rdb:sql:${id}`, e.sql);
     openTab({
-      id: `query:hist:${e.id}`,
+      id,
       kind: "query",
       title: "Query",
       subtitle: timeAgo(e.at),
       connectionId: e.connection_id,
     });
-    sessionStorage.setItem(`rdb:sql:query:hist:${e.id}`, e.sql);
+    window.dispatchEvent(
+      new CustomEvent("set-editor-sql", { detail: { tabId: id, sql: e.sql } })
+    );
   };
 
   const doClear = async () => {

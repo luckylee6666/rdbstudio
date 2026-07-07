@@ -10,6 +10,8 @@ interface Branch {
   error?: string;
   databases?: string[];
   tables?: Record<string, TreeEntry[]>;
+  /** Per-schema table-list load failures, keyed like `tables`. */
+  tablesError?: Record<string, string>;
   /** Redis-only: last cursor returned by SCAN; 0 = exhausted. */
   redisCursor?: number;
   redisDone?: boolean;
@@ -145,6 +147,10 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   loadTables: async (id, cacheKey, schema) => {
     const cur = get().branches[id] ?? {};
     const driver = get().list.find((c) => c.id === id)?.driver;
+    const clearError = () => {
+      const { [cacheKey]: _gone, ...rest } = cur.tablesError ?? {};
+      return rest;
+    };
     try {
       // Redis: use the paginated scan path so we can drive "Load more" later.
       if (driver === "redis") {
@@ -155,6 +161,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
             [id]: {
               ...cur,
               tables: { ...(cur.tables ?? {}), [cacheKey]: page.keys },
+              tablesError: clearError(),
               redisCursor: page.next_cursor,
               redisDone: page.done,
             },
@@ -169,11 +176,21 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
           [id]: {
             ...cur,
             tables: { ...(cur.tables ?? {}), [cacheKey]: tables },
+            tablesError: clearError(),
           },
         },
       });
     } catch (e) {
-      console.error(e);
+      // Surface in the tree (error row + retry) instead of an eternal spinner.
+      set({
+        branches: {
+          ...get().branches,
+          [id]: {
+            ...cur,
+            tablesError: { ...(cur.tablesError ?? {}), [cacheKey]: String(e) },
+          },
+        },
+      });
     }
   },
 

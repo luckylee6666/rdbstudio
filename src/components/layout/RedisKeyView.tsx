@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   Check,
@@ -12,6 +13,7 @@ import type { WorkspaceTab } from "@/types";
 import { api, type QueryResult } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
+import { useT } from "@/store/i18n";
 
 type LoadState =
   | { kind: "idle" }
@@ -44,6 +46,9 @@ function fetchCapFor(type: string): number | null {
   }
 }
 
+// Capped fetches ask for cap+1 items: getting the extra row proves the key
+// holds more than the cap (a result of exactly `cap` rows is complete, not
+// truncated). The table slices back down to `cap` before rendering.
 function fetchCommandFor(type: string, key: string): string {
   const k = quoteArg(key);
   switch (type) {
@@ -52,13 +57,13 @@ function fetchCommandFor(type: string, key: string): string {
     case "hash":
       return `HGETALL ${k}`;
     case "list":
-      return `LRANGE ${k} 0 ${RANGE_CAP - 1}`;
+      return `LRANGE ${k} 0 ${RANGE_CAP}`;
     case "set":
       return `SMEMBERS ${k}`;
     case "zset":
-      return `ZRANGE ${k} 0 ${RANGE_CAP - 1} WITHSCORES`;
+      return `ZRANGE ${k} 0 ${RANGE_CAP} WITHSCORES`;
     case "stream":
-      return `XRANGE ${k} - + COUNT ${STREAM_CAP}`;
+      return `XRANGE ${k} - + COUNT ${STREAM_CAP + 1}`;
     case "ReJSON-RL":
       return `JSON.GET ${k}`;
     default:
@@ -108,6 +113,7 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
   const { connectionId, redisKey, redisType } = tab;
   const [state, setState] = useState<LoadState>({ kind: "idle" });
   const inflightRef = useRef<number>(0);
+  const t = useT();
 
   const load = useCallback(async () => {
     if (!connectionId || !redisKey || !redisType) return;
@@ -157,7 +163,7 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
         </span>
         <button
           onClick={onCopyKey}
-          title="Copy key name"
+          title={t("redis.copy_key")}
           className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <Copy className="h-3.5 w-3.5" />
@@ -179,7 +185,7 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
           ) : (
             <RefreshCw className="h-3.5 w-3.5" />
           )}
-          Refresh
+          {t("common.refresh")}
         </button>
       </div>
 
@@ -187,7 +193,7 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
         {state.kind === "loading" && (
           <div className="flex h-full items-center justify-center text-[12px] text-muted-foreground">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            Loading…
+            {t("common.loading")}
           </div>
         )}
         {state.kind === "error" && (
@@ -258,6 +264,7 @@ function RedisScalarEditor({
   const [draft, setDraft] = useState(raw);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const t = useT();
 
   const beginEdit = () => {
     setDraft(raw);
@@ -292,9 +299,9 @@ function RedisScalarEditor({
     return (
       <div className="p-4">
         <div className="mb-2 flex items-center gap-3 text-[11px] text-muted-foreground">
-          <span>editing</span>
+          <span>{t("redis.editing")}</span>
           <span>•</span>
-          <span>{draft.length} chars</span>
+          <span>{t("redis.chars", { n: draft.length })}</span>
         </div>
         <textarea
           value={draft}
@@ -329,7 +336,7 @@ function RedisScalarEditor({
             ) : (
               <Check className="h-3.5 w-3.5" />
             )}
-            Save
+            {t("common.save")}
           </button>
           <button
             onClick={cancel}
@@ -337,10 +344,10 @@ function RedisScalarEditor({
             className="flex h-7 items-center gap-1.5 rounded-md border border-border/60 px-3 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-60"
           >
             <X className="h-3.5 w-3.5" />
-            Cancel
+            {t("common.cancel")}
           </button>
           <span className="ml-2 text-[11px] text-muted-foreground">
-            ⌘/Ctrl+Enter to save · Esc to cancel
+            {t("redis.save_hint")}
           </span>
         </div>
       </div>
@@ -351,7 +358,7 @@ function RedisScalarEditor({
   return (
     <div className="p-4">
       <div className="mb-2 flex items-center gap-3 text-[11px] text-muted-foreground">
-        <span>{raw.length} chars</span>
+        <span>{t("redis.chars", { n: raw.length })}</span>
         <span>•</span>
         <span>{isJson ? "JSON" : "string"}</span>
         <div className="flex-1" />
@@ -360,12 +367,12 @@ function RedisScalarEditor({
           className="flex h-6 items-center gap-1 rounded px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <Pencil className="h-3 w-3" />
-          Edit
+          {t("common.edit")}
         </button>
       </div>
       <pre
         onDoubleClick={beginEdit}
-        title="Double-click to edit"
+        title={t("redis.dblclick_edit")}
         className="cursor-text overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/40 p-3 font-mono text-[12px] text-foreground/90"
       >
         {display}
@@ -451,6 +458,7 @@ function RedisTable({
   redisKey,
   onReload,
 }: { type: string; result: QueryResult } & EditableProps) {
+  const t = useT();
   // Column headers per kind. zset backend returns [member, score] already; do
   // not swap — keep storage order so saves can address the right column.
   const columns = useMemo<string[]>(() => {
@@ -467,13 +475,16 @@ function RedisTable({
     }
   }, [type, result.columns]);
 
-  const rows = result.rows;
+  // Fetches ask for cap+1: the extra row is proof of truncation, never shown.
+  // Exactly `cap` rows = the whole collection, no false banner.
+  const cap = fetchCapFor(type);
+  const maybeTruncated = cap != null && result.rows.length > cap;
+  const rows = useMemo(
+    () => (maybeTruncated && cap != null ? result.rows.slice(0, cap) : result.rows),
+    [result.rows, maybeTruncated, cap]
+  );
   const showIndex = type === "list";
   const [editing, setEditing] = useState<CellLocation | null>(null);
-
-  // A full page likely means the collection holds more than we fetched.
-  const cap = fetchCapFor(type);
-  const maybeTruncated = cap != null && rows.length >= cap;
 
   // Which (type, columnIndex) cells are editable. stream is read-only.
   const isEditable = (col: number): boolean => {
@@ -528,7 +539,7 @@ function RedisTable({
         } else {
           // Validate numeric score before sending.
           if (!/^-?\d+(\.\d+)?$/.test(next.trim())) {
-            throw new Error("score must be a number");
+            throw new Error(t("redis.score_number"));
           }
           commands.push(`ZADD ${k} ${next.trim()} ${quoteArg(oldMember)}`);
         }
@@ -545,102 +556,140 @@ function RedisTable({
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border/60 bg-surface/40 px-3 py-1.5 text-[11px] text-muted-foreground">
-        {rows.length} {rows.length === 1 ? "entry" : "entries"}
+        {t("redis.entries", { n: rows.length })}
         {result.elapsed_ms != null && (
           <span className="ml-3">• {result.elapsed_ms}ms</span>
         )}
         {type !== "stream" && (
           <span className="ml-3 text-muted-foreground/70">
-            · double-click a cell to edit
+            {t("redis.cell_hint")}
           </span>
         )}
       </div>
-      {maybeTruncated && (
+      {maybeTruncated && cap != null && (
         <div className="flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-[11px] text-amber-300">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>
-            Showing the first {cap} entries — this key holds more. Editing rows
-            here is limited to what's loaded.
-          </span>
+          <span>{t("redis.truncated", { n: cap })}</span>
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full border-collapse text-[12px]">
-          <thead className="sticky top-0 z-10 bg-surface/95 backdrop-blur">
-            <tr>
-              {showIndex && (
-                <th className="border-b border-border/60 px-3 py-1.5 text-left font-medium text-muted-foreground">
-                  #
-                </th>
+      <div className="flex shrink-0 items-stretch border-b border-border/60 bg-surface/95 text-[12px]">
+        {showIndex && (
+          <div className="w-14 shrink-0 px-3 py-1.5 font-medium text-muted-foreground">
+            #
+          </div>
+        )}
+        {columns.map((c) => (
+          <div
+            key={c}
+            className="min-w-0 flex-1 px-3 py-1.5 font-medium text-muted-foreground"
+          >
+            {c}
+          </div>
+        ))}
+      </div>
+      {rows.length === 0 ? (
+        <div className="px-3 py-6 text-center text-[12px] text-muted-foreground">
+          {t("redis.empty")}
+        </div>
+      ) : (
+        <VirtualRows
+          rows={rows}
+          showIndex={showIndex}
+          isEditable={isEditable}
+          editing={editing}
+          setEditing={setEditing}
+          saveCell={saveCell}
+        />
+      )}
+    </div>
+  );
+}
+
+/// Virtualized body — a hash/list at the 1000-row cap would otherwise render
+/// every row into the DOM. Rows self-measure (values wrap, editors grow).
+function VirtualRows({
+  rows,
+  showIndex,
+  isEditable,
+  editing,
+  setEditing,
+  saveCell,
+}: {
+  rows: unknown[][];
+  showIndex: boolean;
+  isEditable: (col: number) => boolean;
+  editing: CellLocation | null;
+  setEditing: (c: CellLocation | null) => void;
+  saveCell: (row: number, col: number, next: string) => Promise<void>;
+}) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const t = useT();
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 29,
+    overscan: 12,
+  });
+
+  return (
+    <div ref={parentRef} className="min-h-0 flex-1 overflow-auto">
+      <div
+        style={{
+          height: virtualizer.getTotalSize(),
+          position: "relative",
+          width: "100%",
+        }}
+      >
+        {virtualizer.getVirtualItems().map((vr) => {
+          const row = rows[vr.index];
+          return (
+            <div
+              key={vr.key}
+              data-index={vr.index}
+              ref={virtualizer.measureElement}
+              className={cn(
+                "absolute left-0 flex w-full items-stretch border-b border-border/40 text-[12px] hover:bg-accent/30",
+                vr.index % 2 === 1 && "bg-surface/20"
               )}
-              {columns.map((c) => (
-                <th
-                  key={c}
-                  className="border-b border-border/60 px-3 py-1.5 text-left font-medium text-muted-foreground"
-                >
-                  {c}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td
-                  colSpan={(showIndex ? 1 : 0) + columns.length}
-                  className="px-3 py-6 text-center text-muted-foreground"
-                >
-                  (empty)
-                </td>
-              </tr>
-            ) : (
-              rows.map((row, i) => (
-                <tr
-                  key={i}
-                  className={cn(
-                    "border-b border-border/40 hover:bg-accent/30",
-                    i % 2 === 1 && "bg-surface/20"
-                  )}
-                >
-                  {showIndex && (
-                    <td className="px-3 py-1 font-mono text-muted-foreground">
-                      {i}
-                    </td>
-                  )}
-                  {row.map((v, j) => {
-                    const current = cellToString(v);
-                    const editable = isEditable(j);
-                    const isEditing =
-                      editing?.row === i && editing?.col === j;
-                    return (
-                      <td
-                        key={j}
-                        onDoubleClick={() => {
-                          if (editable) setEditing({ row: i, col: j });
-                        }}
-                        title={editable ? "Double-click to edit" : undefined}
-                        className={cn(
-                          "break-all px-3 py-1 align-top font-mono text-foreground/90",
-                          editable && !isEditing && "cursor-text"
-                        )}
-                      >
-                        {isEditing ? (
-                          <CellEditor
-                            initial={current}
-                            onCancel={() => setEditing(null)}
-                            onCommit={(next) => saveCell(i, j, next)}
-                          />
-                        ) : (
-                          current
-                        )}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              style={{ transform: `translateY(${vr.start}px)` }}
+            >
+              {showIndex && (
+                <div className="w-14 shrink-0 px-3 py-1 font-mono text-muted-foreground">
+                  {vr.index}
+                </div>
+              )}
+              {row.map((v, j) => {
+                const current = cellToString(v);
+                const editable = isEditable(j);
+                const isEditing =
+                  editing?.row === vr.index && editing?.col === j;
+                return (
+                  <div
+                    key={j}
+                    onDoubleClick={() => {
+                      if (editable) setEditing({ row: vr.index, col: j });
+                    }}
+                    title={editable ? t("redis.dblclick_edit") : undefined}
+                    className={cn(
+                      "min-w-0 flex-1 break-all px-3 py-1 align-top font-mono text-foreground/90",
+                      editable && !isEditing && "cursor-text"
+                    )}
+                  >
+                    {isEditing ? (
+                      <CellEditor
+                        initial={current}
+                        onCancel={() => setEditing(null)}
+                        onCommit={(next) => saveCell(vr.index, j, next)}
+                      />
+                    ) : (
+                      current
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

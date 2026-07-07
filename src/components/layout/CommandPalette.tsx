@@ -4,6 +4,7 @@ import {
   CornerDownLeft,
   Database,
   History as HistoryIcon,
+  KeyRound,
   Moon,
   Plug,
   PlugZap,
@@ -22,7 +23,7 @@ import { useT } from "@/store/i18n";
 
 type Item = {
   id: string;
-  group: "Connections" | "Queries" | "Tables" | "Actions";
+  group: "Connections" | "Queries" | "Tables" | "Keys" | "Actions";
   icon: React.ElementType;
   label: string;
   hint?: string;
@@ -89,26 +90,50 @@ export function CommandPalette() {
     for (const c of list) {
       const b = branches[c.id];
       if (!b) continue;
-      for (const [schema, tables] of Object.entries(b.tables ?? {}) as [
+      for (const [cacheKey, tables] of Object.entries(b.tables ?? {}) as [
         string,
         import("@/types").TreeEntry[]
       ][]) {
-        for (const t of tables) {
+        for (const entry of tables) {
+          // Redis branches store keys, not tables — open the dedicated viewer.
+          if (c.driver === "redis") {
+            out.push({
+              id: `key:${c.id}:${entry.name}`,
+              group: "Keys",
+              icon: KeyRound,
+              label: entry.name,
+              hint: c.name,
+              run: () =>
+                openTab({
+                  id: `redis:${c.id}:${entry.name}`,
+                  kind: "redis-key",
+                  title: entry.name,
+                  subtitle: entry.kind,
+                  connectionId: c.id,
+                  redisKey: entry.name,
+                  redisType: entry.kind,
+                }),
+            });
+            continue;
+          }
+          // Cache keys are display labels; SQLite's "main" must become
+          // undefined so the tab id / backend schema match the tree's.
+          const schema = c.driver === "sqlite" ? undefined : cacheKey;
           out.push({
-            id: `table:${c.id}:${schema}:${t.name}`,
+            id: `table:${c.id}:${cacheKey}:${entry.name}`,
             group: "Tables",
             icon: Table2,
-            label: t.name,
-            hint: `${c.name} · ${schema === "_" ? "" : schema}`.trim(),
+            label: entry.name,
+            hint: schema ? `${c.name} · ${schema}` : c.name,
             run: () =>
               openTab({
-                id: `data:${c.id}:${schema === "_" ? "" : schema}:${t.name}`,
+                id: `data:${c.id}:${schema ?? ""}:${entry.name}`,
                 kind: "table-data",
-                title: t.name,
-                subtitle: t.kind === "view" ? "View" : "Data",
+                title: entry.name,
+                subtitle: entry.kind === "view" ? "View" : "Data",
                 connectionId: c.id,
-                schema: schema === "_" ? undefined : schema,
-                table: t.name,
+                schema,
+                table: entry.name,
               }),
           });
         }

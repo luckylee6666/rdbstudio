@@ -155,12 +155,31 @@ const en: Dict = {
     "Delete ALL rows in \"{{name}}\"? This cannot be undone.",
   "tree.truncate.go": "Truncate",
   "tree.op.failed": "Operation failed",
+  "tree.load_failed": "Failed to load",
+  "tree.retry": "Retry",
+  "tree.no_tables": "(no tables)",
+  "tree.scanning": "scanning…",
+  "tree.load_more": "+ Load more keys",
 
   // grid copy-as
   "grid.copy_cell": "Copy Cell",
   "grid.copy_insert": "Copy Row as INSERT",
   "grid.copy_csv": "Copy Row as CSV",
   "grid.copy_json": "Copy Row as JSON",
+  "grid.fk_jump": "Open referenced row",
+
+  // redis key viewer
+  "redis.copy_key": "Copy key name",
+  "redis.editing": "editing",
+  "redis.chars": "{{n}} chars",
+  "redis.save_hint": "⌘/Ctrl+Enter to save · Esc to cancel",
+  "redis.dblclick_edit": "Double-click to edit",
+  "redis.entries": "{{n}} entries",
+  "redis.cell_hint": "· double-click a cell to edit",
+  "redis.truncated":
+    "Showing the first {{n}} entries — this key holds more. Editing here is limited to what's loaded.",
+  "redis.empty": "(empty)",
+  "redis.score_number": "score must be a number",
 
   // inspector / status bar
   "inspector.title": "Inspector",
@@ -586,12 +605,30 @@ const zh: Dict = {
   "tree.truncate.confirm": "将删除「{{name}}」中的全部数据，且无法撤销。确认继续？",
   "tree.truncate.go": "清空",
   "tree.op.failed": "操作失败",
+  "tree.load_failed": "加载失败",
+  "tree.retry": "重试",
+  "tree.no_tables": "（无表）",
+  "tree.scanning": "扫描中…",
+  "tree.load_more": "+ 加载更多 key",
 
   // grid copy-as
   "grid.copy_cell": "复制单元格",
   "grid.copy_insert": "复制行为 INSERT",
   "grid.copy_csv": "复制行为 CSV",
   "grid.copy_json": "复制行为 JSON",
+  "grid.fk_jump": "跳转到引用行",
+
+  // redis key viewer
+  "redis.copy_key": "复制 key 名",
+  "redis.editing": "编辑中",
+  "redis.chars": "{{n}} 字符",
+  "redis.save_hint": "⌘/Ctrl+Enter 保存 · Esc 取消",
+  "redis.dblclick_edit": "双击编辑",
+  "redis.entries": "{{n}} 条",
+  "redis.cell_hint": "· 双击单元格可编辑",
+  "redis.truncated": "仅显示前 {{n}} 条——该 key 还有更多内容，此处编辑仅限已加载的行。",
+  "redis.empty": "（空）",
+  "redis.score_number": "score 必须是数字",
 
   // inspector / status bar
   "inspector.title": "检查器",
