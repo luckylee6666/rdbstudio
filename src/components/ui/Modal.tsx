@@ -3,6 +3,15 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/cn";
 
+// Module-level count of mounted-open modals so global shortcut handlers
+// (AppShell) can stand down while a dialog owns the keyboard — otherwise
+// ⌘W "close this dialog" muscle-memory closes the tab *behind* the dialog.
+let openModalCount = 0;
+
+export function anyModalOpen(): boolean {
+  return openModalCount > 0;
+}
+
 export function Modal({
   open,
   onClose,
@@ -20,11 +29,15 @@ export function Modal({
 }) {
   useEffect(() => {
     if (!open) return;
+    openModalCount++;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      openModalCount--;
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open, onClose]);
 
   if (!open) return null;

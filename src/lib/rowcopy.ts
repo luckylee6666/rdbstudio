@@ -1,12 +1,16 @@
 import type { DriverKind } from "@/types";
 import { quoteIdent } from "@/lib/sql";
 
-/// Render a grid value as a SQL literal for generated INSERTs.
-export function sqlLiteral(v: unknown): string {
+/// Render a grid value as a SQL literal for generated INSERTs. MySQL's
+/// default sql_mode treats backslash as an escape introducer inside string
+/// literals, so backslashes must be doubled there or `C:\name` corrupts on
+/// paste; ANSI drivers only need quote doubling.
+export function sqlLiteral(v: unknown, driver?: DriverKind): string {
   if (v === null || v === undefined) return "NULL";
   if (typeof v === "number" || typeof v === "bigint") return String(v);
   if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-  const s = typeof v === "string" ? v : JSON.stringify(v);
+  let s = typeof v === "string" ? v : JSON.stringify(v);
+  if (driver === "mysql") s = s.replace(/\\/g, "\\\\");
   return `'${s.replace(/'/g, "''")}'`;
 }
 
@@ -24,7 +28,7 @@ export function toInsertSql(
     .map(
       (r) =>
         `INSERT INTO ${target} (${cols}) VALUES (${r
-          .map(sqlLiteral)
+          .map((v) => sqlLiteral(v, d))
           .join(", ")});`
     )
     .join("\n");

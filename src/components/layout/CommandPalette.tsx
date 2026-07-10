@@ -345,7 +345,7 @@ function groupBy(items: Item[]): { name: string; items: Item[] }[] {
     if (g) g.items.push(it);
     else out.push({ name: it.group, items: [it] });
   }
-  const order: Item["group"][] = ["Connections", "Queries", "Tables", "Actions"];
+  const order: Item["group"][] = ["Connections", "Queries", "Tables", "Keys", "Actions"];
   out.sort((a, b) => order.indexOf(a.name as Item["group"]) - order.indexOf(b.name as Item["group"]));
   return out;
 }

@@ -145,52 +145,43 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   loadTables: async (id, cacheKey, schema) => {
-    const cur = get().branches[id] ?? {};
     const driver = get().list.find((c) => c.id === id)?.driver;
-    const clearError = () => {
-      const { [cacheKey]: _gone, ...rest } = cur.tablesError ?? {};
+    // IMPORTANT: read the branch fresh AFTER each await. Two schemas expanded
+    // concurrently both resolve against this store — a pre-await snapshot
+    // would make the slower one overwrite the faster one's just-loaded tables.
+    const merge = (patch: (latest: Branch) => Branch) => {
+      const latest = get().branches[id] ?? {};
+      set({ branches: { ...get().branches, [id]: patch(latest) } });
+    };
+    const withoutError = (latest: Branch) => {
+      const { [cacheKey]: _gone, ...rest } = latest.tablesError ?? {};
       return rest;
     };
     try {
       // Redis: use the paginated scan path so we can drive "Load more" later.
       if (driver === "redis") {
         const page = await api.scanRedisKeys(id, 0);
-        set({
-          branches: {
-            ...get().branches,
-            [id]: {
-              ...cur,
-              tables: { ...(cur.tables ?? {}), [cacheKey]: page.keys },
-              tablesError: clearError(),
-              redisCursor: page.next_cursor,
-              redisDone: page.done,
-            },
-          },
-        });
+        merge((latest) => ({
+          ...latest,
+          tables: { ...(latest.tables ?? {}), [cacheKey]: page.keys },
+          tablesError: withoutError(latest),
+          redisCursor: page.next_cursor,
+          redisDone: page.done,
+        }));
         return;
       }
       const tables = await api.listTables(id, schema);
-      set({
-        branches: {
-          ...get().branches,
-          [id]: {
-            ...cur,
-            tables: { ...(cur.tables ?? {}), [cacheKey]: tables },
-            tablesError: clearError(),
-          },
-        },
-      });
+      merge((latest) => ({
+        ...latest,
+        tables: { ...(latest.tables ?? {}), [cacheKey]: tables },
+        tablesError: withoutError(latest),
+      }));
     } catch (e) {
       // Surface in the tree (error row + retry) instead of an eternal spinner.
-      set({
-        branches: {
-          ...get().branches,
-          [id]: {
-            ...cur,
-            tablesError: { ...(cur.tablesError ?? {}), [cacheKey]: String(e) },
-          },
-        },
-      });
+      merge((latest) => ({
+        ...latest,
+        tablesError: { ...(latest.tablesError ?? {}), [cacheKey]: String(e) },
+      }));
     }
   },
 

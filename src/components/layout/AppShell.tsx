@@ -7,6 +7,7 @@ import { StatusBar } from "./StatusBar";
 import { TitleBar } from "./TitleBar";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { useTheme } from "@/components/theme/ThemeProvider";
+import { anyModalOpen } from "@/components/ui/Modal";
 import { useLayout } from "@/store/layout";
 import { useWorkspace } from "@/store/workspace";
 
@@ -20,6 +21,9 @@ export function AppShell() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      // A dialog or the palette owns the keyboard: ⌘W here means "close the
+      // overlay", not "close the tab hiding behind it".
+      if (anyModalOpen() || useLayout.getState().paletteOpen) return;
       const k = e.key.toLowerCase();
       if (k === "t" && !e.shiftKey) {
         e.preventDefault();
@@ -36,6 +40,13 @@ export function AppShell() {
         e.preventDefault();
         useLayout.getState().toggleSidebar();
       } else if (e.key === "/") {
+        // CodeMirror binds Mod-/ to toggle-comment and lets the event bubble;
+        // inside any editable surface this must stay a comment toggle, not a
+        // theme flip.
+        const el = document.activeElement as HTMLElement | null;
+        if (el?.closest(".cm-editor, input, textarea, [contenteditable]")) {
+          return;
+        }
         e.preventDefault();
         toggleTheme();
       } else if (k === "f" && e.shiftKey) {

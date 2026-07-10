@@ -53,22 +53,62 @@ pub fn is_readonly(sql: &str) -> bool {
         .take_while(|c| c.is_alphabetic())
         .collect::<String>()
         .to_uppercase();
-    matches!(
-        lead.as_str(),
-        "SELECT" | "WITH" | "SHOW" | "PRAGMA" | "EXPLAIN" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE"
-    )
+    match lead.as_str() {
+        "SELECT" | "SHOW" | "PRAGMA" | "EXPLAIN" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => {
+            true
+        }
+        // Postgres allows data-modifying CTEs — `WITH d AS (DELETE ...) SELECT`
+        // leads with WITH but writes. Only trust a leading WITH when no DML
+        // keyword appears as a bare word anywhere in the statement. This can
+        // misclassify a read-only query that quotes such a word oddly, but the
+        // failure mode is "read blocked on a read-only connection", never a
+        // write slipping through.
+        "WITH" => !scan_bare_words(sql, |w| {
+            matches!(w, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+        }),
+        _ => false,
+    }
 }
 
 /// True when a DML statement carries a RETURNING clause (PG/SQLite). Those
 /// produce rows and must go through the fetch path — the execute branch would
-/// drop them and the user would only see "N affected". Scans word-by-word,
-/// skipping string/identifier literals and comments so `'RETURNING'` inside a
-/// value can't false-positive.
+/// drop them and the user would only see "N affected".
 fn has_returning(sql: &str) -> bool {
+    scan_bare_words(sql, |w| w == "RETURNING")
+}
+
+/// Scan a statement's bare words — outside string/identifier literals and
+/// comments — uppercased, returning true the first time `pred` matches.
+/// Postgres `E'...'` escape strings honor backslash escapes so `E'O\'Brien'`
+/// doesn't desync the literal tracking.
+fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
     let mut chars = sql.chars().peekable();
     let mut word = String::new();
     while let Some(c) = chars.next() {
         match c {
+            // PG escape string: the E prefix is sitting in `word` when we hit
+            // the opening quote; inside, a backslash escapes the next char.
+            '\'' if word == "E" => {
+                let mut escaped = false;
+                while let Some(n) = chars.next() {
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    match n {
+                        '\\' => escaped = true,
+                        '\'' => {
+                            if chars.peek() == Some(&'\'') {
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                word.clear();
+            }
             '\'' | '"' | '`' => {
                 // Skip the quoted literal/identifier; a doubled quote escapes.
                 while let Some(n) = chars.next() {
@@ -103,14 +143,14 @@ fn has_returning(sql: &str) -> bool {
             }
             c if c.is_alphanumeric() || c == '_' => word.push(c.to_ascii_uppercase()),
             _ => {
-                if word == "RETURNING" {
+                if !word.is_empty() && pred(&word) {
                     return true;
                 }
                 word.clear();
             }
         }
     }
-    word == "RETURNING"
+    !word.is_empty() && pred(&word)
 }
 
 /// Drain up to `MAX_ROWS` rows from a fetch stream; returns the rows plus
@@ -551,5 +591,38 @@ mod tests {
         assert!(!has_returning("UPDATE t SET returning1 = 2"));
         assert!(!has_returning("UPDATE \"returning\" SET a = 2"));
         assert!(!has_returning("SELECT 1"));
+    }
+
+    #[test]
+    fn has_returning_survives_pg_escape_strings() {
+        // Backslash-escaped quote inside E'...' must not desync the scanner.
+        assert!(has_returning(
+            r"INSERT INTO t (name) VALUES (E'O\'Brien') RETURNING id"
+        ));
+        assert!(!has_returning(r"INSERT INTO t (name) VALUES (E'RETURNING')"));
+        assert!(!has_returning(r"INSERT INTO t (name) VALUES (E'a\'RETURNING\'b')"));
+    }
+
+    #[test]
+    fn is_readonly_rejects_data_modifying_ctes() {
+        // PG data-modifying CTEs lead with WITH but write.
+        assert!(!is_readonly(
+            "WITH d AS (DELETE FROM users RETURNING id) SELECT count(*) FROM d"
+        ));
+        assert!(!is_readonly(
+            "with u as (update t set a=1 returning *) select * from u"
+        ));
+        assert!(!is_readonly(
+            "WITH i AS (INSERT INTO t VALUES (1)) SELECT 1"
+        ));
+        // Plain read-only CTEs still classify as reads.
+        assert!(is_readonly("WITH x AS (SELECT 1) SELECT * FROM x"));
+        // Words merely *containing* DML keywords, or quoted ones, don't trip it.
+        assert!(is_readonly(
+            "WITH x AS (SELECT update_time, deleted FROM logs) SELECT * FROM x"
+        ));
+        assert!(is_readonly(
+            "WITH x AS (SELECT * FROM t WHERE action = 'DELETE') SELECT * FROM x"
+        ));
     }
 }

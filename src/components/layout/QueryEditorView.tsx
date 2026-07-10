@@ -54,8 +54,36 @@ function primedFor(tabId: string): string | null {
   }
 }
 
+// Buffer persisted across restarts (the workspace's tab list survives via
+// zustand persist; the SQL text lives here). Cleared by workspace.closeTab.
+function savedBuffer(tabId: string): string | null {
+  try {
+    return localStorage.getItem(`rdb:buf:${tabId}`);
+  } catch {
+    return null;
+  }
+}
+
 export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
-  const [sql, setSql] = useState(() => primedFor(tab.id) ?? INITIAL);
+  const [sql, setSql] = useState(
+    () => primedFor(tab.id) ?? savedBuffer(tab.id) ?? INITIAL
+  );
+
+  // Persist the buffer (debounced) so restarts restore what the user typed.
+  useEffect(() => {
+    const h = setTimeout(() => {
+      try {
+        if (sql.trim() && sql !== INITIAL) {
+          localStorage.setItem(`rdb:buf:${tab.id}`, sql);
+        } else {
+          localStorage.removeItem(`rdb:buf:${tab.id}`);
+        }
+      } catch {
+        /* storage unavailable — buffer stays volatile */
+      }
+    }, 400);
+    return () => clearTimeout(h);
+  }, [sql, tab.id]);
   const [state, setState] = useState<RunState>({ kind: "idle" });
   const connections = useConnections((s) => s.list);
   const statusMap = useConnections((s) => s.status);
@@ -220,6 +248,10 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
 
   const run = useCallback(
     async (opts?: { selection?: string; explain?: boolean }) => {
+      // One run at a time. The Run→Stop button swap doesn't stop the ⌘↵
+      // CodeMirror binding from re-invoking this mid-flight; without the
+      // guard, whichever run settled LAST would own the result display.
+      if (runSessionRef.current) return;
       if (!targetId) {
         setState({ kind: "error", message: t("query.placeholder") });
         return;
@@ -246,6 +278,9 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
 
       const session = { qid: crypto.randomUUID(), cancelled: false };
       runSessionRef.current = session;
+      // Belt-and-braces: even if a future change lets sessions overlap, only
+      // the session that still owns the ref may touch the result display.
+      const owns = () => runSessionRef.current === session;
 
       setState({ kind: "running" });
       try {
@@ -253,13 +288,14 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         let affected_total = 0;
         for (let i = 0; i < statements.length; i++) {
           if (session.cancelled) {
-            setState({ kind: "error", message: t("query.err.cancelled") });
+            if (owns()) setState({ kind: "error", message: t("query.err.cancelled") });
             return;
           }
           try {
             last = await api.executeQuery(targetId, statements[i], session.qid);
             if (last.rows_affected != null) affected_total += last.rows_affected;
           } catch (e) {
+            if (!owns()) return;
             if (session.cancelled) {
               setState({ kind: "error", message: t("query.err.cancelled") });
               return;
@@ -277,6 +313,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             return;
           }
         }
+        if (!owns()) return;
         if (!last) {
           setState({ kind: "error", message: t("query.placeholder") });
           return;
@@ -290,7 +327,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
               : undefined,
         });
       } catch (e) {
-        setState({ kind: "error", message: String(e) });
+        if (owns()) setState({ kind: "error", message: String(e) });
       } finally {
         if (runSessionRef.current === session) runSessionRef.current = null;
       }
