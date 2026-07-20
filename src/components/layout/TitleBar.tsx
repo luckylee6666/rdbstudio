@@ -2,6 +2,7 @@ import { Database, Globe, Moon, Search, Sun } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { cn } from "@/lib/cn";
+import { isMac } from "@/lib/platform";
 import { useLayout } from "@/store/layout";
 import { useI18n, useT } from "@/store/i18n";
 
@@ -49,7 +50,9 @@ export function TitleBar() {
     >
       <div
         data-tauri-drag-region
-        className="flex items-center gap-2 pl-[68px]"
+        // The 68px inset clears the macOS traffic lights (titleBarStyle
+        // Overlay); Windows/Linux get native decorations, no inset needed.
+        className={cn("flex items-center gap-2", isMac && "pl-[68px]")}
       >
         <div className="pointer-events-none grid h-6 w-6 place-items-center rounded-md bg-gradient-to-br from-brand to-brand/60 text-brand-foreground shadow-soft">
           <Database className="h-3.5 w-3.5" />
@@ -66,7 +69,7 @@ export function TitleBar() {
         <Search className="h-3.5 w-3.5" />
         <span className="flex-1 truncate text-left">{t("titlebar.search")}</span>
         <kbd className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-medium">
-          ⌘K
+          {isMac ? "⌘K" : "Ctrl+K"}
         </kbd>
       </button>
 

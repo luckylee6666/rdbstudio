@@ -2,6 +2,7 @@ import { Database, Plus, Terminal, Workflow, FileDown } from "lucide-react";
 import { useWorkspace } from "@/store/workspace";
 import { useLayout } from "@/store/layout";
 import { useT } from "@/store/i18n";
+import { enterKey, modKey } from "@/lib/platform";
 
 export function Welcome() {
   const openTab = useWorkspace((s) => s.openTab);
@@ -95,12 +96,12 @@ export function Welcome() {
             {t("welcome.shortcuts")}
           </div>
           <div className="grid grid-cols-3 gap-y-2 text-[13px] text-muted-foreground">
-            <Shortcut keys={["⌘", "K"]} label={t("welcome.shortcut.palette")} />
-            <Shortcut keys={["⌘", "T"]} label={t("welcome.shortcut.new_query")} />
-            <Shortcut keys={["⌘", "↵"]} label={t("welcome.shortcut.run")} />
-            <Shortcut keys={["⌘", "B"]} label={t("welcome.shortcut.sidebar")} />
-            <Shortcut keys={["⌘", "/"]} label={t("welcome.shortcut.theme")} />
-            <Shortcut keys={["⌘", "W"]} label={t("welcome.shortcut.close_tab")} />
+            <Shortcut keys={[modKey, "K"]} label={t("welcome.shortcut.palette")} />
+            <Shortcut keys={[modKey, "T"]} label={t("welcome.shortcut.new_query")} />
+            <Shortcut keys={[modKey, enterKey]} label={t("welcome.shortcut.run")} />
+            <Shortcut keys={[modKey, "B"]} label={t("welcome.shortcut.sidebar")} />
+            <Shortcut keys={[modKey, "/"]} label={t("welcome.shortcut.theme")} />
+            <Shortcut keys={[modKey, "W"]} label={t("welcome.shortcut.close_tab")} />
           </div>
         </div>
       </div>

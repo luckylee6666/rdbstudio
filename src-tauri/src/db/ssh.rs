@@ -129,17 +129,29 @@ pub async fn open(
     // Feed password / passphrase non-interactively via SSH_ASKPASS.
     let needs_secret = (auth == "password") || (auth == "key" && secret.is_some());
     if needs_secret {
-        let pw = secret.unwrap_or("");
-        let script = write_askpass_script(local_port)?;
-        cmd.env("RDB_SSH_PW", pw)
-            .env("SSH_ASKPASS", &script)
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            // Some OpenSSH builds still check DISPLAY before using askpass.
-            .env("DISPLAY", "rdbstudio:0");
-        if auth == "password" {
-            cmd.arg("-o").arg("PreferredAuthentications=password,keyboard-interactive");
+        // The askpass helper is a shell script — Windows OpenSSH can't execute
+        // it, and the tunnel would just hang waiting for a prompt. Fail with a
+        // clear message instead.
+        #[cfg(windows)]
+        return Err(AppError::msg(
+            "SSH password / key-passphrase auth is not supported on Windows — \
+             use an unencrypted key file or ssh-agent (Pageant/OpenSSH agent) instead",
+        ));
+        #[cfg(not(windows))]
+        {
+            let pw = secret.unwrap_or("");
+            let script = write_askpass_script(local_port)?;
+            cmd.env("RDB_SSH_PW", pw)
+                .env("SSH_ASKPASS", &script)
+                .env("SSH_ASKPASS_REQUIRE", "force")
+                // Some OpenSSH builds still check DISPLAY before using askpass.
+                .env("DISPLAY", "rdbstudio:0");
+            if auth == "password" {
+                cmd.arg("-o")
+                    .arg("PreferredAuthentications=password,keyboard-interactive");
+            }
+            cleanup.0.push(script);
         }
-        cleanup.0.push(script);
     }
 
     // Capture stderr to a temp file so we can surface ssh's error on failure.
@@ -207,6 +219,7 @@ pub async fn open(
 
 /// Write an executable askpass helper that echoes $RDB_SSH_PW. The password
 /// itself is passed via the environment, not written into the script file.
+#[cfg(not(windows))]
 fn write_askpass_script(local_port: u16) -> AppResult<PathBuf> {
     use std::io::Write;
     let dir = std::env::temp_dir();

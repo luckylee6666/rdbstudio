@@ -29,9 +29,12 @@ pub struct RestoreReport {
     pub elapsed_ms: u64,
 }
 
-/// Locate a client binary by name. PATH first, then the common macOS install
-/// prefixes that a launchd-spawned GUI app doesn't inherit.
+/// Locate a client binary by name. PATH first, then common install locations
+/// the app doesn't inherit: a launchd-spawned macOS GUI app gets a minimal
+/// PATH, and Windows installers put the tools in versioned Program Files
+/// directories that are rarely on PATH at all.
 fn find_binary(names: &[&str]) -> Option<PathBuf> {
+    #[cfg(not(target_os = "windows"))]
     const EXTRA_DIRS: &[&str] = &[
         "/opt/homebrew/bin",
         "/opt/homebrew/opt/libpq/bin",
@@ -41,19 +44,43 @@ fn find_binary(names: &[&str]) -> Option<PathBuf> {
         "/usr/local/opt/mysql-client/bin",
         "/usr/bin",
     ];
+    #[cfg(target_os = "windows")]
+    const EXTRA_DIRS: &[&str] = &[];
+    // Parents whose versioned children hold a bin/ (…\PostgreSQL\16\bin).
+    #[cfg(target_os = "windows")]
+    const VERSIONED_PARENTS: &[&str] = &[
+        r"C:\Program Files\PostgreSQL",
+        r"C:\Program Files\MySQL",
+        r"C:\Program Files\MariaDB",
+    ];
+
     for name in names {
+        // EXE_SUFFIX is ".exe" on Windows, "" elsewhere — a literal is_file()
+        // probe for "pg_dump" would miss "pg_dump.exe".
+        let file = format!("{}{}", name, std::env::consts::EXE_SUFFIX);
         if let Ok(path_var) = std::env::var("PATH") {
             for dir in std::env::split_paths(&path_var) {
-                let p = dir.join(name);
+                let p = dir.join(&file);
                 if p.is_file() {
                     return Some(p);
                 }
             }
         }
         for d in EXTRA_DIRS {
-            let p = Path::new(d).join(name);
+            let p = Path::new(d).join(&file);
             if p.is_file() {
                 return Some(p);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        for parent in VERSIONED_PARENTS {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for e in entries.flatten() {
+                    let p = e.path().join("bin").join(&file);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
             }
         }
     }
@@ -302,10 +329,18 @@ mod tests {
         assert!(find_binary(&["rdb-definitely-not-a-real-binary-42"]).is_none());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn find_binary_locates_sh_from_usr_bin() {
+    fn find_binary_locates_sh_from_path() {
         // /bin isn't in EXTRA_DIRS, but PATH on any dev/CI box resolves `sh`.
         assert!(find_binary(&["sh"]).is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn find_binary_locates_cmd_with_exe_suffix() {
+        // C:\Windows\System32 is always on PATH; probing must append ".exe".
+        assert!(find_binary(&["cmd"]).is_some());
     }
 
     #[test]
