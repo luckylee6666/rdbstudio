@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Plus, Search, FileCode, Trash2, Edit, Play } from "lucide-react";
 import { api } from "@/lib/api";
 import { useT } from "@/store/i18n";
+import { toast } from "@/store/toasts";
 import { useWorkspace } from "@/store/workspace";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -25,7 +26,7 @@ export function SnippetsPanel() {
       const res = await api.listSnippets();
       setSnippets(res);
     } catch (e) {
-      console.error("load snippets", e);
+      toast.error(t("snippets.load_failed"), String(e));
     }
   };
 
@@ -96,11 +97,12 @@ export function SnippetsPanel() {
     if (!deleteId) return;
     try {
       await api.deleteSnippet(deleteId);
-      setDeleteId(null);
       void load();
       window.dispatchEvent(new Event("snippets-updated"));
     } catch (e) {
-      console.error("delete snippet", e);
+      toast.error(t("snippets.delete_failed"), String(e));
+    } finally {
+      setDeleteId(null);
     }
   };
 

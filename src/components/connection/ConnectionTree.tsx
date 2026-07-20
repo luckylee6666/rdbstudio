@@ -27,6 +27,7 @@ import {
   Plus,
   RefreshCw,
   ScrollText,
+  Search,
   Settings2,
   Star,
   StarOff,
@@ -36,6 +37,7 @@ import {
   Type,
   View,
   Workflow,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import type { ConnectionConfig, DriverKind, TreeEntry } from "@/types";
@@ -174,6 +176,8 @@ export function ConnectionTree() {
         </div>
       </div>
 
+      <TreeFilterInput />
+
       <div className="flex-1 overflow-auto px-2 pb-3">
         {!loaded ? (
           <Skeleton />
@@ -209,6 +213,35 @@ export function ConnectionTree() {
         onSubmit={onNewGroupSubmit}
         onClose={() => setPromptOpen(false)}
       />
+    </div>
+  );
+}
+
+/// Live filter for table/key names — state lives in the connections store so
+/// deeply nested Folders can read it without prop drilling.
+function TreeFilterInput() {
+  const treeFilter = useConnections((s) => s.treeFilter);
+  const setTreeFilter = useConnections((s) => s.setTreeFilter);
+  const t = useT();
+  return (
+    <div className="px-2 pb-2">
+      <div className="flex h-7 items-center gap-1.5 rounded-md border border-border/70 bg-surface px-2 text-[12px]">
+        <Search className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <input
+          value={treeFilter}
+          onChange={(e) => setTreeFilter(e.target.value)}
+          placeholder={t("tree.filter.placeholder")}
+          className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-muted-foreground/60"
+        />
+        {treeFilter && (
+          <button
+            onClick={() => setTreeFilter("")}
+            className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1203,6 +1236,13 @@ function Folder({
   const showLoadMore = isKeysFolder && branch?.redisDone === false;
   const loadingMore = !!branch?.redisLoadingMore;
   const t = useT();
+  // Live tree filter: match entry names, and force the folder open while a
+  // filter is active so hits inside collapsed folders aren't invisible.
+  const filter = useConnections((s) => s.treeFilter).trim().toLowerCase();
+  const visible = filter
+    ? entries.filter((e) => e.name.toLowerCase().includes(filter))
+    : entries;
+  const effectiveOpen = open || !!filter;
 
   const openData = (e: TreeEntry) => {
     // Redis key: open a dedicated viewer that renders the value by type
@@ -1425,20 +1465,22 @@ function Folder({
         <ChevronRight
           className={cn(
             "h-3 w-3 shrink-0 transition-transform",
-            open && "rotate-90"
+            effectiveOpen && "rotate-90"
           )}
         />
-        {open ? (
+        {effectiveOpen ? (
           <FolderOpen className="h-3.5 w-3.5" />
         ) : (
           <FolderClosed className="h-3.5 w-3.5" />
         )}
         <span className="truncate">{label}</span>
-        <span className="ml-auto text-[11px] tabular-nums">{count}</span>
+        <span className="ml-auto text-[11px] tabular-nums">
+          {filter ? `${visible.length}/${count}` : count}
+        </span>
       </button>
-      {open && (
+      {effectiveOpen && (
         <div className="ml-4">
-          {entries.map((e) => {
+          {visible.map((e) => {
             const Icon = iconFor(e.kind, false);
             return (
               <button

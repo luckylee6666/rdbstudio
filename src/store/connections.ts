@@ -25,6 +25,9 @@ interface ConnectionsState {
   versions: Record<string, string | undefined>;
   branches: Record<string, Branch>;
   errors: Record<string, string | undefined>;
+  /** Live filter for table/key names in the sidebar tree. */
+  treeFilter: string;
+  setTreeFilter: (v: string) => void;
 
   refresh: () => Promise<void>;
   refreshBranch: (id: string) => Promise<void>;
@@ -51,6 +54,8 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   versions: {},
   branches: {},
   errors: {},
+  treeFilter: "",
+  setTreeFilter: (v) => set({ treeFilter: v }),
 
   refresh: async () => {
     const list = await api.listConnections();

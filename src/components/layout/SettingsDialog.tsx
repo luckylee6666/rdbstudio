@@ -6,6 +6,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { useI18n, useT } from "@/store/i18n";
 import { useConnections } from "@/store/connections";
+import { toast } from "@/store/toasts";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -38,6 +39,8 @@ export function SettingsDialog({ open, onClose }: Props) {
     try {
       await api.clearHistory();
       setCleared(true);
+    } catch (e) {
+      toast.error(t("settings.history.failed"), String(e));
     } finally {
       setClearing(false);
     }

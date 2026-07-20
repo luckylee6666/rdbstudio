@@ -1,12 +1,14 @@
 import { useConnections } from "@/store/connections";
 import { DriverBadge } from "@/components/connection/driverIcon";
-import { Star } from "lucide-react";
+import { Loader2, Star } from "lucide-react";
 import { useT } from "@/store/i18n";
+import { toast } from "@/store/toasts";
 
 export function FavoritesPanel() {
   const list = useConnections((s) => s.list);
   const pinned = list.filter((c) => c.pinned);
   const connect = useConnections((s) => s.connect);
+  const statusMap = useConnections((s) => s.status);
   const t = useT();
 
   return (
@@ -28,26 +30,44 @@ export function FavoritesPanel() {
             </div>
           </div>
         ) : (
-          pinned.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => void connect(c.id)}
-              className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-accent/50"
-            >
-              <DriverBadge driver={c.driver} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] font-medium">{c.name}</div>
-                <div className="truncate text-[11px] text-muted-foreground">
-                  {c.driver === "sqlite"
-                    ? c.file_path ?? "—"
-                    : c.driver === "redis"
-                    ? `${c.host ?? "?"}:${c.port ?? "?"} · db${c.database ?? "0"}`
-                    : `${c.host ?? "?"}${c.database ? " · " + c.database : ""}`}
+          pinned.map((c) => {
+            const st = statusMap[c.id] ?? "disconnected";
+            return (
+              <button
+                key={c.id}
+                disabled={st === "connecting"}
+                onClick={() => {
+                  if (st === "connected" || st === "connecting") return;
+                  connect(c.id).catch((e) =>
+                    toast.error(t("favorites.connect_failed"), String(e))
+                  );
+                }}
+                className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-accent/50 disabled:opacity-60"
+              >
+                <DriverBadge driver={c.driver} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px] font-medium">{c.name}</div>
+                  <div className="truncate text-[11px] text-muted-foreground">
+                    {c.driver === "sqlite"
+                      ? c.file_path ?? "—"
+                      : c.driver === "redis"
+                      ? `${c.host ?? "?"}:${c.port ?? "?"} · db${c.database ?? "0"}`
+                      : `${c.host ?? "?"}${c.database ? " · " + c.database : ""}`}
+                  </div>
                 </div>
-              </div>
-              <Star className="h-3.5 w-3.5 fill-warning text-warning" />
-            </button>
-          ))
+                {st === "connecting" ? (
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-warning" />
+                ) : (
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    {st === "connected" && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-success shadow-[0_0_6px_hsl(var(--success))]" />
+                    )}
+                    <Star className="h-3.5 w-3.5 fill-warning text-warning" />
+                  </span>
+                )}
+              </button>
+            );
+          })
         )}
       </div>
     </div>

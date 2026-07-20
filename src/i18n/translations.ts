@@ -78,6 +78,7 @@ const en: Dict = {
   "settings.history.clear": "Clear history",
   "settings.history.cleared": "Cleared",
   "settings.history.confirm": "Clear all query history?",
+  "settings.history.failed": "Failed to clear history",
   "settings.about": "About",
   "settings.about.body": "rdbstudio is a cross-platform SQL workbench for SQLite, PostgreSQL and MySQL. Built with Tauri, React and sqlx.",
 
@@ -160,6 +161,19 @@ const en: Dict = {
   "tree.no_tables": "(no tables)",
   "tree.scanning": "scanning…",
   "tree.load_more": "+ Load more keys",
+  "tree.filter.placeholder": "Filter tables / keys…",
+
+  // workspace tabs
+  "tabs.new_query": "New query",
+  "tabs.close": "Close",
+  "tabs.close_others": "Close Others",
+  "tabs.close_right": "Close to the Right",
+  "tabs.close_all": "Close All",
+
+  // panel error toasts
+  "snippets.load_failed": "Failed to load snippets",
+  "snippets.delete_failed": "Failed to delete snippet",
+  "favorites.connect_failed": "Connection failed",
 
   // grid copy-as
   "grid.copy_cell": "Copy Cell",
@@ -532,6 +546,7 @@ const zh: Dict = {
   "settings.history.clear": "清空历史",
   "settings.history.cleared": "已清空",
   "settings.history.confirm": "确定清空所有查询历史？",
+  "settings.history.failed": "清空历史失败",
   "settings.about": "关于",
   "settings.about.body": "rdbstudio 是跨平台的 SQL 工作台，支持 SQLite / PostgreSQL / MySQL。基于 Tauri、React、sqlx 构建。",
 
@@ -611,6 +626,19 @@ const zh: Dict = {
   "tree.no_tables": "（无表）",
   "tree.scanning": "扫描中…",
   "tree.load_more": "+ 加载更多 key",
+  "tree.filter.placeholder": "筛选表 / key…",
+
+  // workspace tabs
+  "tabs.new_query": "新建查询",
+  "tabs.close": "关闭",
+  "tabs.close_others": "关闭其他",
+  "tabs.close_right": "关闭右侧",
+  "tabs.close_all": "全部关闭",
+
+  // panel error toasts
+  "snippets.load_failed": "加载片段失败",
+  "snippets.delete_failed": "删除片段失败",
+  "favorites.connect_failed": "连接失败",
 
   // grid copy-as
   "grid.copy_cell": "复制单元格",
