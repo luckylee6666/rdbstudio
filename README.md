@@ -7,40 +7,57 @@
 
 **Modern cross-platform database GUI** — A Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis, built with Tauri 2 + React + sqlx.
 
-> Status: **early preview** (v0.1.0). Core features work; expect rough edges before v1.0.
+> Status: **v0.1.0** — first stable release. macOS (Apple Silicon) and Windows x64 installers on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page.
 
 ## Features
 
-- **Four drivers in one binary**: SQLite · PostgreSQL · MySQL · Redis
-- **SQL editor**: CodeMirror 6, multi-statement execution, EXPLAIN, format (sql-formatter)
-- **Data grid**: virtualized scrolling (`@tanstack/react-virtual`), inline edit, NULL handling, pretty JSON viewer
-- **Table designer**: column/index editing with live DDL preview before apply
-- **ER diagram**: `@xyflow/react` + dagre auto-layout
-- **CSV import / export**: streamed through Rust, no browser blob round-trip
-- **Redis viewer**: type-aware key viewer (string / hash / list / set / zset / stream / JSON) with TTL display, paginated SCAN
-- **Connection groups**: drag-and-drop into folders, persisted locally
-- **Bilingual UI**: 中文 + English
+**Query & analyze**
+- SQL editor (CodeMirror 6): column-aware autocomplete, SQL formatting, snippets library
+- Multi-statement scripts run **atomically in one transaction** — any failure rolls the whole script back with the failing statement pinpointed
+- Query cancellation mid-flight; results capped at 10k rows with an explicit truncation banner (no more frozen UI on `SELECT *`)
+- **Visual EXPLAIN**: PostgreSQL / SQLite query plans rendered as an auto-laid-out node graph, with cost hotspots highlighted by *self* cost
+- Query history with re-run, result export as CSV / JSON / SQL INSERT
 
-## Screenshots
+**Data & schema**
+- Virtualized data grid: inline editing (multi-row-match writes are rejected server-side), FK value jump, copy row as INSERT / CSV / JSON, pretty JSON cell viewer
+- Table designer with live DDL preview; create table / schema, rename, truncate, duplicate structure
+- ER diagram with automatic layout
+- CSV import (batched multi-row INSERTs with per-row error reporting) and table export
+- **Whole-database dump & restore**: SQLite via `VACUUM INTO`, PostgreSQL via `pg_dump`/`psql`, MySQL via `mysqldump`/`mysql` — client binaries auto-discovered, passwords never touch the command line
 
-<!-- Add screenshots in docs/img/ and reference them here -->
-_Screenshots coming soon._
+**Redis**
+- Type-aware key viewer (string / hash / list / set / zset / stream / JSON) with TTL, paginated SCAN
+- In-place value editing; field/member renames run as **guarded atomic Lua scripts** (no clobbering, no lost values)
+
+**Connections & safety**
+- Connection groups (drag-and-drop), environment color tags, pin favorites
+- **Read-only mode** enforced server-side across every write path — including data-modifying CTEs
+- SSH tunnels (key / agent / password¹), SSL/TLS with certificate verification modes
+- Passwords stored in the system keychain (macOS Keychain / Windows Credential Manager), never in config files
+- Corrupt config/history files are quarantined instead of silently wiped
+
+**Workspace**
+- Tabs, editor buffers, and layout persist across restarts
+- Command palette (open any table / key / action), sidebar live filter for large schemas
+- Bilingual UI (中文 / English), dark & light themes
+
+¹ SSH password auth is macOS/Linux only; Windows uses key files or ssh-agent.
 
 ## Install
 
 ### Pre-built (unsigned)
 
-Tagged releases publish unsigned installers to [Releases](https://github.com/luckylee6666/rdbstudio/releases):
+Tagged releases publish installers to [Releases](https://github.com/luckylee6666/rdbstudio/releases):
 
-- **macOS arm64** — `.dmg` (Apple Silicon only for now)
-- **Windows x64** — `.msi` / `.exe`
+- **macOS arm64** — `.dmg` (Apple Silicon)
+- **Windows x64** — `.msi` (en-US / zh-CN) or `.exe` setup
 
-Because they're not code-signed yet, first launch needs one extra click:
+The builds are not code-signed yet, so first launch needs one extra step:
 
-- **macOS**: right-click `rdbstudio.app` → **Open** (or System Settings → Privacy & Security → "Open Anyway"). Gatekeeper will refuse a plain double-click on an un-notarized app.
-- **Windows**: SmartScreen → "More info" → "Run anyway".
+- **macOS**: double-click shows "Apple could not verify…" → click **Done** → **System Settings → Privacy & Security** → scroll down → **Open Anyway**. (The app is ad-hoc signed, so it will *not* show the dead-end "app is damaged" dialog.)
+- **Windows**: SmartScreen → **More info** → **Run anyway**. Windows 10 may prompt to install the WebView2 runtime; Windows 11 ships it.
 
-Signed/notarized builds will land once code-signing certificates are in place.
+Signed / notarized builds will land once code-signing certificates are in place.
 
 ### Build from source
 
@@ -53,39 +70,38 @@ Requires:
 git clone git@github.com:luckylee6666/rdbstudio.git
 cd rdbstudio
 pnpm install
-pnpm tauri:dev     # dev mode
-pnpm tauri:build   # release bundle in src-tauri/target/release/bundle/
+pnpm tauri dev     # dev mode
+pnpm tauri build   # release bundle in src-tauri/target/release/bundle/
 ```
 
 ## Keyboard shortcuts
 
 | Action | Mac | Windows / Linux |
 |---|---|---|
-| Run query (or selection) | ⌘↵ | Ctrl+↵ |
+| Run query (or selection) | ⌘↵ | Ctrl+Enter |
 | Format SQL | ⌘⇧F | Ctrl+Shift+F |
 | Command palette | ⌘K | Ctrl+K |
 | New query tab | ⌘T | Ctrl+T |
 | Close tab | ⌘W | Ctrl+W |
+| Toggle sidebar | ⌘B | Ctrl+B |
+| Toggle theme | ⌘/ | Ctrl+/ |
 | Editor find (CodeMirror) | ⌘F | Ctrl+F |
-| Toggle theme | (Settings) | (Settings) |
 
 See **Settings → Shortcuts** in-app for the full list.
 
 ## Roadmap
 
-- **v0.2** — toast notifications, error boundary, P0 polish, signed macOS build
-- **v0.3** — Redis write editing (SET/HSET/...), SSH tunnel, SQL snippets
-- **v0.4** — SSL certificate config, batch row editing, SQL/JSON import
-- **v1.0** — auto-update, crash reporting, full Navicat parity audit
-
-Track progress: [milestones](https://github.com/luckylee6666/rdbstudio/milestones).
+- Code-signed + notarized builds; auto-update channel
+- `EXPLAIN ANALYZE` mode (real execution timings in the plan graph)
+- Dump/restore progress reporting and cancellation
+- Redis Pub/Sub, Cluster, and Streams tooling
 
 ## Tech stack
 
 - **Frontend**: Tauri 2 + React 18 + TypeScript + Vite 6 + Tailwind 3 + Radix UI
 - **Editor**: CodeMirror 6 (`@codemirror/lang-sql`)
 - **Diagrams**: `@xyflow/react` + dagre
-- **State**: Zustand
+- **State**: Zustand (persisted workspace)
 - **Backend**: Rust + sqlx 0.8 (sqlite / postgres / mysql) + redis 0.27 + tokio + keyring + csv
 
 ## Contributing
