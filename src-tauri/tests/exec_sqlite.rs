@@ -87,3 +87,66 @@ async fn execute_select_caps_huge_results_and_flags_truncation() {
     assert_eq!(r.rows.len(), exec::MAX_ROWS);
     assert!(!r.truncated, "exactly-at-cap must not be flagged truncated");
 }
+
+#[tokio::test]
+async fn execute_script_commits_all_statements() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let stmts = vec![
+        "UPDATE users SET age = 10 WHERE id = 1".to_string(),
+        "UPDATE users SET age = 20 WHERE id = 2".to_string(),
+        "SELECT count(*) AS n FROM users WHERE age IN (10, 20)".to_string(),
+    ];
+    let out = exec::execute_script(&pool, &stmts).await.expect("script");
+    match out {
+        exec::ScriptOutcome::Ok {
+            result,
+            total_affected,
+            statements,
+        } => {
+            assert_eq!(statements, 3);
+            assert_eq!(total_affected, 2, "two UPDATEs of one row each");
+            assert_eq!(
+                result.rows[0][0].as_i64(),
+                Some(2),
+                "last statement's rows are the displayed result"
+            );
+        }
+        other => panic!("expected Ok, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn execute_script_rolls_back_earlier_statements_on_failure() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let stmts = vec![
+        "UPDATE users SET age = 111 WHERE id = 1".to_string(),
+        "INSERT INTO no_such_table VALUES (1)".to_string(),
+    ];
+    let out = exec::execute_script(&pool, &stmts)
+        .await
+        .expect("failed scripts still return an outcome, not Err");
+    match out {
+        exec::ScriptOutcome::Failed {
+            failed_index,
+            statements,
+            error,
+        } => {
+            assert_eq!(failed_index, 1);
+            assert_eq!(statements, 2);
+            assert!(!error.is_empty());
+        }
+        other => panic!("expected Failed, got {:?}", other),
+    }
+    let r = exec::execute(&pool, "SELECT age FROM users WHERE id = 1")
+        .await
+        .expect("check");
+    assert_ne!(
+        r.rows[0][0].as_i64(),
+        Some(111),
+        "statement before the failure must be rolled back"
+    );
+}

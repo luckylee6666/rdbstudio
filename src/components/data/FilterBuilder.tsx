@@ -19,18 +19,25 @@ interface Condition {
   value: string;
 }
 
-const OPS: { value: FilterOp; label: string; hideValue?: boolean }[] = [
+// Symbolic operators render as-is; word operators carry an i18n key resolved
+// at render time (module scope can't call useT).
+const OPS: {
+  value: FilterOp;
+  label?: string;
+  labelKey?: string;
+  hideValue?: boolean;
+}[] = [
   { value: "eq", label: "=" },
   { value: "neq", label: "≠" },
   { value: "gt", label: ">" },
   { value: "gte", label: "≥" },
   { value: "lt", label: "<" },
   { value: "lte", label: "≤" },
-  { value: "contains", label: "contains" },
-  { value: "starts_with", label: "starts with" },
-  { value: "ends_with", label: "ends with" },
-  { value: "is_null", label: "is NULL", hideValue: true },
-  { value: "not_null", label: "is NOT NULL", hideValue: true },
+  { value: "contains", labelKey: "filter.op.contains" },
+  { value: "starts_with", labelKey: "filter.op.starts_with" },
+  { value: "ends_with", labelKey: "filter.op.ends_with" },
+  { value: "is_null", labelKey: "filter.op.is_null", hideValue: true },
+  { value: "not_null", labelKey: "filter.op.not_null", hideValue: true },
 ];
 
 function filtersToConds(filters: Filter[]): Condition[] {
@@ -197,14 +204,14 @@ export function FilterBuilder({
                   >
                     {OPS.map((o) => (
                       <option key={o.value} value={o.value}>
-                        {o.label}
+                        {o.labelKey ? t(o.labelKey) : o.label}
                       </option>
                     ))}
                   </select>
                   <input
                     value={c.value}
                     disabled={hideValue}
-                    placeholder={hideValue ? "" : "value…"}
+                    placeholder={hideValue ? "" : t("filter.value_placeholder")}
                     onChange={(e) => updateCond(c.id, { value: e.target.value })}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") apply();

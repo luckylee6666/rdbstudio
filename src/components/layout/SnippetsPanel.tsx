@@ -70,11 +70,11 @@ export function SnippetsPanel() {
 
   const handleSave = async () => {
     if (!name.trim()) {
-      setError(t("sidebar.snippets.name") + " is required");
+      setError(t("snippets.err.name_required"));
       return;
     }
     if (!sql.trim()) {
-      setError(t("sidebar.snippets.sql") + " is required");
+      setError(t("snippets.err.sql_required"));
       return;
     }
     try {
@@ -179,21 +179,21 @@ export function SnippetsPanel() {
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button
                     onClick={() => handleInsert(s.sql)}
-                    title="Insert to Editor"
+                    title={t("snippets.insert")}
                     className="grid h-5 w-5 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
                   >
                     <Play className="h-3 w-3" />
                   </button>
                   <button
                     onClick={() => openEditModal(s)}
-                    title="Edit"
+                    title={t("common.edit")}
                     className="grid h-5 w-5 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
                   >
                     <Edit className="h-3 w-3" />
                   </button>
                   <button
                     onClick={() => setDeleteId(s.id)}
-                    title="Delete"
+                    title={t("common.delete")}
                     className="grid h-5 w-5 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-danger"
                   >
                     <Trash2 className="h-3 w-3" />
@@ -259,7 +259,7 @@ export function SnippetsPanel() {
               value={desc}
               onChange={(e) => setDesc(e.target.value)}
               className="h-8 rounded-md border border-border/70 bg-surface px-3 text-[12.5px] text-foreground focus:border-brand/60 focus:outline-none"
-              placeholder="Optional description"
+              placeholder={t("snippets.desc_placeholder")}
             />
           </div>
           <div className="flex flex-col gap-1.5">
@@ -281,7 +281,7 @@ export function SnippetsPanel() {
       <ConfirmDialog
         open={deleteId !== null}
         title={t("conn.delete")}
-        message="Are you sure you want to delete this snippet?"
+        message={t("snippets.delete_confirm")}
         confirmLabel={t("conn.delete")}
         cancelLabel={t("common.cancel")}
         danger

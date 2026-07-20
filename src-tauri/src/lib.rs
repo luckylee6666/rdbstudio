@@ -23,6 +23,33 @@ pub fn run() {
             let history = HistoryStore::load(&data_dir)?;
             let snippets = store::SnippetStore::load(&data_dir)?;
             app.manage(AppState::new(store, history, snippets));
+
+            // macOS default menu binds ⌘W to a native "Close Window" item,
+            // which fires before the webview ever sees the key — the in-app
+            // close-tab shortcut was dead. Strip that single item so ⌘W
+            // reaches the frontend handler; the window still closes via the
+            // traffic lights or ⌘Q.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, MenuItemKind};
+                let menu = Menu::default(app.handle())?;
+                for item in menu.items()? {
+                    if let MenuItemKind::Submenu(sm) = item {
+                        for (idx, sub) in sm.items()?.iter().enumerate() {
+                            let is_close_window = matches!(
+                                sub,
+                                MenuItemKind::Predefined(p)
+                                    if p.text().map(|t| t == "Close Window").unwrap_or(false)
+                            );
+                            if is_close_window {
+                                sm.remove_at(idx)?;
+                                break; // indices shift after removal
+                            }
+                        }
+                    }
+                }
+                app.set_menu(menu)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -43,6 +70,8 @@ pub fn run() {
             commands::meta::list_columns,
             commands::meta::scan_redis_keys,
             commands::query::execute_query,
+            commands::query::execute_script,
+            commands::query::redis_rename_member,
             commands::query::cancel_query,
             commands::query::list_history,
             commands::query::clear_history,

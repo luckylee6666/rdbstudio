@@ -191,7 +191,7 @@ export function TableDataGrid({
 
         {rows.length === 0 ? (
           <div className="flex h-40 items-center justify-center text-[12px] text-muted-foreground">
-            No rows.
+            {t("table.grid.no_rows")}
           </div>
         ) : (
           <div
@@ -354,6 +354,7 @@ function RowNumberCell({
   onRevert: () => void;
   onDelete: () => void;
 }) {
+  const t = useT();
   const dirty = (row.dirtyCols?.size ?? 0) > 0 || row.kind === "insert";
   return (
     <div
@@ -372,7 +373,7 @@ function RowNumberCell({
           {(row.dirtyCols?.size ?? 0) > 0 || row.deleted ? (
             <button
               onClick={onRevert}
-              title="Revert"
+              title={t("common.revert")}
               className="grid h-4 w-4 place-items-center rounded hover:bg-accent"
             >
               <RotateCcw className="h-3 w-3" />
@@ -380,7 +381,7 @@ function RowNumberCell({
           ) : null}
           <button
             onClick={onDelete}
-            title={row.deleted ? "Undo delete" : "Delete row"}
+            title={row.deleted ? t("table.row.undo_delete") : t("table.row.delete")}
             className="grid h-4 w-4 place-items-center rounded hover:bg-accent"
           >
             <Trash2 className="h-3 w-3" />

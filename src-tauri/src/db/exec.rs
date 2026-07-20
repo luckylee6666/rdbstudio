@@ -1,6 +1,6 @@
 use crate::db::pool::DbPool;
 use crate::db::redis_ops;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use serde::Serialize;
 use serde_json::Value as Json;
 use sqlx::{Column, Row, TypeInfo};
@@ -200,6 +200,109 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
         })
     }
 }
+
+/// Outcome of a multi-statement script run inside one transaction. `Failed`
+/// is a normal return, not an `Err` — the frontend needs the failing index
+/// plus the guarantee that every earlier statement was rolled back.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ScriptOutcome {
+    Ok {
+        result: QueryResult,
+        total_affected: u64,
+        statements: usize,
+    },
+    Failed {
+        failed_index: usize,
+        statements: usize,
+        error: String,
+    },
+}
+
+/// Run statements sequentially inside a single transaction; any failure rolls
+/// the whole script back. The returned `result` is the last statement's
+/// (matching the editor's "last result wins" display), with `elapsed_ms`
+/// covering the full script.
+pub async fn execute_script(pool: &DbPool, stmts: &[String]) -> AppResult<ScriptOutcome> {
+    if stmts.is_empty() {
+        return Err(AppError::msg("empty script"));
+    }
+    let start = Instant::now();
+    match pool {
+        DbPool::Redis(_) => Err(AppError::msg(
+            "multi-statement scripts are not supported for Redis",
+        )),
+        DbPool::Sqlite(p) => sqlite_script(p, stmts, start).await,
+        DbPool::Postgres(p) => pg_script(p, stmts, start).await,
+        DbPool::Mysql(p) => mysql_script(p, stmts, start).await,
+    }
+}
+
+macro_rules! script_impl {
+    ($fn_name:ident, $pool_ty:ty, $decode:ident) => {
+        async fn $fn_name(
+            pool: &$pool_ty,
+            stmts: &[String],
+            start: Instant,
+        ) -> AppResult<ScriptOutcome> {
+            let mut tx = pool.begin().await?;
+            let mut total: u64 = 0;
+            let mut last: Option<QueryResult> = None;
+            for (i, sql) in stmts.iter().enumerate() {
+                let one: AppResult<QueryResult> = if is_readonly(sql) || has_returning(sql) {
+                    let stmt_start = Instant::now();
+                    match fetch_capped(sqlx::query(sql).fetch(&mut *tx)).await {
+                        Ok((rows, truncated)) => {
+                            let mut out = $decode(rows, stmt_start);
+                            out.truncated = truncated;
+                            Ok(out)
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    match sqlx::query(sql).execute(&mut *tx).await {
+                        Ok(r) => Ok(QueryResult {
+                            columns: vec![],
+                            rows: vec![],
+                            rows_affected: Some(r.rows_affected()),
+                            elapsed_ms: 0,
+                            truncated: false,
+                        }),
+                        Err(e) => Err(e.into()),
+                    }
+                };
+                match one {
+                    Ok(r) => {
+                        if let Some(n) = r.rows_affected {
+                            total += n;
+                        }
+                        last = Some(r);
+                    }
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Ok(ScriptOutcome::Failed {
+                            failed_index: i,
+                            statements: stmts.len(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+            tx.commit().await?;
+            let mut result = last.expect("non-empty script always yields a result");
+            result.elapsed_ms = start.elapsed().as_millis() as u64;
+            Ok(ScriptOutcome::Ok {
+                result,
+                total_affected: total,
+                statements: stmts.len(),
+            })
+        }
+    };
+}
+
+script_impl!(sqlite_script, sqlx::SqlitePool, decode_sqlite);
+script_impl!(pg_script, sqlx::PgPool, decode_postgres);
+script_impl!(mysql_script, sqlx::MySqlPool, decode_mysql);
 
 async fn sqlite_select(
     pool: &sqlx::SqlitePool,

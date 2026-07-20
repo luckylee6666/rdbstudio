@@ -103,22 +103,31 @@ interface BuildResult {
   error: string | null;
 }
 
+type TFn = (key: string, params?: Record<string, string | number>) => string;
+
+// Pure module-level builder — the caller passes `t` in so validation messages
+// stay translated without buildSql needing hook access.
 function buildSql(
   driver: DriverKind,
   schema: string | undefined,
   tableName: string,
-  columns: ColumnDraft[]
+  columns: ColumnDraft[],
+  t: TFn
 ): BuildResult {
   const name = tableName.trim();
-  if (!name) return { sql: "", error: "Table name is required" };
+  if (!name) return { sql: "", error: t("create.table.err.name_required") };
   const cols = columns.filter((c) => c.name.trim() && c.type.trim());
   if (cols.length === 0)
-    return { sql: "", error: "At least one column is required" };
+    return { sql: "", error: t("create.table.err.columns_required") };
 
   const seen = new Set<string>();
   for (const c of cols) {
     const lc = c.name.trim().toLowerCase();
-    if (seen.has(lc)) return { sql: "", error: `Duplicate column: ${c.name}` };
+    if (seen.has(lc))
+      return {
+        sql: "",
+        error: t("create.table.err.duplicate_column", { name: c.name }),
+      };
     seen.add(lc);
   }
 
@@ -207,8 +216,11 @@ export function CreateTableDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const { sql, error: buildError } = useMemo(
-    () => (open ? buildSql(driver, schema, tableName, columns) : { sql: "", error: null }),
-    [open, driver, schema, tableName, columns]
+    () =>
+      open
+        ? buildSql(driver, schema, tableName, columns, t)
+        : { sql: "", error: null },
+    [open, driver, schema, tableName, columns, t]
   );
 
   const reset = () => {
@@ -379,7 +391,7 @@ export function CreateTableDialog({
                               updateCol(c.id, { type: e.target.value });
                           }}
                           className="w-7 shrink-0 rounded border border-border/50 bg-background px-0 text-[10px] outline-none focus:border-primary"
-                          title="Pick from presets"
+                          title={t("create.table.pick_preset")}
                         >
                           <option value="">▾</option>
                           {typeOptions.map((opt) => (
@@ -428,7 +440,7 @@ export function CreateTableDialog({
                         disabled={driver === "sqlite" && !c.primaryKey}
                         title={
                           driver === "sqlite" && !c.primaryKey
-                            ? "SQLite AUTOINCREMENT requires PRIMARY KEY"
+                            ? t("create.table.autoinc_requires_pk")
                             : undefined
                         }
                       />

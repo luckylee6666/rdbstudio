@@ -62,6 +62,7 @@ const en: Dict = {
   "models.panel.create": "Create from",
   "models.panel.empty.title": "No connected database",
   "models.panel.empty.desc": "Connect to a database to design ER models.",
+  "models.panel.no_databases": "(no databases)",
 
   // settings dialog
   "settings.title": "Settings",
@@ -81,6 +82,13 @@ const en: Dict = {
   "settings.history.failed": "Failed to clear history",
   "settings.about": "About",
   "settings.about.body": "rdbstudio is a cross-platform SQL workbench for SQLite, PostgreSQL and MySQL. Built with Tauri, React and sqlx.",
+  "settings.shortcut.run": "Run query (or selected text)",
+  "settings.shortcut.format": "Format SQL",
+  "settings.shortcut.palette": "Open command palette",
+  "settings.shortcut.new_tab": "New query tab",
+  "settings.shortcut.close_tab": "Close current tab",
+  "settings.shortcut.find": "Find in editor (when focused)",
+  "settings.shortcut.escape": "Close dialog / cancel inline edit",
 
   // sidebar panels
   "sidebar.connections": "CONNECTIONS",
@@ -173,7 +181,18 @@ const en: Dict = {
   // panel error toasts
   "snippets.load_failed": "Failed to load snippets",
   "snippets.delete_failed": "Failed to delete snippet",
+  "snippets.insert": "Insert to Editor",
+  "snippets.delete_confirm": "Are you sure you want to delete this snippet?",
+  "snippets.desc_placeholder": "Optional description",
+  "snippets.err.name_required": "Name is required",
+  "snippets.err.sql_required": "SQL is required",
   "favorites.connect_failed": "Connection failed",
+
+  // relative time
+  "time.ago.seconds": "{{n}}s ago",
+  "time.ago.minutes": "{{n}}m ago",
+  "time.ago.hours": "{{n}}h ago",
+  "time.ago.days": "{{n}}d ago",
 
   // grid copy-as
   "grid.copy_cell": "Copy Cell",
@@ -181,6 +200,11 @@ const en: Dict = {
   "grid.copy_csv": "Copy Row as CSV",
   "grid.copy_json": "Copy Row as JSON",
   "grid.fk_jump": "Open referenced row",
+  "grid.no_rows": "No rows",
+  "grid.viewer.raw": "Raw",
+  "grid.viewer.pretty": "Pretty",
+  "grid.viewer.value": "value",
+  "grid.viewer.bytes": "{{n}} bytes",
 
   // redis key viewer
   "redis.copy_key": "Copy key name",
@@ -226,6 +250,11 @@ const en: Dict = {
   "create.table.col.primary": "Primary key",
   "create.table.col.auto_inc": "Auto increment",
   "create.table.col.default": "Default",
+  "create.table.pick_preset": "Pick from presets",
+  "create.table.autoinc_requires_pk": "SQLite AUTOINCREMENT requires PRIMARY KEY",
+  "create.table.err.name_required": "Table name is required",
+  "create.table.err.columns_required": "At least one column is required",
+  "create.table.err.duplicate_column": "Duplicate column: {{name}}",
 
   // welcome
   "welcome.badge": "rdbstudio 0.1 · preview",
@@ -320,16 +349,22 @@ const en: Dict = {
     "Table has no primary key. Edits use all original column values as the WHERE clause.",
   "table.toolbar.read_only_title":
     "Table has no primary key — add row disabled",
+  "table.row.delete": "Delete row",
+  "table.row.undo_delete": "Undo delete",
   "table.footer.pending": "{{n}} pending",
   "table.footer.sort": "sort",
   "table.footer.pending.preview": "Preview",
   "table.footer.apply": "Apply",
   "table.grid.no_rows": "No rows.",
   "table.pager.page": "page {{n}} / {{total}}",
+  "table.pager.range": "{{start}}–{{end}} of {{total}}",
   "table.preview.title": "Pending changes",
   "table.preview.summary":
     "{{n}} statement(s) in one transaction",
   "table.err.load": "Failed to load",
+  "table.err.columns_meta": "Couldn't load column metadata",
+  "table.err.count": "Couldn't count rows",
+  "table.err.apply_at": "Failed at edit #{{n}}",
   "table.filter_placeholder": "filter…",
   "filter.mode.builder": "Builder",
   "filter.mode.sql": "SQL",
@@ -341,6 +376,12 @@ const en: Dict = {
   "filter.where_clause": "WHERE clause",
   "filter.sql_hint": "Plain SQL — goes straight into WHERE. ⌘↵ to apply.",
   "filter.count": "{{n}} condition(s)",
+  "filter.op.contains": "contains",
+  "filter.op.starts_with": "starts with",
+  "filter.op.ends_with": "ends with",
+  "filter.op.is_null": "is NULL",
+  "filter.op.not_null": "is NOT NULL",
+  "filter.value_placeholder": "value…",
 
   // query editor
   "query.toolbar.run": "Run",
@@ -370,6 +411,10 @@ const en: Dict = {
     "Results truncated — showing the first {{n}} rows. Add a LIMIT to narrow the query.",
   "query.err.title": "Query failed",
   "query.err.cancelled": "Query cancelled.",
+  "query.err.statement": "Statement {{n}} of {{m}} failed:",
+  "query.err.statement_rolled_back":
+    "Statement {{n}} of {{m}} failed — the whole script was rolled back:",
+  "query.err.export": "Export failed: {{error}}",
 
   // designer
   "design.editing": "editing",
@@ -407,6 +452,8 @@ const en: Dict = {
   "design.stat.size": "size",
   "design.stat.cols": "cols",
   "design.err": "Failed to describe table",
+  "design.err.ddl": "Couldn't load DDL",
+  "design.ddl.none": "-- (no DDL available)",
 
   // ER
   "er.tables": "{{n}} tables",
@@ -468,6 +515,13 @@ const en: Dict = {
 
   // dialog confirm
   "confirm.clear_history": "Clear all history?",
+
+  // error boundary
+  "error.boundary.title": "Something broke",
+  "error.boundary.body":
+    "The interface hit an unrecoverable error. You can try to recover, or copy the details and report them on GitHub.",
+  "error.boundary.copy": "Copy details",
+  "error.boundary.retry": "Try again",
 };
 
 const zh: Dict = {
@@ -530,6 +584,7 @@ const zh: Dict = {
   "models.panel.create": "新建于",
   "models.panel.empty.title": "暂无已连接数据库",
   "models.panel.empty.desc": "先连接一个数据库才能设计 ER 模型。",
+  "models.panel.no_databases": "（无数据库）",
 
   // settings dialog
   "settings.title": "设置",
@@ -549,6 +604,13 @@ const zh: Dict = {
   "settings.history.failed": "清空历史失败",
   "settings.about": "关于",
   "settings.about.body": "rdbstudio 是跨平台的 SQL 工作台，支持 SQLite / PostgreSQL / MySQL。基于 Tauri、React、sqlx 构建。",
+  "settings.shortcut.run": "运行查询（或选中文本）",
+  "settings.shortcut.format": "格式化 SQL",
+  "settings.shortcut.palette": "打开命令面板",
+  "settings.shortcut.new_tab": "新建查询标签",
+  "settings.shortcut.close_tab": "关闭当前标签",
+  "settings.shortcut.find": "编辑器内查找（聚焦时）",
+  "settings.shortcut.escape": "关闭对话框 / 取消行内编辑",
 
   // sidebar panels
   "sidebar.connections": "连接",
@@ -638,7 +700,18 @@ const zh: Dict = {
   // panel error toasts
   "snippets.load_failed": "加载片段失败",
   "snippets.delete_failed": "删除片段失败",
+  "snippets.insert": "插入编辑器",
+  "snippets.delete_confirm": "确定删除该代码段？",
+  "snippets.desc_placeholder": "可选描述",
+  "snippets.err.name_required": "请填写名称",
+  "snippets.err.sql_required": "请填写 SQL",
   "favorites.connect_failed": "连接失败",
+
+  // relative time
+  "time.ago.seconds": "{{n}} 秒前",
+  "time.ago.minutes": "{{n}} 分钟前",
+  "time.ago.hours": "{{n}} 小时前",
+  "time.ago.days": "{{n}} 天前",
 
   // grid copy-as
   "grid.copy_cell": "复制单元格",
@@ -646,6 +719,11 @@ const zh: Dict = {
   "grid.copy_csv": "复制行为 CSV",
   "grid.copy_json": "复制行为 JSON",
   "grid.fk_jump": "跳转到引用行",
+  "grid.no_rows": "暂无数据",
+  "grid.viewer.raw": "原文",
+  "grid.viewer.pretty": "格式化",
+  "grid.viewer.value": "值",
+  "grid.viewer.bytes": "{{n}} 字节",
 
   // redis key viewer
   "redis.copy_key": "复制 key 名",
@@ -690,6 +768,11 @@ const zh: Dict = {
   "create.table.col.primary": "主键",
   "create.table.col.auto_inc": "自增",
   "create.table.col.default": "默认值",
+  "create.table.pick_preset": "从预设类型中选择",
+  "create.table.autoinc_requires_pk": "SQLite 自增列必须是主键",
+  "create.table.err.name_required": "请填写表名",
+  "create.table.err.columns_required": "至少需要一列",
+  "create.table.err.duplicate_column": "列名重复：{{name}}",
 
   // welcome
   "welcome.badge": "rdbstudio 0.1 · 预览",
@@ -783,15 +866,21 @@ const zh: Dict = {
   "table.toolbar.no_pk_title":
     "表没有主键，编辑会使用所有原始列值作为 WHERE 条件定位行。",
   "table.toolbar.read_only_title": "表没有主键 — 无法新增行",
+  "table.row.delete": "删除行",
+  "table.row.undo_delete": "撤销删除",
   "table.footer.pending": "{{n}} 处待提交",
   "table.footer.sort": "排序",
   "table.footer.pending.preview": "预览",
   "table.footer.apply": "提交",
   "table.grid.no_rows": "暂无数据。",
   "table.pager.page": "第 {{n}} / {{total}} 页",
+  "table.pager.range": "{{start}}–{{end}} · 共 {{total}} 行",
   "table.preview.title": "待提交变更",
   "table.preview.summary": "{{n}} 条语句在一个事务内执行",
   "table.err.load": "加载失败",
+  "table.err.columns_meta": "加载列元数据失败",
+  "table.err.count": "行数统计失败",
+  "table.err.apply_at": "第 {{n}} 条编辑执行失败",
   "table.filter_placeholder": "过滤…",
   "filter.mode.builder": "条件",
   "filter.mode.sql": "SQL",
@@ -803,6 +892,12 @@ const zh: Dict = {
   "filter.where_clause": "WHERE 子句",
   "filter.sql_hint": "直接写 SQL，会拼到 WHERE 后面。⌘↵ 应用。",
   "filter.count": "{{n}} 条条件",
+  "filter.op.contains": "包含",
+  "filter.op.starts_with": "开头是",
+  "filter.op.ends_with": "结尾是",
+  "filter.op.is_null": "为 NULL",
+  "filter.op.not_null": "不为 NULL",
+  "filter.value_placeholder": "值…",
 
   // query editor
   "query.toolbar.run": "运行",
@@ -830,6 +925,9 @@ const zh: Dict = {
   "query.result.truncated": "结果已截断，仅显示前 {{n}} 行。可加 LIMIT 缩小查询范围。",
   "query.err.title": "查询失败",
   "query.err.cancelled": "查询已取消。",
+  "query.err.statement": "第 {{n}}/{{m}} 条语句失败：",
+  "query.err.statement_rolled_back": "第 {{n}}/{{m}} 条语句失败——已整体回滚：",
+  "query.err.export": "导出失败：{{error}}",
 
   // designer
   "design.editing": "编辑中",
@@ -867,6 +965,8 @@ const zh: Dict = {
   "design.stat.size": "大小",
   "design.stat.cols": "列",
   "design.err": "获取表结构失败",
+  "design.err.ddl": "加载 DDL 失败",
+  "design.ddl.none": "-- （无 DDL）",
 
   // ER
   "er.tables": "{{n}} 张表",
@@ -927,6 +1027,12 @@ const zh: Dict = {
 
   // dialog confirm
   "confirm.clear_history": "清空全部历史？",
+
+  // error boundary
+  "error.boundary.title": "界面崩溃了",
+  "error.boundary.body": "界面遇到无法恢复的错误。可以尝试恢复，或复制详情后到 GitHub 反馈。",
+  "error.boundary.copy": "复制详情",
+  "error.boundary.retry": "重试",
 };
 
 export const translations: Record<Lang, Dict> = { en, zh };

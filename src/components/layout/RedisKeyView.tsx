@@ -503,15 +503,16 @@ function RedisTable({
     if (!row) return;
     const k = quoteArg(redisKey);
     const commands: string[] = [];
+    // Renames go through a dedicated backend command running a guarded Lua
+    // script — atomic, and it refuses to clobber an existing target (the old
+    // delete-then-add pair could silently merge or drop values on races).
+    let rename: { kind: "hash" | "set" | "zset"; from: string } | null = null;
     switch (type) {
       case "hash": {
         const oldField = cellToString(row[0]);
-        const oldValue = cellToString(row[1]);
         if (colIdx === 0) {
-          // Rename field: HSET k newField oldValue, then HDEL k oldField.
           if (next === oldField) break;
-          commands.push(`HSET ${k} ${quoteArg(next)} ${quoteArg(oldValue)}`);
-          commands.push(`HDEL ${k} ${quoteArg(oldField)}`);
+          rename = { kind: "hash", from: oldField };
         } else {
           commands.push(`HSET ${k} ${quoteArg(oldField)} ${quoteArg(next)}`);
         }
@@ -525,17 +526,14 @@ function RedisTable({
       case "set": {
         const oldMember = cellToString(row[0]);
         if (next === oldMember) break;
-        commands.push(`SREM ${k} ${quoteArg(oldMember)}`);
-        commands.push(`SADD ${k} ${quoteArg(next)}`);
+        rename = { kind: "set", from: oldMember };
         break;
       }
       case "zset": {
         const oldMember = cellToString(row[0]);
-        const oldScore = cellToString(row[1]);
         if (colIdx === 0) {
           if (next === oldMember) break;
-          commands.push(`ZREM ${k} ${quoteArg(oldMember)}`);
-          commands.push(`ZADD ${k} ${oldScore} ${quoteArg(next)}`);
+          rename = { kind: "zset", from: oldMember };
         } else {
           // Validate numeric score before sending.
           if (!/^-?\d+(\.\d+)?$/.test(next.trim())) {
@@ -546,8 +544,18 @@ function RedisTable({
         break;
       }
     }
-    for (const cmd of commands) {
-      await api.executeQuery(connectionId, cmd);
+    if (rename) {
+      await api.redisRenameMember(
+        connectionId,
+        redisKey,
+        rename.kind,
+        rename.from,
+        next
+      );
+    } else {
+      for (const cmd of commands) {
+        await api.executeQuery(connectionId, cmd);
+      }
     }
     setEditing(null);
     await onReload();

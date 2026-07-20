@@ -342,6 +342,11 @@ pub async fn import_csv(
         target, col_list, placeholders
     );
 
+    // Multi-row VALUES batching: hundreds of rows per INSERT instead of one
+    // round-trip per row. The bind budget stays under SQLite's classic
+    // 999-parameter limit, the lowest across our drivers.
+    let rows_per_batch = (900 / columns.len()).max(1);
+
     let mut rows_read: u64 = 0;
     let mut rows_inserted: u64 = 0;
     let mut errors: Vec<String> = Vec::new();
@@ -355,6 +360,10 @@ pub async fn import_csv(
                     .execute(&mut *tx)
                     .await?;
             }
+            let full_sql =
+                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver);
+            let mut batch: Vec<csv::StringRecord> = Vec::with_capacity(rows_per_batch);
+            let mut first_row: u64 = 0;
             for result in rdr.records() {
                 rows_read += 1;
                 let rec = match result {
@@ -364,17 +373,39 @@ pub async fn import_csv(
                         continue;
                     }
                 };
-                let mut args = sqlx::sqlite::SqliteArguments::default();
-                for i in 0..columns.len() {
-                    let v = rec.get(i).unwrap_or("");
-                    let bind: Option<String> = if v.is_empty() { None } else { Some(v.into()) };
-                    args.add(bind)
-                        .map_err(|e| AppError::msg(e.to_string()))?;
+                if batch.is_empty() {
+                    first_row = rows_read;
                 }
-                match sqlx::query_with(&insert_sql, args).execute(&mut *tx).await {
-                    Ok(_) => rows_inserted += 1,
-                    Err(e) => errors.push(format!("row {}: {}", rows_read, e)),
+                batch.push(rec);
+                if batch.len() >= rows_per_batch {
+                    flush_batch_sqlite(
+                        &mut tx,
+                        &full_sql,
+                        &insert_sql,
+                        columns.len(),
+                        &batch,
+                        first_row,
+                        &mut rows_inserted,
+                        &mut errors,
+                    )
+                    .await?;
+                    batch.clear();
                 }
+            }
+            if !batch.is_empty() {
+                let tail_sql =
+                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver);
+                flush_batch_sqlite(
+                    &mut tx,
+                    &tail_sql,
+                    &insert_sql,
+                    columns.len(),
+                    &batch,
+                    first_row,
+                    &mut rows_inserted,
+                    &mut errors,
+                )
+                .await?;
             }
             tx.commit().await?;
         }
@@ -385,6 +416,10 @@ pub async fn import_csv(
                     .execute(&mut *tx)
                     .await?;
             }
+            let full_sql =
+                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver);
+            let mut batch: Vec<csv::StringRecord> = Vec::with_capacity(rows_per_batch);
+            let mut first_row: u64 = 0;
             for result in rdr.records() {
                 rows_read += 1;
                 let rec = match result {
@@ -394,17 +429,39 @@ pub async fn import_csv(
                         continue;
                     }
                 };
-                let mut args = sqlx::postgres::PgArguments::default();
-                for i in 0..columns.len() {
-                    let v = rec.get(i).unwrap_or("");
-                    let bind: Option<String> = if v.is_empty() { None } else { Some(v.into()) };
-                    args.add(bind)
-                        .map_err(|e| AppError::msg(e.to_string()))?;
+                if batch.is_empty() {
+                    first_row = rows_read;
                 }
-                match sqlx::query_with(&insert_sql, args).execute(&mut *tx).await {
-                    Ok(_) => rows_inserted += 1,
-                    Err(e) => errors.push(format!("row {}: {}", rows_read, e)),
+                batch.push(rec);
+                if batch.len() >= rows_per_batch {
+                    flush_batch_pg(
+                        &mut tx,
+                        &full_sql,
+                        &insert_sql,
+                        columns.len(),
+                        &batch,
+                        first_row,
+                        &mut rows_inserted,
+                        &mut errors,
+                    )
+                    .await?;
+                    batch.clear();
                 }
+            }
+            if !batch.is_empty() {
+                let tail_sql =
+                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver);
+                flush_batch_pg(
+                    &mut tx,
+                    &tail_sql,
+                    &insert_sql,
+                    columns.len(),
+                    &batch,
+                    first_row,
+                    &mut rows_inserted,
+                    &mut errors,
+                )
+                .await?;
             }
             tx.commit().await?;
         }
@@ -415,6 +472,10 @@ pub async fn import_csv(
                     .execute(&mut *tx)
                     .await?;
             }
+            let full_sql =
+                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver);
+            let mut batch: Vec<csv::StringRecord> = Vec::with_capacity(rows_per_batch);
+            let mut first_row: u64 = 0;
             for result in rdr.records() {
                 rows_read += 1;
                 let rec = match result {
@@ -424,17 +485,39 @@ pub async fn import_csv(
                         continue;
                     }
                 };
-                let mut args = sqlx::mysql::MySqlArguments::default();
-                for i in 0..columns.len() {
-                    let v = rec.get(i).unwrap_or("");
-                    let bind: Option<String> = if v.is_empty() { None } else { Some(v.into()) };
-                    args.add(bind)
-                        .map_err(|e| AppError::msg(e.to_string()))?;
+                if batch.is_empty() {
+                    first_row = rows_read;
                 }
-                match sqlx::query_with(&insert_sql, args).execute(&mut *tx).await {
-                    Ok(_) => rows_inserted += 1,
-                    Err(e) => errors.push(format!("row {}: {}", rows_read, e)),
+                batch.push(rec);
+                if batch.len() >= rows_per_batch {
+                    flush_batch_mysql(
+                        &mut tx,
+                        &full_sql,
+                        &insert_sql,
+                        columns.len(),
+                        &batch,
+                        first_row,
+                        &mut rows_inserted,
+                        &mut errors,
+                    )
+                    .await?;
+                    batch.clear();
                 }
+            }
+            if !batch.is_empty() {
+                let tail_sql =
+                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver);
+                flush_batch_mysql(
+                    &mut tx,
+                    &tail_sql,
+                    &insert_sql,
+                    columns.len(),
+                    &batch,
+                    first_row,
+                    &mut rows_inserted,
+                    &mut errors,
+                )
+                .await?;
             }
             tx.commit().await?;
         }
@@ -447,6 +530,120 @@ pub async fn import_csv(
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
 }
+
+/// Build a multi-row `INSERT INTO t (cols) VALUES (...), (...)` statement with
+/// driver-appropriate placeholders (numbered for PG, `?` elsewhere).
+fn multi_insert_sql(
+    target: &str,
+    col_list: &str,
+    ncols: usize,
+    nrows: usize,
+    driver: DriverKind,
+) -> String {
+    let mut s = format!("INSERT INTO {} ({}) VALUES ", target, col_list);
+    for r in 0..nrows {
+        if r > 0 {
+            s.push_str(", ");
+        }
+        s.push('(');
+        for c in 0..ncols {
+            if c > 0 {
+                s.push_str(", ");
+            }
+            match driver {
+                DriverKind::Postgres => {
+                    s.push('$');
+                    s.push_str(&(r * ncols + c + 1).to_string());
+                }
+                _ => s.push('?'),
+            }
+        }
+        s.push(')');
+    }
+    s
+}
+
+// Insert a batch with one multi-row INSERT; if the batch fails, roll it back
+// to a savepoint and replay row-by-row so per-row errors stay precise and the
+// good rows still land. Row-level savepoints keep a bad row from aborting the
+// surrounding transaction (Postgres in particular poisons the tx otherwise).
+macro_rules! flush_batch_impl {
+    ($fn_name:ident, $db:ty, $args:ty) => {
+        #[allow(clippy::too_many_arguments)]
+        async fn $fn_name(
+            tx: &mut sqlx::Transaction<'_, $db>,
+            batch_sql: &str,
+            single_sql: &str,
+            ncols: usize,
+            batch: &[csv::StringRecord],
+            first_row: u64,
+            rows_inserted: &mut u64,
+            errors: &mut Vec<String>,
+        ) -> AppResult<()> {
+            let mut args = <$args>::default();
+            for rec in batch {
+                for i in 0..ncols {
+                    let v = rec.get(i).unwrap_or("");
+                    let bind: Option<String> = if v.is_empty() { None } else { Some(v.into()) };
+                    args.add(bind).map_err(|e| AppError::msg(e.to_string()))?;
+                }
+            }
+            sqlx::query("SAVEPOINT rdb_csv_batch")
+                .execute(&mut **tx)
+                .await?;
+            match sqlx::query_with(batch_sql, args).execute(&mut **tx).await {
+                Ok(r) => {
+                    *rows_inserted += r.rows_affected();
+                    sqlx::query("RELEASE SAVEPOINT rdb_csv_batch")
+                        .execute(&mut **tx)
+                        .await?;
+                }
+                Err(_) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT rdb_csv_batch")
+                        .execute(&mut **tx)
+                        .await?;
+                    sqlx::query("RELEASE SAVEPOINT rdb_csv_batch")
+                        .execute(&mut **tx)
+                        .await?;
+                    for (j, rec) in batch.iter().enumerate() {
+                        let mut args = <$args>::default();
+                        for i in 0..ncols {
+                            let v = rec.get(i).unwrap_or("");
+                            let bind: Option<String> =
+                                if v.is_empty() { None } else { Some(v.into()) };
+                            args.add(bind).map_err(|e| AppError::msg(e.to_string()))?;
+                        }
+                        sqlx::query("SAVEPOINT rdb_csv_row")
+                            .execute(&mut **tx)
+                            .await?;
+                        match sqlx::query_with(single_sql, args).execute(&mut **tx).await {
+                            Ok(_) => {
+                                *rows_inserted += 1;
+                                sqlx::query("RELEASE SAVEPOINT rdb_csv_row")
+                                    .execute(&mut **tx)
+                                    .await?;
+                            }
+                            Err(e) => {
+                                errors.push(format!("row {}: {}", first_row + j as u64, e));
+                                sqlx::query("ROLLBACK TO SAVEPOINT rdb_csv_row")
+                                    .execute(&mut **tx)
+                                    .await?;
+                                sqlx::query("RELEASE SAVEPOINT rdb_csv_row")
+                                    .execute(&mut **tx)
+                                    .await?;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    };
+}
+
+flush_batch_impl!(flush_batch_sqlite, sqlx::Sqlite, sqlx::sqlite::SqliteArguments);
+flush_batch_impl!(flush_batch_pg, sqlx::Postgres, sqlx::postgres::PgArguments);
+flush_batch_impl!(flush_batch_mysql, sqlx::MySql, sqlx::mysql::MySqlArguments);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CsvPreview {
@@ -485,6 +682,18 @@ pub fn preview_csv(path: &str, delimiter: char, has_header: bool, limit: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_insert_sql_numbers_pg_and_uses_qmarks_elsewhere() {
+        assert_eq!(
+            multi_insert_sql("\"t\"", "\"a\", \"b\"", 2, 2, DriverKind::Postgres),
+            "INSERT INTO \"t\" (\"a\", \"b\") VALUES ($1, $2), ($3, $4)"
+        );
+        assert_eq!(
+            multi_insert_sql("`t`", "`a`", 1, 3, DriverKind::Mysql),
+            "INSERT INTO `t` (`a`) VALUES (?), (?), (?)"
+        );
+    }
 
     #[test]
     fn csv_escape_leaves_plain_unquoted() {

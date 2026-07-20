@@ -102,6 +102,70 @@ pub async fn scan_keys(
     }
 }
 
+/// Atomic member/field rename with existence guards, via a server-side Lua
+/// script. The naive delete-then-add pair could silently clobber an existing
+/// target, or lose the value if the source vanished between the two commands.
+pub async fn rename_member(
+    handle: &RedisHandle,
+    key: &str,
+    kind: &str,
+    old: &str,
+    new: &str,
+) -> AppResult<()> {
+    if old == new {
+        return Ok(());
+    }
+    let lua = match kind {
+        "hash" => {
+            r#"if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
+  return redis.error_reply('target field already exists')
+end
+local v = redis.call('HGET', KEYS[1], ARGV[1])
+if v == false then
+  return redis.error_reply('source field no longer exists')
+end
+redis.call('HDEL', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[1], ARGV[2], v)
+return 1"#
+        }
+        "set" => {
+            r#"if redis.call('SISMEMBER', KEYS[1], ARGV[2]) == 1 then
+  return redis.error_reply('target member already exists')
+end
+if redis.call('SREM', KEYS[1], ARGV[1]) == 0 then
+  return redis.error_reply('source member no longer exists')
+end
+redis.call('SADD', KEYS[1], ARGV[2])
+return 1"#
+        }
+        "zset" => {
+            r#"if redis.call('ZSCORE', KEYS[1], ARGV[2]) then
+  return redis.error_reply('target member already exists')
+end
+local s = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if s == false then
+  return redis.error_reply('source member no longer exists')
+end
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZADD', KEYS[1], s, ARGV[2])
+return 1"#
+        }
+        other => {
+            return Err(AppError::msg(format!(
+                "rename is not supported for Redis type {other}"
+            )))
+        }
+    };
+    let mut conn = handle.conn();
+    let _: i64 = redis::Script::new(lua)
+        .key(key)
+        .arg(old)
+        .arg(new)
+        .invoke_async(&mut conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn execute(handle: &RedisHandle, command_line: &str) -> AppResult<QueryResult> {
     let start = Instant::now();
     let args = parse_args(command_line)?;

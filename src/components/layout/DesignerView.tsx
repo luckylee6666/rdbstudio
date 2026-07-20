@@ -63,7 +63,7 @@ export function DesignerView({ tab }: { tab: WorkspaceTab }) {
         api.showDdl(connectionId, table, schema).catch((e) => {
           // DDL is supplementary — describe + the grid still work without it,
           // so we surface the failure but don't fail the whole load.
-          toast.error("Couldn't load DDL", String(e));
+          toast.error(t("design.err.ddl"), String(e));
           return "";
         }),
       ]);
@@ -738,7 +738,7 @@ function DDLPanel({ ddl }: { ddl: string }) {
         <Clipboard className="h-3.5 w-3.5" />
         {copied ? t("common.copied") : t("common.copy")}
       </button>
-      <ReadOnlySql value={ddl || "-- (no DDL available)"} />
+      <ReadOnlySql value={ddl || t("design.ddl.none")} />
     </div>
   );
 }

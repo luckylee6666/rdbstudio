@@ -128,12 +128,12 @@ export function HistoryPanel() {
                     <div className="flex items-center justify-between text-[10.5px] text-muted-foreground">
                       <span>
                         {e.row_count != null
-                          ? `${e.row_count} rows`
+                          ? t("query.result.rows", { n: e.row_count })
                           : e.rows_affected != null
-                          ? `${e.rows_affected} affected`
+                          ? t("query.result.affected", { n: e.rows_affected })
                           : ""}
                       </span>
-                      <span>{timeAgo(e.at)}</span>
+                      <span>{timeAgo(e.at, t)}</span>
                     </div>
                   </button>
                 </li>
@@ -157,13 +157,25 @@ export function HistoryPanel() {
   );
 }
 
-function timeAgo(rfc3339: string) {
+// With `t` the output is localized for display; without it (tab subtitles that
+// get persisted as workspace data) it stays in compact English.
+function timeAgo(
+  rfc3339: string,
+  t?: (key: string, params?: Record<string, string | number>) => string
+) {
   const now = Date.now();
-  const t = Date.parse(rfc3339);
-  if (isNaN(t)) return rfc3339;
-  const s = Math.max(0, Math.floor((now - t) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  const ts = Date.parse(rfc3339);
+  if (isNaN(ts)) return rfc3339;
+  const s = Math.max(0, Math.floor((now - ts) / 1000));
+  if (s < 60) return t ? t("time.ago.seconds", { n: s }) : `${s}s ago`;
+  if (s < 3600) {
+    const m = Math.floor(s / 60);
+    return t ? t("time.ago.minutes", { n: m }) : `${m}m ago`;
+  }
+  if (s < 86400) {
+    const h = Math.floor(s / 3600);
+    return t ? t("time.ago.hours", { n: h }) : `${h}h ago`;
+  }
+  const d = Math.floor(s / 86400);
+  return t ? t("time.ago.days", { n: d }) : `${d}d ago`;
 }

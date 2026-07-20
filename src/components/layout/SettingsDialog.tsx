@@ -185,6 +185,7 @@ function Row({
 // here so it can't drift from the Settings dialog — when adding a new binding,
 // add it both here and to its handler.
 function ShortcutList() {
+  const t = useT();
   // navigator.platform is deprecated but still the most reliable signal in
   // an offline desktop app — `userAgentData` isn't supported in WKWebView yet.
   // Falls back to userAgent on Webkit and Linux where platform is empty.
@@ -200,13 +201,13 @@ function ShortcutList() {
   const enter = isMac ? "↵" : "Enter";
 
   const rows: { keys: string; label: string }[] = [
-    { keys: `${mod}${enter}`, label: "Run query (or selected text)" },
-    { keys: `${mod}${shift}F`, label: "Format SQL" },
-    { keys: `${mod}K`, label: "Open command palette" },
-    { keys: `${mod}T`, label: "New query tab" },
-    { keys: `${mod}W`, label: "Close current tab" },
-    { keys: `${mod}F`, label: "Find in editor (when focused)" },
-    { keys: "Esc", label: "Close dialog / cancel inline edit" },
+    { keys: `${mod}${enter}`, label: t("settings.shortcut.run") },
+    { keys: `${mod}${shift}F`, label: t("settings.shortcut.format") },
+    { keys: `${mod}K`, label: t("settings.shortcut.palette") },
+    { keys: `${mod}T`, label: t("settings.shortcut.new_tab") },
+    { keys: `${mod}W`, label: t("settings.shortcut.close_tab") },
+    { keys: `${mod}F`, label: t("settings.shortcut.find") },
+    { keys: "Esc", label: t("settings.shortcut.escape") },
   ];
   return (
     <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">

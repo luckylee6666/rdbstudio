@@ -45,7 +45,7 @@ const ROW_HEIGHT = 26;
 export function DataGrid({
   columns,
   rows,
-  emptyMessage = "No rows",
+  emptyMessage,
   tableName,
   driver,
 }: Props) {
@@ -177,7 +177,7 @@ export function DataGrid({
 
         {rows.length === 0 ? (
           <div className="flex h-40 items-center justify-center text-[12px] text-muted-foreground">
-            {emptyMessage}
+            {emptyMessage ?? t("grid.no_rows")}
           </div>
         ) : (
           <div
@@ -307,6 +307,7 @@ function CellViewer({
   value: unknown;
   onClose: () => void;
 }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const [pretty, setPretty] = useState(true);
 
@@ -376,10 +377,11 @@ function CellViewer({
         <div className="flex items-center gap-2 border-b border-border/70 px-4 py-3">
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="truncate text-[13.5px] font-medium">
-              {column?.name ?? "value"}
+              {column?.name ?? t("grid.viewer.value")}
             </div>
             <div className="text-[11px] text-muted-foreground">
-              {column?.data_type ?? typeLabel} · {byteLen.toLocaleString()} bytes
+              {column?.data_type ?? typeLabel} ·{" "}
+              {t("grid.viewer.bytes", { n: byteLen.toLocaleString() })}
             </div>
           </div>
           {canPretty && (
@@ -387,7 +389,7 @@ function CellViewer({
               onClick={() => setPretty((p) => !p)}
               className="rounded-md border border-border/70 bg-surface px-2 py-1 text-[11px] hover:bg-accent"
             >
-              {pretty ? "Raw" : "Pretty"}
+              {pretty ? t("grid.viewer.raw") : t("grid.viewer.pretty")}
             </button>
           )}
           <button
@@ -396,11 +398,11 @@ function CellViewer({
           >
             {copied ? (
               <>
-                <Check className="h-3 w-3" /> Copied
+                <Check className="h-3 w-3" /> {t("common.copied")}
               </>
             ) : (
               <>
-                <Clipboard className="h-3 w-3" /> Copy
+                <Clipboard className="h-3 w-3" /> {t("common.copy")}
               </>
             )}
           </button>

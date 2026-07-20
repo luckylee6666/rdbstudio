@@ -173,3 +173,49 @@ async fn export_sql_includes_insert_into_users() {
     let count = text.matches("INSERT INTO").count();
     assert_eq!(count, 3, "expected 3 INSERT lines, got: {}", text);
 }
+
+#[tokio::test]
+async fn import_csv_batches_and_reports_bad_rows_precisely() {
+    let pool = common::mem_pool().await;
+    let sqlite = match &pool {
+        rdbstudio_lib::db::pool::DbPool::Sqlite(p) => p,
+        _ => unreachable!(),
+    };
+    sqlx::query("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)")
+        .execute(sqlite)
+        .await
+        .expect("create table");
+
+    // Row 3 collides with row 1's primary key — the multi-row batch INSERT
+    // fails, and the savepoint replay must land rows 1/2/4 while reporting
+    // exactly "row 3".
+    let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+    let path = tmp.path().to_path_buf();
+    drop(tmp);
+    std::fs::write(&path, "id,name\n1,Alice\n2,Bob\n1,Dup\n4,Dave\n").expect("write csv");
+
+    let opts = ImportCsvOptions {
+        path: path.to_string_lossy().into_owned(),
+        schema: None,
+        table: "people".into(),
+        delimiter: ',',
+        has_header: true,
+        mode: ImportMode::Append,
+        column_map: None,
+    };
+    let report = io::import_csv(&pool, &opts).await.expect("import");
+    assert_eq!(report.rows_read, 4);
+    assert_eq!(report.rows_inserted, 3, "errors={:?}", report.errors);
+    assert_eq!(report.errors.len(), 1, "errors={:?}", report.errors);
+    assert!(
+        report.errors[0].starts_with("row 3:"),
+        "expected the duplicate to be attributed to row 3, got {:?}",
+        report.errors
+    );
+
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+        .fetch_one(sqlite)
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+}

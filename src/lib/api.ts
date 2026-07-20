@@ -33,6 +33,21 @@ export interface QueryResult {
   truncated: boolean;
 }
 
+/** Result of an atomic multi-statement run — mirrors Rust's ScriptOutcome. */
+export type ScriptOutcome =
+  | {
+      status: "ok";
+      result: QueryResult;
+      total_affected: number;
+      statements: number;
+    }
+  | {
+      status: "failed";
+      failed_index: number;
+      statements: number;
+      error: string;
+    };
+
 export interface HistoryEntry {
   id: string;
   connection_id: string;
@@ -76,6 +91,20 @@ export const api = {
 
   executeQuery: (id: string, sql: string, queryId?: string) =>
     invoke<QueryResult>("execute_query", { id, sql, queryId: queryId ?? null }),
+  executeScript: (id: string, sqls: string[], queryId?: string) =>
+    invoke<ScriptOutcome>("execute_script", {
+      id,
+      sqls,
+      queryId: queryId ?? null,
+    }),
+  redisRenameMember: (
+    id: string,
+    key: string,
+    kind: "hash" | "set" | "zset",
+    oldName: string,
+    newName: string
+  ) =>
+    invoke<void>("redis_rename_member", { id, key, kind, oldName, newName }),
   cancelQuery: (queryId: string) => invoke<boolean>("cancel_query", { queryId }),
   tableOp: (
     id: string,

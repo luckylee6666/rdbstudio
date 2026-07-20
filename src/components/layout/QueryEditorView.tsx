@@ -282,8 +282,47 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       // the session that still owns the ref may touch the result display.
       const owns = () => runSessionRef.current === session;
 
+      // Multi-statement batches run atomically inside one backend transaction —
+      // unless the user manages transactions explicitly, in which case we stay
+      // out of the way and keep the per-statement loop.
+      const managesOwnTxn = statements.some((s) =>
+        /^\s*(begin|commit|rollback|start\s+transaction|end)\b/i.test(s)
+      );
+      const atomic = statements.length > 1 && !isRedis && !managesOwnTxn;
+
       setState({ kind: "running" });
       try {
+        if (atomic) {
+          const outcome = await api.executeScript(
+            targetId,
+            statements,
+            session.qid
+          );
+          if (!owns()) return;
+          if (outcome.status === "failed") {
+            setState({
+              kind: "error",
+              message:
+                t("query.err.statement_rolled_back", {
+                  n: outcome.failed_index + 1,
+                  m: outcome.statements,
+                }) +
+                "\n" +
+                outcome.error,
+              failedAt: outcome.failed_index,
+            });
+            return;
+          }
+          setState({
+            kind: "ok",
+            result: outcome.result,
+            statements: {
+              count: outcome.statements,
+              affected_total: outcome.total_affected,
+            },
+          });
+          return;
+        }
         let last: QueryResult | null = null;
         let affected_total = 0;
         for (let i = 0; i < statements.length; i++) {
@@ -303,7 +342,8 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             // Tag which statement of the batch broke so the UI can hint at it.
             const prefix =
               statements.length > 1
-                ? `Statement ${i + 1} of ${statements.length} failed:\n`
+                ? t("query.err.statement", { n: i + 1, m: statements.length }) +
+                  "\n"
                 : "";
             setState({
               kind: "error",
@@ -327,7 +367,11 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
               : undefined,
         });
       } catch (e) {
-        if (owns()) setState({ kind: "error", message: String(e) });
+        if (owns())
+          setState({
+            kind: "error",
+            message: session.cancelled ? t("query.err.cancelled") : String(e),
+          });
       } finally {
         if (runSessionRef.current === session) runSessionRef.current = null;
       }
@@ -361,7 +405,10 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     try {
       await saveTextFile(`${base}.${format}`, text, format);
     } catch (e) {
-      setState({ kind: "error", message: `Export failed: ${String(e)}` });
+      setState({
+        kind: "error",
+        message: t("query.err.export", { error: String(e) }),
+      });
     }
   };
 

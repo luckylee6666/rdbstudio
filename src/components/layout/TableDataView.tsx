@@ -171,7 +171,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
                   // just what the SELECT returned, but warn the user that
                   // PK/nullable hints are missing.
                   toast.error(
-                    "Couldn't load column metadata",
+                    t("table.err.columns_meta"),
                     String(e)
                   );
                   return [] as ColumnInfo[];
@@ -181,7 +181,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
           api.countTableRows(connectionId, makeQuery(0)).catch((e) => {
             // Row count is informational; surface the failure as a toast but
             // don't block the data fetch.
-            toast.error("Couldn't count rows", String(e));
+            toast.error(t("table.err.count"), String(e));
             return null;
           }),
         ]);
@@ -411,7 +411,9 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
     try {
       const r = await api.applyEdits(connectionId, batch);
       if (!r.ok) {
-        setApplyError(r.error ?? `Failed at edit #${(r.failed_at ?? 0) + 1}`);
+        setApplyError(
+          r.error ?? t("table.err.apply_at", { n: (r.failed_at ?? 0) + 1 })
+        );
         return;
       }
       setPending(new Map());
@@ -636,6 +638,7 @@ function Pager({
   onPrev: () => void;
   onNext: () => void;
 }) {
+  const t = useT();
   const start = page * PAGE_SIZE + 1;
   const end = rowCount != null ? Math.min((page + 1) * PAGE_SIZE, rowCount) : "?";
   return (
@@ -649,12 +652,13 @@ function Pager({
       </button>
       <span>
         {rowCount != null && rowCount > 0 ? (
-          <>
-            {start}–{end} of{" "}
-            <span className="tabular-nums text-foreground/80">
-              {rowCount.toLocaleString()}
-            </span>
-          </>
+          <span className="tabular-nums">
+            {t("table.pager.range", {
+              start,
+              end,
+              total: rowCount.toLocaleString(),
+            })}
+          </span>
         ) : (
           "—"
         )}
@@ -668,7 +672,7 @@ function Pager({
       </button>
       {totalPages != null && (
         <span className="text-muted-foreground/70">
-          page {page + 1} / {totalPages}
+          {t("table.pager.page", { n: page + 1, total: totalPages })}
         </span>
       )}
     </div>

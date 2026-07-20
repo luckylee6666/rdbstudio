@@ -103,11 +103,11 @@ export function ModelsPanel() {
                     {!dbs ? (
                       <div className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        loading…
+                        {t("common.loading")}
                       </div>
                     ) : dbs.length === 0 ? (
                       <div className="px-2 py-1 text-[11px] text-muted-foreground">
-                        (no databases)
+                        {t("models.panel.no_databases")}
                       </div>
                     ) : (
                       dbs.map((db) => (
