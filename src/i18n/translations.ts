@@ -131,6 +131,15 @@ const en: Dict = {
   "conn.new_schema.prompt": "Schema name:",
   "conn.delete_group": "Delete group",
   "conn.delete_group.confirm": "Delete this empty group?",
+  "conn.dump": "Dump Database…",
+  "conn.dump.done": "Dump complete",
+  "conn.dump.failed": "Dump failed",
+  "conn.restore": "Restore SQL File…",
+  "conn.restore.confirm":
+    "Run every statement in \"{{file}}\" against \"{{name}}\"? This can overwrite or modify data and cannot be undone.",
+  "conn.restore.go": "Restore",
+  "conn.restore.done": "Restore complete",
+  "conn.restore.failed": "Restore failed",
 
   // tree context menu
   "tree.open_data": "Open data",
@@ -416,6 +425,24 @@ const en: Dict = {
     "Statement {{n}} of {{m}} failed — the whole script was rolled back:",
   "query.err.export": "Export failed: {{error}}",
 
+  // visual explain plan
+  "explain.title": "Explain",
+  "explain.refresh": "Refresh",
+  "explain.loading": "fetching query plan…",
+  "explain.total_cost": "total cost",
+  "explain.nodes": "{{n}} node(s)",
+  "explain.hotspot": "costliest step",
+  "explain.empty": "The database returned an empty plan for this statement.",
+  "explain.err": "Failed to fetch the query plan",
+  "explain.retry_hint":
+    "The plan may be stale — check the connection, then hit Refresh to re-run EXPLAIN.",
+  "explain.unsupported":
+    "Visual EXPLAIN supports PostgreSQL and SQLite only.",
+  "explain.no_sql":
+    "This tab has no SQL attached — re-open Explain from the query editor.",
+  "explain.err.no_connection":
+    "Connection not found — it may have been removed.",
+
   // designer
   "design.editing": "editing",
   "design.tab.columns": "Columns",
@@ -651,6 +678,15 @@ const zh: Dict = {
   "conn.new_schema.prompt": "Schema 名：",
   "conn.delete_group": "删除分组",
   "conn.delete_group.confirm": "确定删除该空分组？",
+  "conn.dump": "整库导出…",
+  "conn.dump.done": "导出完成",
+  "conn.dump.failed": "导出失败",
+  "conn.restore": "导入 SQL 文件…",
+  "conn.restore.confirm":
+    "将对 \"{{name}}\" 执行 \"{{file}}\" 中的全部 SQL 语句？可能覆盖或修改数据，且无法撤销。",
+  "conn.restore.go": "执行导入",
+  "conn.restore.done": "导入完成",
+  "conn.restore.failed": "导入失败",
   "conn.disconnect": "断开",
 
   // tree context menu
@@ -928,6 +964,20 @@ const zh: Dict = {
   "query.err.statement": "第 {{n}}/{{m}} 条语句失败：",
   "query.err.statement_rolled_back": "第 {{n}}/{{m}} 条语句失败——已整体回滚：",
   "query.err.export": "导出失败：{{error}}",
+
+  // visual explain plan
+  "explain.title": "执行计划",
+  "explain.refresh": "刷新",
+  "explain.loading": "正在获取执行计划…",
+  "explain.total_cost": "总代价",
+  "explain.nodes": "{{n}} 个节点",
+  "explain.hotspot": "代价最高步骤",
+  "explain.empty": "数据库未返回该语句的执行计划。",
+  "explain.err": "获取执行计划失败",
+  "explain.retry_hint": "计划可能已失效——请确认连接正常后点击刷新重新执行 EXPLAIN。",
+  "explain.unsupported": "可视化执行计划仅支持 PostgreSQL 和 SQLite。",
+  "explain.no_sql": "该标签页没有关联 SQL——请从查询编辑器重新发起 Explain。",
+  "explain.err.no_connection": "找不到该连接——可能已被删除。",
 
   // designer
   "design.editing": "编辑中",

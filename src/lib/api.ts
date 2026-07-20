@@ -48,6 +48,16 @@ export type ScriptOutcome =
       error: string;
     };
 
+export interface DumpReport {
+  path: string;
+  bytes: number;
+  elapsed_ms: number;
+}
+
+export interface RestoreReport {
+  elapsed_ms: number;
+}
+
 export interface HistoryEntry {
   id: string;
   connection_id: string;
@@ -178,6 +188,10 @@ export const api = {
     }),
   importCsv: (id: string, options: ImportCsvOptions) =>
     invoke<ImportReport>("import_csv", { id, options }),
+  dumpDatabase: (id: string, destPath: string) =>
+    invoke<DumpReport>("dump_database", { id, destPath }),
+  restoreDatabase: (id: string, srcPath: string) =>
+    invoke<RestoreReport>("restore_database", { id, srcPath }),
   previewCsv: (path: string, delimiter: string, hasHeader: boolean, limit = 5) =>
     invoke<CsvPreview>("preview_csv", {
       path,

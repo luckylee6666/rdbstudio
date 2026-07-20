@@ -94,6 +94,9 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   // Current run: backend query id (for cancel_query) + a cancelled flag the
   // statement loop checks so Stop also halts multi-statement scripts.
   const runSessionRef = useRef<{ qid: string; cancelled: boolean } | null>(null);
+  // Filled by CodeMirrorEditor with a getter for the current selection text,
+  // so toolbar actions (Explain) honor the same "selection wins" rule as ⌘↵.
+  const selectionGetter = useRef<(() => string | undefined) | null>(null);
   const t = useT();
 
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(
@@ -379,6 +382,31 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     [sql, targetId, targetCfg, t]
   );
 
+  // Visual EXPLAIN: PG and SQLite plans open as a graph tab; MySQL keeps the
+  // legacy text EXPLAIN in the result grid (Redis: the button is disabled).
+  const onExplain = useCallback(() => {
+    const driver = targetCfg?.driver;
+    if (driver === "postgres" || driver === "sqlite") {
+      if (!targetId) {
+        setState({ kind: "error", message: t("query.placeholder") });
+        return;
+      }
+      // Same source rule as run(): editor selection wins over the buffer.
+      const source = (selectionGetter.current?.() ?? sql).trim();
+      if (!source) return;
+      useWorkspace.getState().openTab({
+        id: `explain:${crypto.randomUUID()}`,
+        kind: "explain",
+        title: t("explain.title"),
+        subtitle: targetCfg?.name,
+        connectionId: targetId,
+        sql: source,
+      });
+      return;
+    }
+    void run({ explain: true });
+  }, [targetCfg, targetId, sql, run, t]);
+
   const onStop = useCallback(() => {
     const session = runSessionRef.current;
     if (!session) return;
@@ -480,7 +508,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           </button>
         )}
         <button
-          onClick={() => void run({ explain: true })}
+          onClick={onExplain}
           disabled={
             state.kind === "running" ||
             !targetId ||
@@ -585,6 +613,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             onChange={setSql}
             onRun={(opts) => void run(opts)}
             schema={sqlSchema}
+            selectionGetter={selectionGetter}
           />
         </div>
         <div className="flex h-[40%] min-h-[180px] shrink-0 flex-col bg-background">

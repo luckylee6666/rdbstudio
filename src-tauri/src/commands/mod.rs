@@ -1,6 +1,7 @@
 pub mod connections;
 pub mod data;
 pub mod design;
+pub mod dump;
 pub mod io;
 pub mod meta;
 pub mod query;

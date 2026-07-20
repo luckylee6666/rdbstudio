@@ -15,6 +15,8 @@ import {
   FolderOpen,
   FolderPlus,
   FunctionSquare,
+  HardDriveDownload,
+  HardDriveUpload,
   Hash,
   Key,
   List,
@@ -40,9 +42,14 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import {
+  save as saveDialog,
+  open as openDialog,
+} from "@tauri-apps/plugin-dialog";
 import type { ConnectionConfig, DriverKind, TreeEntry } from "@/types";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { api } from "@/lib/api";
+import { toast } from "@/store/toasts";
 import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
 import { ImportDialog } from "@/components/io/ImportDialog";
@@ -279,6 +286,13 @@ function EmptyState({ onNew }: { onNew: () => void }) {
       </button>
     </div>
   );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 function statusDot(s?: ConnStatus) {
@@ -596,7 +610,59 @@ function ConnectionBranch({
   const [rowCtx, setRowCtx] = useState<{ x: number; y: number } | null>(null);
   const [createDbOpen, setCreateDbOpen] = useState(false);
   const [createDbError, setCreateDbError] = useState<string | null>(null);
+  // Dump/restore in flight — shows the row spinner and disables the menu
+  // entries so a second run can't stack on the first.
+  const [ioBusy, setIoBusy] = useState<"dump" | "restore" | null>(null);
+  const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
   const t = useT();
+
+  const doDump = async () => {
+    const isSqlite = cfg.driver === "sqlite";
+    const dest = await saveDialog({
+      defaultPath: `${cfg.name.replace(/[^\w.-]+/g, "_")}${isSqlite ? ".db" : ".sql"}`,
+      filters: isSqlite
+        ? [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }]
+        : [{ name: "SQL", extensions: ["sql"] }],
+    });
+    if (!dest) return;
+    setIoBusy("dump");
+    try {
+      // SQLite dumps through the live pool; SSH-tunneled servers need the
+      // tunnel up. Connecting first covers both.
+      if (status !== "connected") await connect(cfg.id);
+      const rep = await api.dumpDatabase(cfg.id, dest);
+      toast.success(
+        t("conn.dump.done"),
+        `${formatBytes(rep.bytes)} · ${rep.path}`
+      );
+    } catch (e) {
+      toast.error(t("conn.dump.failed"), String(e));
+    } finally {
+      setIoBusy(null);
+    }
+  };
+
+  const pickRestore = async () => {
+    const src = await openDialog({
+      multiple: false,
+      filters: [{ name: "SQL", extensions: ["sql"] }],
+    });
+    if (typeof src === "string" && src) setRestoreConfirm(src);
+  };
+
+  const doRestore = async (src: string) => {
+    setIoBusy("restore");
+    try {
+      if (status !== "connected") await connect(cfg.id);
+      await api.restoreDatabase(cfg.id, src);
+      toast.success(t("conn.restore.done"));
+      await refreshBranch(cfg.id);
+    } catch (e) {
+      toast.error(t("conn.restore.failed"), String(e));
+    } finally {
+      setIoBusy(null);
+    }
+  };
 
   const supportsCreateDb =
     cfg.driver === "postgres" || cfg.driver === "mysql";
@@ -770,7 +836,7 @@ function ConnectionBranch({
                 : `${cfg.host ?? "?"}${cfg.database ? " · " + cfg.database : ""}`}
             </div>
           </div>
-          {status === "connecting" ? (
+          {status === "connecting" || ioBusy ? (
             <Loader2 className="h-3 w-3 shrink-0 animate-spin text-warning" />
           ) : (
             <span
@@ -879,6 +945,25 @@ function ConnectionBranch({
         onSubmit={onMoveSubmit}
         onClose={() => setMovePromptOpen(false)}
       />
+      {restoreConfirm && (
+        <ConfirmDialog
+          open
+          title={t("conn.restore")}
+          message={t("conn.restore.confirm", {
+            name: cfg.name,
+            file: restoreConfirm,
+          })}
+          confirmLabel={t("conn.restore.go")}
+          cancelLabel={t("common.cancel")}
+          danger
+          onConfirm={() => {
+            const src = restoreConfirm;
+            setRestoreConfirm(null);
+            void doRestore(src);
+          }}
+          onClose={() => setRestoreConfirm(null)}
+        />
+      )}
       <PromptDialog
         open={createDbOpen}
         title={createLabel}
@@ -927,6 +1012,22 @@ function ConnectionBranch({
                 setCreateDbError(null);
                 setCreateDbOpen(true);
               },
+            },
+            {
+              id: "dump",
+              label: t("conn.dump"),
+              icon: HardDriveDownload,
+              disabled: cfg.driver === "redis" || ioBusy != null,
+              onClick: () => void doDump(),
+            },
+            {
+              id: "restore",
+              label: t("conn.restore"),
+              icon: HardDriveUpload,
+              disabled:
+                (cfg.driver !== "postgres" && cfg.driver !== "mysql") ||
+                ioBusy != null,
+              onClick: () => void pickRestore(),
             },
             {
               id: "edit",

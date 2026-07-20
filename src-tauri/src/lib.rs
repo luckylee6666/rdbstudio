@@ -85,6 +85,8 @@ pub fn run() {
             commands::design::apply_alter_ddl,
             commands::design::drop_object,
             commands::design::table_op,
+            commands::dump::dump_database,
+            commands::dump::restore_database,
             commands::io::export_table,
             commands::io::import_csv,
             commands::io::preview_csv,

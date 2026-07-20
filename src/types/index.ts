@@ -226,6 +226,7 @@ export type TabKind =
   | "designer"
   | "welcome"
   | "er"
+  | "explain"
   | "redis-key";
 
 export interface WorkspaceTab {
@@ -239,6 +240,8 @@ export interface WorkspaceTab {
   dirty?: boolean;
   /** Pre-applied filters for table-data tabs (e.g. FK jumps). */
   initialFilters?: Filter[];
+  /** Explain tabs: the SQL whose plan is visualized (persisted with the tab). */
+  sql?: string;
   // Set when kind === "redis-key": the raw key name and its Redis value type
   // (string/hash/list/set/zset/stream/ReJSON-RL/...).
   redisKey?: string;

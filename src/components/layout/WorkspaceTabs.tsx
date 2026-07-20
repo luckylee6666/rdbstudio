@@ -9,6 +9,7 @@ import {
   Workflow,
   Settings2,
   Key,
+  Network,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useWorkspace } from "@/store/workspace";
@@ -20,6 +21,7 @@ import { TableDataView } from "./TableDataView";
 import { QueryEditorView } from "./QueryEditorView";
 import { DesignerView } from "./DesignerView";
 import { ERView } from "./ERView";
+import { ExplainView } from "./ExplainView";
 import { RedisKeyView } from "./RedisKeyView";
 
 function tabIcon(kind: TabKind) {
@@ -32,6 +34,8 @@ function tabIcon(kind: TabKind) {
       return Settings2;
     case "er":
       return Workflow;
+    case "explain":
+      return Network;
     case "welcome":
       return Sparkles;
     case "redis-key":
@@ -148,6 +152,7 @@ export function WorkspaceTabs() {
         {active?.kind === "query" && <QueryEditorView tab={active} />}
         {active?.kind === "designer" && <DesignerView tab={active} />}
         {active?.kind === "er" && <ERView tab={active} />}
+        {active?.kind === "explain" && <ExplainView tab={active} />}
         {active?.kind === "redis-key" && <RedisKeyView tab={active} />}
       </div>
 

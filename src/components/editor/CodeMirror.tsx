@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import { EditorState, Compartment } from "@codemirror/state";
 import {
   EditorView,
@@ -41,9 +41,20 @@ interface Props {
   // surface table-name completion via @codemirror/lang-sql's schema option.
   schema?: Record<string, string[]>;
   className?: string;
+  /** When provided, kept pointing at a getter for the current selection text
+   *  (undefined when the selection is empty), so toolbar buttons outside the
+   *  editor can apply the "selection wins over buffer" rule. */
+  selectionGetter?: MutableRefObject<(() => string | undefined) | null>;
 }
 
-export function CodeMirrorEditor({ value, onChange, onRun, schema, className }: Props) {
+export function CodeMirrorEditor({
+  value,
+  onChange,
+  onRun,
+  schema,
+  className,
+  selectionGetter,
+}: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -122,6 +133,19 @@ export function CodeMirrorEditor({ value, onChange, onRun, schema, className }: 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!selectionGetter) return;
+    selectionGetter.current = () => {
+      const v = viewRef.current;
+      if (!v) return undefined;
+      const sel = v.state.selection.main;
+      return sel.empty ? undefined : v.state.sliceDoc(sel.from, sel.to);
+    };
+    return () => {
+      selectionGetter.current = null;
+    };
+  }, [selectionGetter]);
 
   useEffect(() => {
     const v = viewRef.current;
