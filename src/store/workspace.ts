@@ -88,6 +88,17 @@ export const useWorkspace = create<WorkspaceState>()(
       // restored separately by QueryEditorView from rdb:buf:<tabId>.
       name: "rdb:workspace",
       partialize: (s) => ({ tabs: s.tabs, activeTabId: s.activeTabId }),
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<
+          Pick<WorkspaceState, "tabs" | "activeTabId">
+        >;
+        const tabs = p.tabs && p.tabs.length > 0 ? p.tabs : current.tabs;
+        const activeTabId =
+          p.activeTabId && tabs.some((t) => t.id === p.activeTabId)
+            ? p.activeTabId
+            : (tabs[0]?.id ?? null);
+        return { ...current, tabs, activeTabId };
+      },
     }
   )
 );

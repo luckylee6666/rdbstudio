@@ -8,7 +8,7 @@
 //! with a minimal PATH.
 
 use crate::db::pool::DbPool;
-use crate::db::target_addr;
+use crate::db::{ssl_mode_of, target_addr, SslMode};
 use crate::error::{AppError, AppResult};
 use crate::model::{ConnectionConfig, DriverKind};
 use crate::secret;
@@ -101,6 +101,36 @@ fn effective_addr(state: &AppState, cfg: &ConnectionConfig) -> AppResult<(String
     Ok(target_addr(cfg))
 }
 
+/// Mirror `build_url_with`: a tunnel dials 127.0.0.1, so verify-full cannot
+/// match the cert hostname and is downgraded to encrypt-only.
+fn dump_ssl_mode(cfg: &ConnectionConfig, via_tunnel: bool) -> Option<SslMode> {
+    match (ssl_mode_of(cfg), via_tunnel) {
+        (Some(SslMode::VerifyFull), true) => Some(SslMode::Require),
+        (other, _) => other,
+    }
+}
+
+fn apply_pg_ssl(cmd: &mut tokio::process::Command, cfg: &ConnectionConfig, via_tunnel: bool) {
+    if let Some(mode) = dump_ssl_mode(cfg, via_tunnel) {
+        cmd.env(
+            "PGSSLMODE",
+            match mode {
+                SslMode::Require => "require",
+                SslMode::VerifyFull => "verify-full",
+            },
+        );
+    }
+}
+
+fn apply_mysql_ssl(cmd: &mut tokio::process::Command, cfg: &ConnectionConfig, via_tunnel: bool) {
+    if let Some(mode) = dump_ssl_mode(cfg, via_tunnel) {
+        cmd.arg("--ssl-mode").arg(match mode {
+            SslMode::Require => "REQUIRED",
+            SslMode::VerifyFull => "VERIFY_IDENTITY",
+        });
+    }
+}
+
 fn tail_of(s: &str, max: usize) -> String {
     let t = s.trim();
     if t.len() <= max {
@@ -168,6 +198,7 @@ pub async fn dump_database(
                 )
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
+            let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
             let db = cfg
                 .database
                 .as_deref()
@@ -190,6 +221,7 @@ pub async fn dump_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("PGPASSWORD", pw);
             }
+            apply_pg_ssl(&mut cmd, &cfg, via_tunnel);
             run_tool(cmd, "pg_dump").await?;
         }
         DriverKind::Mysql => {
@@ -199,6 +231,7 @@ pub async fn dump_database(
                 )
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
+            let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
             let db = cfg
                 .database
                 .as_deref()
@@ -220,6 +253,7 @@ pub async fn dump_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("MYSQL_PWD", pw);
             }
+            apply_mysql_ssl(&mut cmd, &cfg, via_tunnel);
             run_tool(cmd, "mysqldump").await?;
         }
     }
@@ -260,6 +294,7 @@ pub async fn restore_database(
                 AppError::msg("psql not found — install it (e.g. `brew install libpq`) and retry")
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
+            let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
             let db = cfg
                 .database
                 .as_deref()
@@ -283,6 +318,7 @@ pub async fn restore_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("PGPASSWORD", pw);
             }
+            apply_pg_ssl(&mut cmd, &cfg, via_tunnel);
             run_tool(cmd, "psql").await?;
         }
         DriverKind::Mysql => {
@@ -292,6 +328,7 @@ pub async fn restore_database(
                 )
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
+            let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
             let db = cfg
                 .database
                 .as_deref()
@@ -311,6 +348,7 @@ pub async fn restore_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("MYSQL_PWD", pw);
             }
+            apply_mysql_ssl(&mut cmd, &cfg, via_tunnel);
             run_tool(cmd, "mysql").await?;
         }
     }
@@ -349,5 +387,32 @@ mod tests {
         let long = "x".repeat(50);
         let t = tail_of(&long, 10);
         assert!(t.starts_with('…') && t.len() < 20);
+    }
+
+    #[test]
+    fn dump_ssl_mode_downgrades_verify_full_through_tunnel() {
+        let mut cfg = ConnectionConfig {
+            id: "c".into(),
+            name: "c".into(),
+            driver: DriverKind::Postgres,
+            host: None,
+            port: None,
+            database: None,
+            username: None,
+            file_path: None,
+            color: None,
+            pinned: false,
+            group: None,
+            ssl_mode: Some("verify-full".into()),
+            read_only: false,
+            ssh: None,
+            password: None,
+        };
+        assert_eq!(dump_ssl_mode(&cfg, true), Some(SslMode::Require));
+        assert_eq!(dump_ssl_mode(&cfg, false), Some(SslMode::VerifyFull));
+        cfg.ssl_mode = Some("require".into());
+        assert_eq!(dump_ssl_mode(&cfg, false), Some(SslMode::Require));
+        cfg.ssl_mode = Some("disable".into());
+        assert_eq!(dump_ssl_mode(&cfg, false), None);
     }
 }

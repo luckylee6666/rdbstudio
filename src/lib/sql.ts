@@ -15,13 +15,26 @@ export function splitStatements(input: string): string[] {
     | "double"
     | "backtick"
     | "lineComment"
-    | "blockComment";
+    | "blockComment"
+    | "dollar";
   let mode: Mode = "normal";
+  let dollarTag = "";
 
   while (i < n) {
     const ch = input[i];
     const next = i + 1 < n ? input[i + 1] : "";
 
+    if (mode === "dollar") {
+      if (ch === "$" && input.startsWith("$" + dollarTag + "$", i)) {
+        buf += "$" + dollarTag + "$";
+        i += 2 + dollarTag.length;
+        mode = "normal";
+        continue;
+      }
+      buf += ch;
+      i++;
+      continue;
+    }
     if (mode === "lineComment") {
       buf += ch;
       if (ch === "\n") mode = "normal";
@@ -82,6 +95,16 @@ export function splitStatements(input: string): string[] {
       mode = "blockComment";
       continue;
     }
+    if (ch === "$") {
+      const opened = tryDollarQuote(input, i);
+      if (opened) {
+        buf += input.slice(i, opened.contentStart);
+        i = opened.contentStart;
+        dollarTag = opened.tag;
+        mode = "dollar";
+        continue;
+      }
+    }
     if (ch === "'") {
       mode = "single";
       buf += ch;
@@ -113,6 +136,26 @@ export function splitStatements(input: string): string[] {
   const tail = buf.trim();
   if (tail.length > 0) out.push(tail);
   return out;
+}
+
+// Postgres dollar-quote: `$$ … $$` or `$tag$ … $tag$`. Tags follow unquoted
+// identifier rules (no leading digit). `$1` is a placeholder, not a quote.
+function tryDollarQuote(
+  input: string,
+  i: number
+): { tag: string; contentStart: number } | null {
+  if (input[i] !== "$") return null;
+  const n = input.length;
+  if (i + 1 < n && input[i + 1] === "$") {
+    return { tag: "", contentStart: i + 2 };
+  }
+  if (i + 1 < n && /[0-9]/.test(input[i + 1])) return null;
+  let j = i + 1;
+  while (j < n && /[A-Za-z0-9_]/.test(input[j])) j++;
+  if (j > i + 1 && j < n && input[j] === "$") {
+    return { tag: input.slice(i + 1, j), contentStart: j + 1 };
+  }
+  return null;
 }
 
 // Wrap a SELECT/WITH statement in EXPLAIN syntax appropriate for the driver.

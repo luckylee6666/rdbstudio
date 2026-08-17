@@ -119,7 +119,7 @@ export function ConnectionDialog({
     });
     if (typeof picked === "string") {
       update("file_path", picked);
-      if (!cfg.name) update("name", picked.split("/").pop() ?? "SQLite");
+      if (!cfg.name) update("name", picked.split(/[/\\]/).pop() ?? "SQLite");
     }
   };
 

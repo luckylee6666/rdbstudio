@@ -89,7 +89,7 @@ pub async fn list_databases(pool: &DbPool) -> AppResult<Vec<String>> {
 pub async fn list_schemas(pool: &DbPool, _database: Option<&str>) -> AppResult<Vec<String>> {
     match pool {
         DbPool::Sqlite(_) => Ok(vec!["main".into()]),
-        DbPool::Redis(_) => Ok(vec!["db0".into()]),
+        DbPool::Redis(h) => Ok(vec![format!("db{}", h.db_index)]),
         DbPool::Postgres(p) => {
             let rows = sqlx::query(
                 "SELECT nspname FROM pg_namespace \

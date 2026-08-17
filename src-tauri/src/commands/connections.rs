@@ -55,8 +55,36 @@ pub fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<bo
     state.store.remove(&id)
 }
 
+/// Fill blank password fields from the keychain when the config already has
+/// an id (edit-dialog "test" leaves the boxes empty to mean "keep stored").
+fn hydrate_secrets_for_test(config: &mut ConnectionConfig) -> AppResult<()> {
+    if config.id.is_empty() {
+        return Ok(());
+    }
+    let db_blank = config
+        .password
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true);
+    if db_blank {
+        if let Some(pw) = secret::read_password(&config.id)? {
+            config.password = Some(pw);
+        }
+    }
+    if let Some(ssh) = config.ssh.as_mut() {
+        let ssh_blank = ssh.password.as_deref().map(str::is_empty).unwrap_or(true);
+        if ssh_blank {
+            if let Some(pw) = secret::read_password(&ssh_secret_id(&config.id))? {
+                ssh.password = Some(pw);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn test_connection(config: ConnectionConfig) -> AppResult<String> {
+pub async fn test_connection(mut config: ConnectionConfig) -> AppResult<String> {
+    hydrate_secrets_for_test(&mut config)?;
     // If an SSH tunnel is configured, stand it up for the duration of the test
     // (the secret travels inline on the test request). `_tunnel` holds the
     // forward open; dropping it at scope end tears it down.

@@ -17,8 +17,14 @@ pub fn build_url(cfg: &ConnectionConfig) -> AppResult<String> {
 
 /// The DB host/port a tunnel should forward to (from the SSH server's view),
 /// applying driver defaults. Not meaningful for SQLite.
+fn nonempty(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
 pub fn target_addr(cfg: &ConnectionConfig) -> (String, u16) {
-    let host = cfg.host.as_deref().unwrap_or("localhost").to_string();
+    let host = nonempty(cfg.host.as_deref())
+        .unwrap_or("localhost")
+        .to_string();
     let port = cfg
         .port
         .or_else(|| cfg.driver.default_port())
@@ -28,7 +34,7 @@ pub fn target_addr(cfg: &ConnectionConfig) -> (String, u16) {
 
 /// Normalized TLS mode. `verify` controls whether the server certificate and
 /// hostname are checked; when `None` the connection is plaintext.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
     Require,
     VerifyFull,
@@ -57,24 +63,20 @@ pub fn build_url_with(
     };
     match cfg.driver {
         DriverKind::Sqlite => {
-            let path = cfg
-                .file_path
-                .as_deref()
-                .or(cfg.database.as_deref())
+            let path = nonempty(cfg.file_path.as_deref())
+                .or_else(|| nonempty(cfg.database.as_deref()))
                 .ok_or_else(|| AppError::msg("SQLite requires a file path"))?;
-            Ok(format!("sqlite://{}?mode=rwc", path))
+            Ok(sqlite_connect_url(path))
         }
         DriverKind::Postgres => {
-            let (host, port) = addr_override
-                .unwrap_or_else(|| (cfg.host.as_deref().unwrap_or("localhost"), cfg.port.unwrap_or(5432)));
-            let db = cfg
-                .database
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("postgres");
-            let user = cfg
-                .username
-                .as_deref()
+            let (host, port) = addr_override.unwrap_or_else(|| {
+                (
+                    nonempty(cfg.host.as_deref()).unwrap_or("localhost"),
+                    cfg.port.unwrap_or(5432),
+                )
+            });
+            let db = nonempty(cfg.database.as_deref()).unwrap_or("postgres");
+            let user = nonempty(cfg.username.as_deref())
                 .ok_or_else(|| AppError::msg("Postgres requires a username"))?;
             let pw = cfg.password.as_deref().unwrap_or("");
             let mut url = format!(
@@ -96,12 +98,14 @@ pub fn build_url_with(
             Ok(url)
         }
         DriverKind::Mysql => {
-            let (host, port) = addr_override
-                .unwrap_or_else(|| (cfg.host.as_deref().unwrap_or("localhost"), cfg.port.unwrap_or(3306)));
-            let db = cfg.database.as_deref().unwrap_or("");
-            let user = cfg
-                .username
-                .as_deref()
+            let (host, port) = addr_override.unwrap_or_else(|| {
+                (
+                    nonempty(cfg.host.as_deref()).unwrap_or("localhost"),
+                    cfg.port.unwrap_or(3306),
+                )
+            });
+            let db = nonempty(cfg.database.as_deref()).unwrap_or("");
+            let user = nonempty(cfg.username.as_deref())
                 .ok_or_else(|| AppError::msg("MySQL requires a username"))?;
             let pw = cfg.password.as_deref().unwrap_or("");
             let mut url = format!(
@@ -123,17 +127,18 @@ pub fn build_url_with(
             Ok(url)
         }
         DriverKind::Redis => {
-            let (host, port) = addr_override
-                .unwrap_or_else(|| (cfg.host.as_deref().unwrap_or("localhost"), cfg.port.unwrap_or(6379)));
+            let (host, port) = addr_override.unwrap_or_else(|| {
+                (
+                    nonempty(cfg.host.as_deref()).unwrap_or("localhost"),
+                    cfg.port.unwrap_or(6379),
+                )
+            });
             // ACL user (Redis 6+) goes in the userinfo segment; legacy
             // `requirepass`-only servers use empty user with the password.
-            let user = cfg.username.as_deref().unwrap_or("");
+            let user = nonempty(cfg.username.as_deref()).unwrap_or("");
             let pw = cfg.password.as_deref().unwrap_or("");
             // `database` field doubles as the numeric DB index (0..15 by default).
-            let db_idx: u8 = cfg
-                .database
-                .as_deref()
-                .filter(|s| !s.is_empty())
+            let db_idx: u8 = nonempty(cfg.database.as_deref())
                 .map(|s| s.parse::<u8>())
                 .transpose()
                 .map_err(|_| AppError::msg("Redis database must be an integer (0..15)"))?
@@ -152,6 +157,42 @@ pub fn build_url_with(
             Ok(format!("{}://{}{}:{}/{}{}", scheme, auth, host, port, db_idx, frag))
         }
     }
+}
+
+/// sqlx URL for a filesystem path. Windows backslashes become `/`, drive
+/// letters get the extra slash (`sqlite:///C:/…`) so the URL parser does not
+/// treat `C` as a host, and `?`/`#` in the path are percent-encoded so they
+/// cannot steal the query string.
+fn sqlite_connect_url(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let drive_abs = normalized.len() >= 2
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':';
+    let encoded = encode_sqlite_path(&normalized);
+    if drive_abs {
+        format!("sqlite:///{}?mode=rwc", encoded)
+    } else {
+        format!("sqlite://{}?mode=rwc", encoded)
+    }
+}
+
+fn encode_sqlite_path(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    for b in p.bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'/'
+            | b':'
+            | b'.'
+            | b'-'
+            | b'_'
+            | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 fn url_enc(s: &str) -> String {
@@ -269,6 +310,41 @@ mod tests {
     #[test]
     fn build_url_sqlite_missing_path_errors() {
         let c = base_cfg(DriverKind::Sqlite);
+        assert!(build_url(&c).is_err());
+    }
+
+    #[test]
+    fn build_url_sqlite_empty_path_errors() {
+        let mut c = base_cfg(DriverKind::Sqlite);
+        c.file_path = Some("".into());
+        c.database = Some("   ".into());
+        assert!(build_url(&c).is_err());
+    }
+
+    #[test]
+    fn sqlite_connect_url_windows_drive_and_backslashes() {
+        assert_eq!(
+            sqlite_connect_url(r"C:\Users\foo\bar.db"),
+            "sqlite:///C:/Users/foo/bar.db?mode=rwc"
+        );
+        assert_eq!(
+            sqlite_connect_url("C:/Users/foo/bar.db"),
+            "sqlite:///C:/Users/foo/bar.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn sqlite_connect_url_encodes_query_metachars() {
+        assert_eq!(
+            sqlite_connect_url("/tmp/foo?bar.db"),
+            "sqlite:///tmp/foo%3Fbar.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn build_url_postgres_empty_username_errors() {
+        let mut c = base_cfg(DriverKind::Postgres);
+        c.username = Some("".into());
         assert!(build_url(&c).is_err());
     }
 

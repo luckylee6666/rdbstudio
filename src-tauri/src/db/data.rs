@@ -152,6 +152,31 @@ struct Where {
     values: Vec<String>,
 }
 
+fn cast_as_text(driver: DriverKind, expr: &str) -> String {
+    match driver {
+        DriverKind::Mysql => format!("CAST({} AS CHAR)", expr),
+        _ => format!("CAST({} AS TEXT)", expr),
+    }
+}
+
+fn cast_as_float(driver: DriverKind, expr: &str) -> String {
+    match driver {
+        DriverKind::Sqlite => format!("CAST({} AS REAL)", expr),
+        DriverKind::Mysql => format!("CAST({} AS DOUBLE)", expr),
+        _ => format!("CAST({} AS DOUBLE PRECISION)", expr),
+    }
+}
+
+/// Escape `\`, `%`, `_` so a contains/starts/ends filter matches them literally.
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+fn looks_numeric(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.parse::<f64>().is_ok()
+}
+
 fn build_where(driver: DriverKind, filters: &[Filter]) -> AppResult<Where> {
     if filters.is_empty() {
         return Ok(Where {
@@ -171,21 +196,57 @@ fn build_where(driver: DriverKind, filters: &[Filter]) -> AppResult<Where> {
                     .value
                     .clone()
                     .ok_or_else(|| AppError::msg("filter value required"))?;
-                let (op, val) = match f.op {
-                    FilterOp::Eq => ("=", raw),
-                    FilterOp::Neq => ("<>", raw),
-                    FilterOp::Gt => (">", raw),
-                    FilterOp::Gte => (">=", raw),
-                    FilterOp::Lt => ("<", raw),
-                    FilterOp::Lte => ("<=", raw),
-                    FilterOp::Contains => ("LIKE", format!("%{}%", raw)),
-                    FilterOp::StartsWith => ("LIKE", format!("{}%", raw)),
-                    FilterOp::EndsWith => ("LIKE", format!("%{}", raw)),
-                    FilterOp::IsNull | FilterOp::NotNull => unreachable!(),
-                };
                 let ph = placeholder(driver, values.len() + 1);
-                parts.push(format!("{} {} {}", col, op, ph));
-                values.push(val);
+                match f.op {
+                    FilterOp::Eq | FilterOp::Neq => {
+                        // Bind as text and compare via CAST so PG integer/uuid
+                        // columns don't fail with `integer = text`.
+                        let op = if matches!(f.op, FilterOp::Eq) {
+                            "="
+                        } else {
+                            "<>"
+                        };
+                        parts.push(format!("{} {} {}", cast_as_text(driver, &col), op, ph));
+                        values.push(raw);
+                    }
+                    FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte => {
+                        let op = match f.op {
+                            FilterOp::Gt => ">",
+                            FilterOp::Gte => ">=",
+                            FilterOp::Lt => "<",
+                            FilterOp::Lte => "<=",
+                            _ => unreachable!(),
+                        };
+                        if looks_numeric(&raw) {
+                            parts.push(format!(
+                                "{} {} {}",
+                                col,
+                                op,
+                                cast_as_float(driver, &ph)
+                            ));
+                            values.push(raw.trim().to_string());
+                        } else {
+                            parts.push(format!("{} {} {}", cast_as_text(driver, &col), op, ph));
+                            values.push(raw);
+                        }
+                    }
+                    FilterOp::Contains | FilterOp::StartsWith | FilterOp::EndsWith => {
+                        let escaped = like_escape(&raw);
+                        let pat = match f.op {
+                            FilterOp::Contains => format!("%{escaped}%"),
+                            FilterOp::StartsWith => format!("{escaped}%"),
+                            FilterOp::EndsWith => format!("%{escaped}"),
+                            _ => unreachable!(),
+                        };
+                        parts.push(format!(
+                            "{} LIKE {} ESCAPE '\\'",
+                            cast_as_text(driver, &col),
+                            ph
+                        ));
+                        values.push(pat);
+                    }
+                    FilterOp::IsNull | FilterOp::NotNull => unreachable!(),
+                }
             }
         }
     }
@@ -723,9 +784,17 @@ pub fn preview_edit_sql(
             BindValue::Bool(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
             BindValue::Int(v) => v.to_string(),
             BindValue::Float(v) => v.to_string(),
-            BindValue::Str(s) => format!("'{}'", s.replace('\'', "''")),
+            BindValue::Str(s) => sql_string_literal(driver, &s),
         }
     })
+}
+
+fn sql_string_literal(driver: DriverKind, s: &str) -> String {
+    let mut t = s.replace('\'', "''");
+    if driver == DriverKind::Mysql {
+        t = t.replace('\\', "\\\\");
+    }
+    format!("'{t}'")
 }
 
 #[cfg(test)]
@@ -881,5 +950,67 @@ mod tests {
         // Inserts have no single-row expectation, even at 0 or many rows.
         assert!(single_row_violation(&insert, 0, 0, 0).is_none());
         assert!(single_row_violation(&insert, 0, 2, 0).is_none());
+    }
+
+    #[test]
+    fn like_escape_protects_wildcards() {
+        assert_eq!(like_escape(r"a%b_c\d"), r"a\%b\_c\\d");
+    }
+
+    #[test]
+    fn build_where_eq_casts_to_text() {
+        let w = build_where(
+            DriverKind::Postgres,
+            &[Filter {
+                column: "id".into(),
+                op: FilterOp::Eq,
+                value: Some("12".into()),
+            }],
+        )
+        .unwrap();
+        assert_eq!(w.sql, " WHERE CAST(\"id\" AS TEXT) = $1");
+        assert_eq!(w.values, vec!["12"]);
+    }
+
+    #[test]
+    fn build_where_numeric_compare_casts_placeholder() {
+        let w = build_where(
+            DriverKind::Postgres,
+            &[Filter {
+                column: "id".into(),
+                op: FilterOp::Gt,
+                value: Some("9".into()),
+            }],
+        )
+        .unwrap();
+        assert_eq!(w.sql, " WHERE \"id\" > CAST($1 AS DOUBLE PRECISION)");
+    }
+
+    #[test]
+    fn preview_sql_mysql_doubles_backslashes() {
+        let sql = preview_edit_sql(
+            DriverKind::Mysql,
+            None,
+            "t",
+            &Edit::Insert {
+                values: vec![("p".into(), serde_json::Value::String(r"C:\name".into()))],
+            },
+        );
+        assert!(sql.contains(r"'C:\\name'"), "{sql}");
+    }
+
+    #[test]
+    fn build_where_contains_escapes_like_metachars() {
+        let w = build_where(
+            DriverKind::Sqlite,
+            &[Filter {
+                column: "name".into(),
+                op: FilterOp::Contains,
+                value: Some("a%b".into()),
+            }],
+        )
+        .unwrap();
+        assert!(w.sql.contains("LIKE ? ESCAPE '\\'"));
+        assert_eq!(w.values, vec![r"%a\%b%"]);
     }
 }

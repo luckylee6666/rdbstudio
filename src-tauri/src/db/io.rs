@@ -212,7 +212,7 @@ fn write_rows(
             for row in &r.rows {
                 let vals = row
                     .iter()
-                    .map(sql_literal)
+                    .map(|v| sql_literal(v, driver))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let line = format!("INSERT INTO {} ({}) VALUES ({});\n", target, col_list, vals);
@@ -246,13 +246,25 @@ fn csv_escape(s: &str, delim: char, quote_all: bool) -> String {
     }
 }
 
-fn sql_literal(v: &serde_json::Value) -> String {
+fn sql_literal(v: &serde_json::Value, driver: DriverKind) -> String {
     match v {
         serde_json::Value::Null => "NULL".into(),
         serde_json::Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        other => format!("'{}'", other.to_string().replace('\'', "''")),
+        serde_json::Value::String(s) => {
+            let mut t = s.replace('\'', "''");
+            if driver == DriverKind::Mysql {
+                t = t.replace('\\', "\\\\");
+            }
+            format!("'{t}'")
+        }
+        other => {
+            let mut t = other.to_string().replace('\'', "''");
+            if driver == DriverKind::Mysql {
+                t = t.replace('\\', "\\\\");
+            }
+            format!("'{t}'")
+        }
     }
 }
 
@@ -718,16 +730,30 @@ mod tests {
 
     #[test]
     fn sql_literal_null_bool_numbers_strings() {
-        assert_eq!(sql_literal(&serde_json::Value::Null), "NULL");
-        assert_eq!(sql_literal(&serde_json::Value::Bool(true)), "TRUE");
-        assert_eq!(sql_literal(&serde_json::Value::Bool(false)), "FALSE");
+        assert_eq!(sql_literal(&serde_json::Value::Null, DriverKind::Postgres), "NULL");
+        assert_eq!(sql_literal(&serde_json::Value::Bool(true), DriverKind::Postgres), "TRUE");
+        assert_eq!(sql_literal(&serde_json::Value::Bool(false), DriverKind::Postgres), "FALSE");
         assert_eq!(
-            sql_literal(&serde_json::Value::from(42i64)),
+            sql_literal(&serde_json::Value::from(42i64), DriverKind::Postgres),
             "42"
         );
         assert_eq!(
-            sql_literal(&serde_json::Value::String("o'clock".into())),
+            sql_literal(&serde_json::Value::String("o'clock".into()), DriverKind::Postgres),
             "'o''clock'"
+        );
+        assert_eq!(
+            sql_literal(
+                &serde_json::Value::String(r"C:\name".into()),
+                DriverKind::Mysql
+            ),
+            r"'C:\\name'"
+        );
+        assert_eq!(
+            sql_literal(
+                &serde_json::Value::String(r"C:\name".into()),
+                DriverKind::Postgres
+            ),
+            r"'C:\name'"
         );
     }
 }

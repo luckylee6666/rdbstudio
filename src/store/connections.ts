@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { api } from "@/lib/api";
 import { clearSchemaColumns } from "@/lib/schemaCache";
+import { toast } from "@/store/toasts";
+import { translate, useI18n } from "@/store/i18n";
 import type { ConnectionConfig, TreeEntry } from "@/types";
 
 type ConnStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -129,21 +131,27 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   loadDatabases: async (id) => {
-    const existing = get().branches[id] ?? {};
-    set({ branches: { ...get().branches, [id]: { ...existing, loading: true } } });
+    set({
+      branches: {
+        ...get().branches,
+        [id]: { ...(get().branches[id] ?? {}), loading: true },
+      },
+    });
     try {
       const databases = await api.listDatabases(id);
+      const latest = get().branches[id] ?? {};
       set({
         branches: {
           ...get().branches,
-          [id]: { ...existing, databases, loading: false },
+          [id]: { ...latest, databases, loading: false, error: undefined },
         },
       });
     } catch (e: unknown) {
+      const latest = get().branches[id] ?? {};
       set({
         branches: {
           ...get().branches,
-          [id]: { ...existing, error: String(e), loading: false },
+          [id]: { ...latest, error: String(e), loading: false },
         },
       });
     }
@@ -191,18 +199,19 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   loadMoreRedisKeys: async (id, cacheKey) => {
-    const cur = get().branches[id] ?? {};
-    if (cur.redisDone || cur.redisLoadingMore) return;
-    const cursor = cur.redisCursor ?? 0;
+    const start = get().branches[id] ?? {};
+    if (start.redisDone || start.redisLoadingMore) return;
+    const cursor = start.redisCursor ?? 0;
     set({
       branches: {
         ...get().branches,
-        [id]: { ...cur, redisLoadingMore: true },
+        [id]: { ...(get().branches[id] ?? {}), redisLoadingMore: true },
       },
     });
     try {
       const page = await api.scanRedisKeys(id, cursor);
-      const prev = cur.tables?.[cacheKey] ?? [];
+      const latest = get().branches[id] ?? {};
+      const prev = latest.tables?.[cacheKey] ?? [];
       // Dedup by name in case SCAN returns the same key twice across pages
       // (Redis SCAN guarantees eventual completeness, not uniqueness).
       const seen = new Set(prev.map((e) => e.name));
@@ -217,8 +226,8 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
         branches: {
           ...get().branches,
           [id]: {
-            ...cur,
-            tables: { ...(cur.tables ?? {}), [cacheKey]: merged },
+            ...latest,
+            tables: { ...(latest.tables ?? {}), [cacheKey]: merged },
             redisCursor: page.next_cursor,
             redisDone: page.done,
             redisLoadingMore: false,
@@ -226,13 +235,17 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
         },
       });
     } catch (e) {
-      console.error(e);
+      const latest = get().branches[id] ?? {};
       set({
         branches: {
           ...get().branches,
-          [id]: { ...cur, redisLoadingMore: false },
+          [id]: { ...latest, redisLoadingMore: false },
         },
       });
+      toast.error(
+        translate(useI18n.getState().lang, "tree.load_more_failed"),
+        String(e)
+      );
     }
   },
 }));

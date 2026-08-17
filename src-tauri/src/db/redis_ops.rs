@@ -38,10 +38,9 @@ pub async fn server_version(handle: &RedisHandle) -> AppResult<String> {
     Ok(format!("Redis {}", v.trim()))
 }
 
-pub async fn list_databases(_handle: &RedisHandle) -> AppResult<Vec<String>> {
-    // P0 scope: each connection is bound to a single DB index at connect time.
-    // We surface "db<N>" if we can read it, else fall back to "db0".
-    Ok(vec!["db0".into()])
+pub async fn list_databases(handle: &RedisHandle) -> AppResult<Vec<String>> {
+    // Each connection is bound to a single DB index at connect time.
+    Ok(vec![format!("db{}", handle.db_index)])
 }
 
 pub async fn list_keys(handle: &RedisHandle) -> AppResult<Vec<TreeEntry>> {
@@ -193,6 +192,9 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
         RVal::Int(i) => single_cell("result", json!(i), elapsed),
         RVal::BulkString(b) => single_cell("result", bytes_to_json(&b), elapsed),
         RVal::Array(items) => {
+            if is_stream_reply(cmd_name) {
+                return stream_to_table(items, elapsed);
+            }
             // HGETALL / CONFIG GET return a flat array of [k, v, k, v, …];
             // surface as a key/value table when the command is known to be
             // map-shaped, otherwise as a 1-col positional list.
@@ -271,10 +273,63 @@ fn is_map_reply(cmd: &str, args: &[String]) -> bool {
     if cmd_str == "ZRANGE" || cmd_str == "ZREVRANGE" {
         args.iter().any(|a| a.eq_ignore_ascii_case("WITHSCORES"))
     } else {
-        matches!(
-            cmd_str,
-            "HGETALL" | "CONFIG" | "XRANGE" | "XREVRANGE" | "CLIENT"
-        )
+        matches!(cmd_str, "HGETALL" | "CONFIG" | "CLIENT")
+    }
+}
+
+fn is_stream_reply(cmd: &str) -> bool {
+    matches!(
+        cmd.to_ascii_uppercase().as_str(),
+        "XRANGE" | "XREVRANGE"
+    )
+}
+
+/// XRANGE returns `[[id, [f, v, …]], …]` — not a flat k/v map. Flatten to
+/// `id | fields` so the grid doesn't pair neighbouring entries as field/value.
+fn stream_to_table(items: Vec<RVal>, elapsed: u64) -> QueryResult {
+    let mut rows = Vec::new();
+    for item in items {
+        match item {
+            RVal::Array(pair) if pair.len() >= 2 => {
+                let id = rval_to_json(&pair[0]);
+                let fields = match &pair[1] {
+                    RVal::Array(kv) => {
+                        let mut obj = serde_json::Map::new();
+                        for chunk in kv.chunks(2) {
+                            if chunk.len() < 2 {
+                                continue;
+                            }
+                            let k = match &chunk[0] {
+                                RVal::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+                                RVal::SimpleString(s) => s.clone(),
+                                other => format!("{other:?}"),
+                            };
+                            obj.insert(k, rval_to_json(&chunk[1]));
+                        }
+                        Json::Object(obj)
+                    }
+                    other => rval_to_json(other),
+                };
+                rows.push(vec![id, fields]);
+            }
+            other => rows.push(vec![rval_to_json(&other), Json::Null]),
+        }
+    }
+    QueryResult {
+        columns: vec![
+            ColumnMeta {
+                name: "id".into(),
+                data_type: "redis".into(),
+            },
+            ColumnMeta {
+                name: "fields".into(),
+                data_type: "json".into(),
+            },
+        ],
+        rows,
+        rows_affected: None,
+        elapsed_ms: elapsed,
+        truncated: false,
     }
 }
 
@@ -376,7 +431,7 @@ pub fn line_is_readonly(line: &str) -> bool {
     match cmd.to_uppercase().as_str() {
         // strings / generic
         "GET" | "MGET" | "GETRANGE" | "STRLEN" | "EXISTS" | "TYPE" | "TTL" | "PTTL"
-        | "SCAN" | "KEYS" | "RANDOMKEY" | "DBSIZE" | "DUMP" | "MEMORY" | "OBJECT"
+        | "SCAN" | "KEYS" | "RANDOMKEY" | "DBSIZE" | "DUMP" | "OBJECT"
         // hash
         | "HGET" | "HGETALL" | "HMGET" | "HLEN" | "HKEYS" | "HVALS" | "HSCAN" | "HEXISTS"
         | "HSTRLEN" | "HRANDFIELD"
@@ -392,7 +447,7 @@ pub fn line_is_readonly(line: &str) -> bool {
         // bit / hll
         | "BITCOUNT" | "BITPOS" | "GETBIT" | "PFCOUNT"
         // server / introspection
-        | "INFO" | "PING" | "ECHO" | "TIME" | "COMMAND" | "SLOWLOG" | "LASTSAVE"
+        | "INFO" | "PING" | "ECHO" | "TIME" | "COMMAND" | "LASTSAVE"
         // RedisJSON reads
         | "JSON.GET" | "JSON.MGET" | "JSON.TYPE" | "JSON.STRLEN" | "JSON.ARRLEN"
         | "JSON.OBJKEYS" | "JSON.OBJLEN" => true,
@@ -404,6 +459,14 @@ pub fn line_is_readonly(line: &str) -> bool {
         "CLIENT" => matches!(
             args.get(1).map(|s| s.to_uppercase()).as_deref(),
             Some("LIST") | Some("INFO") | Some("GETNAME") | Some("ID")
+        ),
+        "MEMORY" => matches!(
+            args.get(1).map(|s| s.to_uppercase()).as_deref(),
+            Some("USAGE") | Some("STATS") | Some("DOCTOR") | Some("MALLOC-STATS")
+        ),
+        "SLOWLOG" => matches!(
+            args.get(1).map(|s| s.to_uppercase()).as_deref(),
+            Some("GET") | Some("LEN")
         ),
         _ => false,
     }
@@ -466,6 +529,10 @@ mod tests {
         assert!(!line_is_readonly("EXPIRE foo 10"));
         assert!(!line_is_readonly("CONFIG SET maxmemory 0"));
         assert!(!line_is_readonly("CLIENT KILL ID 5"));
+        assert!(line_is_readonly("MEMORY USAGE foo"));
+        assert!(line_is_readonly("SLOWLOG GET 10"));
+        assert!(!line_is_readonly("MEMORY PURGE"));
+        assert!(!line_is_readonly("SLOWLOG RESET"));
         // Unknown / unparsable → treated as writes.
         assert!(!line_is_readonly("SOMEFUTURECMD foo"));
         assert!(!line_is_readonly("GET \"unterminated"));
@@ -516,6 +583,36 @@ mod tests {
     fn reply_to_table_nil_yields_null_cell() {
         let r = reply_to_table(&["GET".into()], RVal::Nil, Instant::now());
         assert!(r.rows[0][0].is_null());
+    }
+
+    #[test]
+    fn reply_to_table_xrange_flattens_entries() {
+        let arr = RVal::Array(vec![
+            RVal::Array(vec![
+                RVal::BulkString(b"1609459200000-0".to_vec()),
+                RVal::Array(vec![
+                    RVal::BulkString(b"temp".to_vec()),
+                    RVal::BulkString(b"21".to_vec()),
+                    RVal::BulkString(b"hum".to_vec()),
+                    RVal::BulkString(b"40".to_vec()),
+                ]),
+            ]),
+            RVal::Array(vec![
+                RVal::BulkString(b"1609459200001-0".to_vec()),
+                RVal::Array(vec![
+                    RVal::BulkString(b"temp".to_vec()),
+                    RVal::BulkString(b"22".to_vec()),
+                ]),
+            ]),
+        ]);
+        let r = reply_to_table(&["XRANGE".into()], arr, Instant::now());
+        assert_eq!(r.columns.len(), 2);
+        assert_eq!(r.columns[0].name, "id");
+        assert_eq!(r.columns[1].name, "fields");
+        assert_eq!(r.rows.len(), 2);
+        assert_eq!(r.rows[0][0].as_str(), Some("1609459200000-0"));
+        assert_eq!(r.rows[0][1]["temp"], json!("21"));
+        assert_eq!(r.rows[1][1]["temp"], json!("22"));
     }
 
     #[test]

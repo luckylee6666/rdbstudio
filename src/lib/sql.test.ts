@@ -49,6 +49,27 @@ describe("splitStatements", () => {
   it("trims and skips empty parts", () => {
     expect(splitStatements(";;\n  SELECT 1;\n  ;")).toEqual(["SELECT 1"]);
   });
+
+  it("does not split on semicolons inside dollar-quoted strings", () => {
+    expect(
+      splitStatements("DO $$ BEGIN INSERT INTO t VALUES (1); END $$; SELECT 1")
+    ).toEqual(["DO $$ BEGIN INSERT INTO t VALUES (1); END $$", "SELECT 1"]);
+    expect(
+      splitStatements(
+        "SELECT $body$ a; b $body$; SELECT $tag$DELETE FROM t;$tag$"
+      )
+    ).toEqual([
+      "SELECT $body$ a; b $body$",
+      "SELECT $tag$DELETE FROM t;$tag$",
+    ]);
+  });
+
+  it("does not treat $1 placeholders as dollar quotes", () => {
+    expect(splitStatements("SELECT $1; SELECT $2")).toEqual([
+      "SELECT $1",
+      "SELECT $2",
+    ]);
+  });
 });
 
 describe("explainWrap", () => {

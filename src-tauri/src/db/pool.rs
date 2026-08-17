@@ -12,11 +12,16 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct RedisHandle {
     inner: Arc<Mutex<ConnectionManager>>,
+    /// DB index selected at connect time (`/N` in the redis URL).
+    pub db_index: u8,
 }
 
 impl RedisHandle {
-    pub fn new(mgr: ConnectionManager) -> Self {
-        Self { inner: Arc::new(Mutex::new(mgr)) }
+    pub fn new(mgr: ConnectionManager, db_index: u8) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(mgr)),
+            db_index,
+        }
     }
     /// Cheap clone of the underlying multiplexed connection — every clone
     /// shares the same TCP session, so commands are pipelined safely.
@@ -51,6 +56,11 @@ impl DbPool {
                     .acquire_timeout(Duration::from_secs(10))
                     .connect(url)
                     .await?;
+                // Without this, concurrent readers + a writer surface
+                // SQLITE_BUSY immediately instead of waiting out the lock.
+                sqlx::query("PRAGMA busy_timeout = 5000")
+                    .execute(&pool)
+                    .await?;
                 Ok(Self::Sqlite(pool))
             }
             DriverKind::Postgres => {
@@ -72,7 +82,7 @@ impl DbPool {
             DriverKind::Redis => {
                 let client = redis::Client::open(url)?;
                 let mgr = ConnectionManager::new(client).await?;
-                Ok(Self::Redis(RedisHandle::new(mgr)))
+                Ok(Self::Redis(RedisHandle::new(mgr, redis_db_index(url))))
             }
         }
     }
@@ -86,4 +96,11 @@ impl DbPool {
             Self::Redis(_) => {}
         }
     }
+}
+
+fn redis_db_index(url: &str) -> u8 {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let path = after_scheme.split_once('/').map(|(_, p)| p).unwrap_or("");
+    let num = path.split(|c| c == '?' || c == '#').next().unwrap_or("");
+    num.parse().unwrap_or(0)
 }

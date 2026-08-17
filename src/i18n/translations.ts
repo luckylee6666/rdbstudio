@@ -178,6 +178,7 @@ const en: Dict = {
   "tree.no_tables": "(no tables)",
   "tree.scanning": "scanning…",
   "tree.load_more": "+ Load more keys",
+  "tree.load_more_failed": "Failed to load more keys",
   "tree.filter.placeholder": "Filter tables / keys…",
 
   // workspace tabs
@@ -724,6 +725,7 @@ const zh: Dict = {
   "tree.no_tables": "（无表）",
   "tree.scanning": "扫描中…",
   "tree.load_more": "+ 加载更多 key",
+  "tree.load_more_failed": "加载更多 key 失败",
   "tree.filter.placeholder": "筛选表 / key…",
 
   // workspace tabs

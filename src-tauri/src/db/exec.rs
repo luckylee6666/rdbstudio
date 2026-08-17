@@ -47,25 +47,222 @@ fn skip_leading_trivia(sql: &str) -> &str {
     }
 }
 
-pub fn is_readonly(sql: &str) -> bool {
-    let lead: String = skip_leading_trivia(sql)
+fn first_keyword(sql: &str) -> String {
+    skip_leading_trivia(sql)
         .chars()
         .take_while(|c| c.is_alphabetic())
         .collect::<String>()
-        .to_uppercase();
-    match lead.as_str() {
-        "SELECT" | "SHOW" | "PRAGMA" | "EXPLAIN" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => {
-            true
+        .to_uppercase()
+}
+
+fn skip_first_keyword(sql: &str) -> &str {
+    let s = skip_leading_trivia(sql);
+    let bytes: usize = s
+        .chars()
+        .take_while(|c| c.is_alphabetic())
+        .map(|c| c.len_utf8())
+        .sum();
+    &s[bytes..]
+}
+
+/// SELECT / VALUES / TABLE can still write via `INTO` (PG `SELECT … INTO`,
+/// MySQL `SELECT … INTO OUTFILE`). Failure mode of a false positive is a
+/// blocked read, never a write slipping through.
+fn has_into_clause(sql: &str) -> bool {
+    scan_bare_words(sql, |w| w == "INTO")
+}
+
+fn writes_via_dml_or_into(sql: &str) -> bool {
+    scan_bare_words(sql, |w| {
+        matches!(w, "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "INTO")
+    })
+}
+
+/// `EXPLAIN` itself is a read. `EXPLAIN ANALYZE` (or `EXPLAIN (ANALYZE …)`
+/// with ANALYZE not explicitly false) *runs* the inner statement, so a
+/// read-only connection must classify the inner SQL.
+fn explain_is_readonly(sql: &str) -> bool {
+    let after = skip_first_keyword(sql).trim_start();
+    let (analyze, body) = if let Some(rest) = after.strip_prefix('(') {
+        explain_paren_options(rest)
+    } else {
+        explain_bare_options(after)
+    };
+    if analyze {
+        is_readonly(body)
+    } else {
+        true
+    }
+}
+
+fn explain_paren_options(s: &str) -> (bool, &str) {
+    match s.find(')') {
+        Some(idx) => {
+            let analyze = explain_analyze_enabled(&s[..idx]);
+            (analyze, s[idx + 1..].trim_start())
         }
+        // Unterminated options → treat as ANALYZE so the inner (or leftover)
+        // statement is classified; unknown leftovers classify as writes.
+        None => (true, s),
+    }
+}
+
+fn explain_bare_options(s: &str) -> (bool, &str) {
+    let mut rest = s;
+    let mut analyze = false;
+    loop {
+        let t = rest.trim_start();
+        let u = t.to_ascii_uppercase();
+        if u.starts_with("QUERY") {
+            let after = t["QUERY".len()..].trim_start();
+            if after.to_ascii_uppercase().starts_with("PLAN") {
+                rest = after["PLAN".len()..].trim_start();
+                continue;
+            }
+        }
+        if u.starts_with("ANALYZE") {
+            rest = t["ANALYZE".len()..].trim_start();
+            let next = rest.to_ascii_uppercase();
+            if next.starts_with("FALSE") || next.starts_with("OFF") || next.starts_with('0') {
+                analyze = false;
+                rest = skip_token(rest);
+            } else if next.starts_with("TRUE") || next.starts_with("ON") || next.starts_with('1') {
+                analyze = true;
+                rest = skip_token(rest);
+            } else {
+                analyze = true;
+            }
+            continue;
+        }
+        if u.starts_with("VERBOSE") {
+            rest = t["VERBOSE".len()..].trim_start();
+            continue;
+        }
+        if u.starts_with("FORMAT") {
+            rest = t["FORMAT".len()..].trim_start();
+            if let Some(r) = rest.strip_prefix('=') {
+                rest = r.trim_start();
+            }
+            rest = skip_token(rest);
+            continue;
+        }
+        return (analyze, t);
+    }
+}
+
+fn explain_analyze_enabled(opts: &str) -> bool {
+    let tokens: Vec<String> = opts
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_uppercase())
+        .collect();
+    let mut i = 0;
+    let mut analyze = false;
+    while i < tokens.len() {
+        if tokens[i] == "ANALYZE" {
+            match tokens.get(i + 1).map(String::as_str) {
+                Some("FALSE") | Some("OFF") | Some("0") => {
+                    analyze = false;
+                    i += 2;
+                    continue;
+                }
+                Some("TRUE") | Some("ON") | Some("1") => {
+                    analyze = true;
+                    i += 2;
+                    continue;
+                }
+                _ => analyze = true,
+            }
+        }
+        i += 1;
+    }
+    analyze
+}
+
+fn skip_token(s: &str) -> &str {
+    let t = s.trim_start();
+    let bytes: usize = t
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .map(|c| c.len_utf8())
+        .sum();
+    t[bytes..].trim_start()
+}
+
+/// SQLite PRAGMA is a grab-bag: `table_info(t)` is a read, `journal_mode=WAL`
+/// and `wal_checkpoint(...)` mutate. Assignment (`=`) or a known mutating
+/// name is a write; everything else stays a read.
+fn pragma_is_readonly(sql: &str) -> bool {
+    let rest = skip_first_keyword(sql).trim_start();
+    let name = pragma_name(rest);
+    const MUTATING: &[&str] = &[
+        "WAL_CHECKPOINT",
+        "OPTIMIZE",
+        "INCREMENTAL_VACUUM",
+        "SHRINK_MEMORY",
+    ];
+    if MUTATING.contains(&name.as_str()) {
+        return false;
+    }
+    !pragma_has_assignment(rest)
+}
+
+fn pragma_name(s: &str) -> String {
+    // `schema.pragma` or just `pragma`
+    let ident = |src: &str| {
+        src.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .to_ascii_uppercase()
+    };
+    let first = ident(s);
+    let after = s.get(first.len()..).unwrap_or("").trim_start();
+    if let Some(rest) = after.strip_prefix('.') {
+        ident(rest)
+    } else {
+        first
+    }
+}
+
+fn pragma_has_assignment(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.') {
+        i += 1;
+    }
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'(' {
+        let mut depth = 1usize;
+        i += 1;
+        while i < b.len() && depth > 0 {
+            match b[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+    }
+    i < b.len() && b[i] == b'='
+}
+
+pub fn is_readonly(sql: &str) -> bool {
+    match first_keyword(sql).as_str() {
+        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => !has_into_clause(sql),
+        "PRAGMA" => pragma_is_readonly(sql),
+        "EXPLAIN" => explain_is_readonly(sql),
         // Postgres allows data-modifying CTEs — `WITH d AS (DELETE ...) SELECT`
         // leads with WITH but writes. Only trust a leading WITH when no DML
         // keyword appears as a bare word anywhere in the statement. This can
         // misclassify a read-only query that quotes such a word oddly, but the
         // failure mode is "read blocked on a read-only connection", never a
         // write slipping through.
-        "WITH" => !scan_bare_words(sql, |w| {
-            matches!(w, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
-        }),
+        "WITH" => !writes_via_dml_or_into(sql),
         _ => false,
     }
 }
@@ -141,6 +338,38 @@ fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
                 }
                 word.clear();
             }
+            '$' => {
+                if !word.is_empty() && pred(&word) {
+                    return true;
+                }
+                word.clear();
+                match chars.peek().copied() {
+                    Some(c) if c.is_ascii_digit() => {
+                        // `$1` is a placeholder, not a dollar-quote.
+                    }
+                    Some('$') => {
+                        chars.next();
+                        skip_dollar_quoted(&mut chars, "");
+                    }
+                    Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                        let mut tag = String::new();
+                        while let Some(n) = chars.peek().copied() {
+                            if n == '$' {
+                                chars.next();
+                                skip_dollar_quoted(&mut chars, &tag);
+                                break;
+                            }
+                            if n.is_ascii_alphanumeric() || n == '_' {
+                                tag.push(n);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             c if c.is_alphanumeric() || c == '_' => word.push(c.to_ascii_uppercase()),
             _ => {
                 if !word.is_empty() && pred(&word) {
@@ -151,6 +380,34 @@ fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
         }
     }
     !word.is_empty() && pred(&word)
+}
+
+/// Skip the body of a `$tag$ … $tag$` dollar-quoted string (Postgres).
+fn skip_dollar_quoted(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>, tag: &str) {
+    loop {
+        match chars.next() {
+            None => return,
+            Some('$') => {
+                let mut ok = true;
+                for expected in tag.chars() {
+                    match chars.peek().copied() {
+                        Some(c) if c == expected => {
+                            chars.next();
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok && chars.peek() == Some(&'$') {
+                    chars.next();
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Drain up to `MAX_ROWS` rows from a fetch stream; returns the rows plus
@@ -726,6 +983,58 @@ mod tests {
         ));
         assert!(is_readonly(
             "WITH x AS (SELECT * FROM t WHERE action = 'DELETE') SELECT * FROM x"
+        ));
+    }
+
+    #[test]
+    fn is_readonly_rejects_explain_analyze_writes() {
+        assert!(!is_readonly("EXPLAIN ANALYZE INSERT INTO t VALUES (1)"));
+        assert!(!is_readonly(
+            "EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1"
+        ));
+        assert!(!is_readonly("EXPLAIN (ANALYZE true) UPDATE t SET a = 1"));
+        // ANALYZE false / plain EXPLAIN only plan — still a read.
+        assert!(is_readonly(
+            "EXPLAIN (ANALYZE false, FORMAT JSON) INSERT INTO t VALUES (1)"
+        ));
+        assert!(is_readonly("EXPLAIN INSERT INTO t VALUES (1)"));
+        assert!(is_readonly("EXPLAIN QUERY PLAN INSERT INTO t VALUES (1)"));
+        assert!(is_readonly("EXPLAIN ANALYZE SELECT 1"));
+    }
+
+    #[test]
+    fn is_readonly_rejects_select_into() {
+        assert!(!is_readonly("SELECT * INTO newtab FROM old"));
+        assert!(!is_readonly("select id into tmp from users"));
+        assert!(!is_readonly(
+            "WITH x AS (SELECT 1 AS a) SELECT * INTO t FROM x"
+        ));
+        assert!(is_readonly("SELECT * FROM t WHERE action = 'INTO'"));
+        assert!(is_readonly("SELECT * FROM t WHERE x IN (1, 2)"));
+    }
+
+    #[test]
+    fn is_readonly_pragma_setters_are_writes() {
+        assert!(is_readonly("PRAGMA table_info(users)"));
+        assert!(is_readonly("PRAGMA foreign_key_list(users)"));
+        assert!(is_readonly("PRAGMA journal_mode"));
+        assert!(!is_readonly("PRAGMA journal_mode=WAL"));
+        assert!(!is_readonly("PRAGMA journal_mode = WAL"));
+        assert!(!is_readonly("PRAGMA foreign_keys=ON"));
+        assert!(!is_readonly("PRAGMA wal_checkpoint(FULL)"));
+        assert!(!is_readonly("PRAGMA optimize"));
+    }
+
+    #[test]
+    fn scan_bare_words_skips_dollar_quotes() {
+        assert!(is_readonly(
+            "SELECT $$ DELETE FROM t; INSERT INTO t VALUES (1) $$"
+        ));
+        assert!(has_returning(
+            "INSERT INTO t VALUES ($body$RETURNING$body$) RETURNING id"
+        ));
+        assert!(!has_returning(
+            "INSERT INTO t VALUES ($body$RETURNING$body$)"
         ));
     }
 }

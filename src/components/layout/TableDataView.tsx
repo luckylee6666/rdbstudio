@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -41,11 +41,16 @@ type Pending =
 
 function rowKeyOf(
   pkCols: ColumnInfo[],
-  rowIndex: number,
+  _rowIndex: number,
   values: unknown[],
   columns: ColumnInfo[]
 ) {
-  if (pkCols.length === 0) return `row:${rowIndex}`;
+  // Content-based identity so sort/page/filter remaps don't pin pending
+  // edits to the visual slot they were made in. Duplicate rows share a
+  // key — the backend already rejects multi-row WHERE matches.
+  if (pkCols.length === 0) {
+    return `row:${values.map((v) => JSON.stringify(v ?? null)).join("|")}`;
+  }
   return pkCols
     .map((pk) => {
       const idx = columns.findIndex((c) => c.name === pk.name);
@@ -83,6 +88,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
 
   const pkCols = useMemo(() => columns.filter((c) => c.is_primary_key), [columns]);
   const openTab = useWorkspace((s) => s.openTab);
+  const loadGen = useRef(0);
 
   // Single-column foreign keys, keyed by local column name — powers the
   // "jump to referenced row" affordance in the grid. Best-effort metadata.
@@ -158,6 +164,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
 
   const load = useCallback(
     async (nextPage: number, forceCols = false) => {
+      const gen = ++loadGen.current;
       setLoading(true);
       setError(null);
       try {
@@ -185,6 +192,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
             return null;
           }),
         ]);
+        if (loadGen.current !== gen) return;
         // The grid MUST use the columns that came back with SELECT * so the
         // positional mapping of row values stays in sync. Enrich with PK / nullable
         // metadata from list_columns where names match.
@@ -206,9 +214,10 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
         setRowCount(total);
         setPage(nextPage);
       } catch (e) {
+        if (loadGen.current !== gen) return;
         setError(String(e));
       } finally {
-        setLoading(false);
+        if (loadGen.current === gen) setLoading(false);
       }
     },
     [connectionId, table, schema, columns, makeQuery]
