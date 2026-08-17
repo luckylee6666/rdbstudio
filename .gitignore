@@ -42,3 +42,11 @@ ehthumbs.db
 
 # ad-hoc test screenshots
 prompt-dialog-test.png
+
+# Roster — 项目记忆窗口
+.memory
+
+# 本地 AI 协作文件，不进仓库
+CLAUDE.md
+AGENTS.md
+opencode.json

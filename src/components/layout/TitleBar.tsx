@@ -1,4 +1,5 @@
-import { Database, Globe, Moon, Search, Sun } from "lucide-react";
+import { Globe, Moon, Search, Sun } from "lucide-react";
+import mark from "@/assets/mark.png";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { cn } from "@/lib/cn";
@@ -54,9 +55,11 @@ export function TitleBar() {
         // Overlay); Windows/Linux get native decorations, no inset needed.
         className={cn("flex items-center gap-2", isMac && "pl-[68px]")}
       >
-        <div className="pointer-events-none grid h-6 w-6 place-items-center rounded-md bg-gradient-to-br from-brand to-brand/60 text-brand-foreground shadow-soft">
-          <Database className="h-3.5 w-3.5" />
-        </div>
+        <img
+          src={mark}
+          alt=""
+          className="pointer-events-none h-6 w-6 rounded-[7px] shadow-soft"
+        />
         <span className="pointer-events-none font-medium tracking-tight">
           rdbstudio
         </span>

@@ -1,11 +1,21 @@
-# rdbstudio
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="160" height="160" alt="rdbstudio" />
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tauri](https://img.shields.io/badge/Tauri-2.0-blueviolet?logo=tauri)](https://tauri.app)
-[![React](https://img.shields.io/badge/React-18-61dafb?logo=react)](https://react.dev)
-[![Rust](https://img.shields.io/badge/Rust-1.77+-dea584?logo=rust)](https://www.rust-lang.org/)
+<h1 align="center">rdbstudio</h1>
 
-**Modern cross-platform database GUI** — A Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis, built with Tauri 2 + React + sqlx.
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">中文</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2.0-blueviolet?logo=tauri" alt="Tauri" /></a>
+  <a href="https://react.dev"><img src="https://img.shields.io/badge/React-18-61dafb?logo=react" alt="React" /></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.77+-dea584?logo=rust" alt="Rust" /></a>
+</p>
+
+<p align="center"><strong>Modern cross-platform database GUI</strong> — A Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis, built with Tauri 2 + React + sqlx.</p>
 
 > Status: **v0.1.0** — first stable release. macOS (Apple Silicon) and Windows x64 installers on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page.
 
