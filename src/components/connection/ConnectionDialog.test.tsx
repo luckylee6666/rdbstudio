@@ -65,4 +65,29 @@ describe("ConnectionDialog", () => {
 
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it("uses explicit plaintext for new connections but preserves legacy automatic TLS", () => {
+    const { unmount } = render(
+      <ConnectionDialog open initial={null} onClose={vi.fn()} />
+    );
+    expect(screen.getByDisplayValue("禁用（明文）")).toHaveValue("disable");
+    unmount();
+
+    render(
+      <ConnectionDialog
+        open
+        initial={{
+          id: "legacy",
+          name: "Legacy",
+          driver: "postgres",
+          host: "localhost",
+          port: 5432,
+          username: "user",
+          ssl_mode: null,
+        }}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.getByDisplayValue("自动（兼容旧配置）")).toHaveValue("");
+  });
 });

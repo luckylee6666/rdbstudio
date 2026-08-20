@@ -1,7 +1,7 @@
 {
   "name": "rdbstudio",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,8 @@
     "tauri:build": "tauri build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "check:release-version": "node .github/scripts/check-release-version.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.4",

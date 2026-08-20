@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct StoreFile {
     #[serde(default)]
     connections: Vec<ConnectionConfig>,
@@ -95,42 +95,44 @@ impl ConnectionStore {
         if cfg.id.is_empty() {
             cfg.id = uuid::Uuid::new_v4().to_string();
         }
+        let mut guard = self.inner.write();
+        let mut next = guard.clone();
         let to_return = {
-            let mut guard = self.inner.write();
             let mut persisted = cfg.clone();
             let _ = strip_connection_secrets(&mut persisted);
-            if let Some(existing) = guard
-                .connections
-                .iter_mut()
-                .find(|c| c.id == persisted.id)
-            {
+            if let Some(existing) = next.connections.iter_mut().find(|c| c.id == persisted.id) {
                 *existing = persisted.clone();
             } else {
-                guard.connections.push(persisted.clone());
+                next.connections.push(persisted.clone());
             }
             persisted
         };
-        self.flush()?;
+        self.persist(&next)?;
+        *guard = next;
         Ok(to_return)
     }
 
     pub fn remove(&self, id: &str) -> AppResult<bool> {
-        let removed = {
-            let mut guard = self.inner.write();
-            let len = guard.connections.len();
-            guard.connections.retain(|c| c.id != id);
-            guard.connections.len() != len
-        };
+        let mut guard = self.inner.write();
+        let mut next = guard.clone();
+        let len = next.connections.len();
+        next.connections.retain(|c| c.id != id);
+        let removed = next.connections.len() != len;
         if removed {
-            self.flush()?;
+            self.persist(&next)?;
+            *guard = next;
         }
         Ok(removed)
     }
 
     fn flush(&self) -> AppResult<()> {
         let guard = self.inner.read();
+        self.persist(&guard)
+    }
+
+    fn persist(&self, data: &StoreFile) -> AppResult<()> {
         let tmp = self.path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(&*guard)?;
+        let json = serde_json::to_vec_pretty(data)?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &self.path).map_err(AppError::from)
     }
@@ -177,10 +179,13 @@ mod tests {
             .expect("save connection");
 
         assert!(saved.password.is_none());
-        assert!(saved.ssh.as_ref().and_then(|s| s.password.as_ref()).is_none());
+        assert!(saved
+            .ssh
+            .as_ref()
+            .and_then(|s| s.password.as_ref())
+            .is_none());
 
-        let raw =
-            std::fs::read_to_string(dir.path().join("connections.json")).expect("read store");
+        let raw = std::fs::read_to_string(dir.path().join("connections.json")).expect("read store");
         assert!(!raw.contains("db-secret"), "{raw}");
         assert!(!raw.contains("ssh-secret"), "{raw}");
 
@@ -255,10 +260,27 @@ mod tests {
             .iter()
             .all(|c| c.ssh.as_ref().and_then(|s| s.password.as_ref()).is_none()));
 
-        let raw =
-            std::fs::read_to_string(dir.path().join("connections.json")).expect("read store");
+        let raw = std::fs::read_to_string(dir.path().join("connections.json")).expect("read store");
         assert!(!raw.contains("old-db-secret"), "{raw}");
         assert!(!raw.contains("old-ssh-secret"), "{raw}");
+    }
+
+    #[test]
+    fn failed_flush_does_not_change_in_memory_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConnectionStore::load(dir.path()).expect("load store");
+        let mut original = connection_with_secrets();
+        original.password = None;
+        original.ssh = None;
+        store.upsert(original.clone()).expect("initial save");
+
+        std::fs::create_dir(dir.path().join("connections.json.tmp"))
+            .expect("block temporary file creation");
+        let mut edited = original;
+        edited.name = "must not stick".into();
+
+        assert!(store.upsert(edited).is_err());
+        assert_eq!(store.get("conn-1").unwrap().name, "Test");
     }
 }
 
@@ -297,11 +319,7 @@ impl SnippetStore {
         }
         let to_return = {
             let mut guard = self.inner.write();
-            if let Some(existing) = guard
-                .snippets
-                .iter_mut()
-                .find(|s| s.id == snippet.id)
-            {
+            if let Some(existing) = guard.snippets.iter_mut().find(|s| s.id == snippet.id) {
                 *existing = snippet.clone();
             } else {
                 guard.snippets.push(snippet.clone());

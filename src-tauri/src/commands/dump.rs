@@ -101,34 +101,49 @@ fn effective_addr(state: &AppState, cfg: &ConnectionConfig) -> AppResult<(String
     Ok(target_addr(cfg))
 }
 
-/// Mirror `build_url_with`: a tunnel dials 127.0.0.1, so verify-full cannot
-/// match the cert hostname and is downgraded to encrypt-only.
-fn dump_ssl_mode(cfg: &ConnectionConfig, via_tunnel: bool) -> Option<SslMode> {
-    match (ssl_mode_of(cfg), via_tunnel) {
-        (Some(SslMode::VerifyFull), true) => Some(SslMode::Require),
-        (other, _) => other,
+/// Mirror `build_url_with`: a tunnel dials localhost, so verify-full cannot
+/// validate the original database hostname. Refuse to weaken the policy.
+fn dump_ssl_mode(cfg: &ConnectionConfig, via_tunnel: bool) -> AppResult<Option<SslMode>> {
+    let mode = ssl_mode_of(cfg);
+    if via_tunnel && mode == Some(SslMode::VerifyFull) {
+        return Err(AppError::msg(
+            "verify-full TLS cannot be used through an SSH tunnel because the client connects to localhost; choose require explicitly or connect directly",
+        ));
     }
+    Ok(mode)
 }
 
-fn apply_pg_ssl(cmd: &mut tokio::process::Command, cfg: &ConnectionConfig, via_tunnel: bool) {
-    if let Some(mode) = dump_ssl_mode(cfg, via_tunnel) {
+fn apply_pg_ssl(
+    cmd: &mut tokio::process::Command,
+    cfg: &ConnectionConfig,
+    via_tunnel: bool,
+) -> AppResult<()> {
+    if let Some(mode) = dump_ssl_mode(cfg, via_tunnel)? {
         cmd.env(
             "PGSSLMODE",
             match mode {
+                SslMode::Disable => "disable",
                 SslMode::Require => "require",
                 SslMode::VerifyFull => "verify-full",
             },
         );
     }
+    Ok(())
 }
 
-fn apply_mysql_ssl(cmd: &mut tokio::process::Command, cfg: &ConnectionConfig, via_tunnel: bool) {
-    if let Some(mode) = dump_ssl_mode(cfg, via_tunnel) {
+fn apply_mysql_ssl(
+    cmd: &mut tokio::process::Command,
+    cfg: &ConnectionConfig,
+    via_tunnel: bool,
+) -> AppResult<()> {
+    if let Some(mode) = dump_ssl_mode(cfg, via_tunnel)? {
         cmd.arg("--ssl-mode").arg(match mode {
+            SslMode::Disable => "DISABLED",
             SslMode::Require => "REQUIRED",
             SslMode::VerifyFull => "VERIFY_IDENTITY",
         });
     }
+    Ok(())
 }
 
 fn tail_of(s: &str, max: usize) -> String {
@@ -140,10 +155,7 @@ fn tail_of(s: &str, max: usize) -> String {
     }
 }
 
-async fn run_tool(
-    mut cmd: tokio::process::Command,
-    tool: &str,
-) -> AppResult<()> {
+async fn run_tool(mut cmd: tokio::process::Command, tool: &str) -> AppResult<()> {
     let out = cmd
         .output()
         .await
@@ -221,7 +233,7 @@ pub async fn dump_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("PGPASSWORD", pw);
             }
-            apply_pg_ssl(&mut cmd, &cfg, via_tunnel);
+            apply_pg_ssl(&mut cmd, &cfg, via_tunnel)?;
             run_tool(cmd, "pg_dump").await?;
         }
         DriverKind::Mysql => {
@@ -253,7 +265,7 @@ pub async fn dump_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("MYSQL_PWD", pw);
             }
-            apply_mysql_ssl(&mut cmd, &cfg, via_tunnel);
+            apply_mysql_ssl(&mut cmd, &cfg, via_tunnel)?;
             run_tool(cmd, "mysqldump").await?;
         }
     }
@@ -318,7 +330,7 @@ pub async fn restore_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("PGPASSWORD", pw);
             }
-            apply_pg_ssl(&mut cmd, &cfg, via_tunnel);
+            apply_pg_ssl(&mut cmd, &cfg, via_tunnel)?;
             run_tool(cmd, "psql").await?;
         }
         DriverKind::Mysql => {
@@ -348,7 +360,7 @@ pub async fn restore_database(
             if let Some(pw) = secret::read_password(&id)? {
                 cmd.env("MYSQL_PWD", pw);
             }
-            apply_mysql_ssl(&mut cmd, &cfg, via_tunnel);
+            apply_mysql_ssl(&mut cmd, &cfg, via_tunnel)?;
             run_tool(cmd, "mysql").await?;
         }
     }
@@ -390,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn dump_ssl_mode_downgrades_verify_full_through_tunnel() {
+    fn dump_ssl_mode_rejects_verify_full_through_tunnel() {
         let mut cfg = ConnectionConfig {
             id: "c".into(),
             name: "c".into(),
@@ -408,11 +420,14 @@ mod tests {
             ssh: None,
             password: None,
         };
-        assert_eq!(dump_ssl_mode(&cfg, true), Some(SslMode::Require));
-        assert_eq!(dump_ssl_mode(&cfg, false), Some(SslMode::VerifyFull));
+        assert!(dump_ssl_mode(&cfg, true).is_err());
+        assert_eq!(
+            dump_ssl_mode(&cfg, false).unwrap(),
+            Some(SslMode::VerifyFull)
+        );
         cfg.ssl_mode = Some("require".into());
-        assert_eq!(dump_ssl_mode(&cfg, false), Some(SslMode::Require));
+        assert_eq!(dump_ssl_mode(&cfg, false).unwrap(), Some(SslMode::Require));
         cfg.ssl_mode = Some("disable".into());
-        assert_eq!(dump_ssl_mode(&cfg, false), None);
+        assert_eq!(dump_ssl_mode(&cfg, false).unwrap(), Some(SslMode::Disable));
     }
 }

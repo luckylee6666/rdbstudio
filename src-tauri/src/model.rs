@@ -44,9 +44,10 @@ pub struct ConnectionConfig {
     /// Single-level only; the UI does not nest groups.
     #[serde(default)]
     pub group: Option<String>,
-    /// TLS mode for PG/MySQL/Redis. None/"disable" = plaintext (default),
-    /// "require" = encrypted without cert verification, "verify-full" =
-    /// encrypted + verify server cert/hostname against system roots.
+    /// TLS mode for PG/MySQL/Redis. None keeps the driver's legacy/default
+    /// negotiation behavior; "disable" forces plaintext, "require" encrypts
+    /// without certificate verification, and "verify-full" verifies the
+    /// server certificate and hostname against system roots.
     /// Ignored for SQLite.
     #[serde(default)]
     pub ssl_mode: Option<String>,
@@ -127,4 +128,3 @@ pub struct Snippet {
     #[serde(default)]
     pub description: Option<String>,
 }
-

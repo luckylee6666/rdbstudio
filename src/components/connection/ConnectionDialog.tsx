@@ -34,6 +34,7 @@ const EMPTY: ConnectionConfig = {
   username: "",
   password: "",
   file_path: "",
+  ssl_mode: "disable",
 };
 
 export function ConnectionDialog({
@@ -388,9 +389,10 @@ export function ConnectionDialog({
               <div className="min-w-0">
                 <Label>{t("conn.dialog.ssl")}</Label>
                 <Select
-                  value={cfg.ssl_mode ?? "disable"}
-                  onChange={(e) => update("ssl_mode", e.target.value)}
+                  value={cfg.ssl_mode ?? ""}
+                  onChange={(e) => update("ssl_mode", e.target.value || null)}
                 >
+                  <option value="">{t("conn.ssl.auto")}</option>
                   <option value="disable">{t("conn.ssl.disable")}</option>
                   <option value="require">{t("conn.ssl.require")}</option>
                   <option value="verify-full">{t("conn.ssl.verify")}</option>

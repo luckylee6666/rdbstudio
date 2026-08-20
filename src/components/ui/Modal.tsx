@@ -1,4 +1,4 @@
-import { useEffect, useId } from "react";
+import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -7,6 +7,16 @@ import { cn } from "@/lib/cn";
 // (AppShell) can stand down while a dialog owns the keyboard — otherwise
 // ⌘W "close this dialog" muscle-memory closes the tab *behind* the dialog.
 let openModalCount = 0;
+const modalStack: symbol[] = [];
+
+const FOCUSABLE = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "a[href]",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 export function anyModalOpen(): boolean {
   return openModalCount > 0;
@@ -30,19 +40,67 @@ export function Modal({
   closeLabel?: string;
 }) {
   const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const modalToken = useRef(Symbol("modal"));
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
+    const token = modalToken.current;
     openModalCount++;
+    modalStack.push(token);
+    previousFocus.current = document.activeElement as HTMLElement | null;
+
+    const focusable = () =>
+      Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []
+      ).filter((element) => element.getClientRects().length > 0);
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (modalStack.at(-1) !== token) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const items = focusable();
+      if (items.length === 0) {
+        e.preventDefault();
+        dialogRef.current?.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
+    const frame = requestAnimationFrame(() => {
+      if (!dialogRef.current?.contains(document.activeElement)) {
+        focusable()[0]?.focus() ?? dialogRef.current?.focus();
+      }
+    });
     return () => {
+      cancelAnimationFrame(frame);
       openModalCount--;
+      const index = modalStack.lastIndexOf(token);
+      if (index >= 0) modalStack.splice(index, 1);
       window.removeEventListener("keydown", onKey);
+      const restore = previousFocus.current;
+      requestAnimationFrame(() => {
+        if (restore?.isConnected) restore.focus();
+      });
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -53,12 +111,14 @@ export function Modal({
         onClick={onClose}
       />
       <div
+        ref={dialogRef}
         className={cn(
           "relative flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden rounded-xl border border-border/80 sm:max-h-[88dvh]",
           "bg-surface-elevated shadow-elevated"
         )}
         style={{ width, maxWidth: "calc(100vw - 2rem)" }}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={titleId}
       >

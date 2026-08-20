@@ -1,10 +1,10 @@
-pub mod pool;
-pub mod meta;
-pub mod exec;
+pub mod alter;
 pub mod data;
 pub mod design;
+pub mod exec;
 pub mod io;
-pub mod alter;
+pub mod meta;
+pub mod pool;
 pub mod redis_ops;
 pub mod ssh;
 
@@ -25,42 +25,42 @@ pub fn target_addr(cfg: &ConnectionConfig) -> (String, u16) {
     let host = nonempty(cfg.host.as_deref())
         .unwrap_or("localhost")
         .to_string();
-    let port = cfg
-        .port
-        .or_else(|| cfg.driver.default_port())
-        .unwrap_or(0);
+    let port = cfg.port.or_else(|| cfg.driver.default_port()).unwrap_or(0);
     (host, port)
 }
 
-/// Normalized TLS modes that request encryption. An omitted or `disable` mode
-/// is handled explicitly as plaintext when building SQL connection URLs.
+/// Normalized explicit TLS modes. An omitted value is kept distinct for
+/// backward compatibility with SQLx's driver defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
+    Disable,
     Require,
     VerifyFull,
 }
 
 pub fn ssl_mode_of(cfg: &ConnectionConfig) -> Option<SslMode> {
     match cfg.ssl_mode.as_deref().map(str::trim) {
+        Some("disable") => Some(SslMode::Disable),
         Some("require") => Some(SslMode::Require),
         Some("verify-full") | Some("verify_full") => Some(SslMode::VerifyFull),
         _ => None,
     }
 }
 
-/// Build a connection URL. When `addr_override` is set (an SSH tunnel's local
-/// endpoint) it replaces the configured host/port, and certificate hostname
-/// verification is relaxed to "require" since the client is dialing localhost.
+/// Build a connection URL. When `addr_override` is set it replaces the
+/// configured host/port with an SSH tunnel's local endpoint. Full hostname
+/// verification cannot be preserved through that endpoint, so reject the
+/// combination instead of silently weakening the user's TLS policy.
 pub fn build_url_with(
     cfg: &ConnectionConfig,
     addr_override: Option<(&str, u16)>,
 ) -> AppResult<String> {
-    // Through a tunnel we connect to 127.0.0.1, so a cert's hostname can never
-    // match — downgrade verify-full to encrypt-only there.
-    let ssl = match (ssl_mode_of(cfg), addr_override.is_some()) {
-        (Some(SslMode::VerifyFull), true) => Some(SslMode::Require),
-        (other, _) => other,
-    };
+    let ssl = ssl_mode_of(cfg);
+    if addr_override.is_some() && ssl == Some(SslMode::VerifyFull) {
+        return Err(AppError::msg(
+            "verify-full TLS cannot be used through an SSH tunnel because the client connects to localhost; choose require explicitly or connect directly",
+        ));
+    }
     match cfg.driver {
         DriverKind::Sqlite => {
             let path = nonempty(cfg.file_path.as_deref())
@@ -87,16 +87,15 @@ pub fn build_url_with(
                 port,
                 url_enc(db)
             );
-            // SQLx defaults PostgreSQL to `prefer`, so omitting sslmode would
-            // silently disagree with the UI's "disable" default. Always make
-            // the effective mode explicit.
-            let v = match ssl {
-                Some(SslMode::Require) => "require",
-                Some(SslMode::VerifyFull) => "verify-full",
-                None => "disable",
-            };
-            url.push_str("?sslmode=");
-            url.push_str(v);
+            if let Some(mode) = ssl {
+                let v = match mode {
+                    SslMode::Disable => "disable",
+                    SslMode::Require => "require",
+                    SslMode::VerifyFull => "verify-full",
+                };
+                url.push_str("?sslmode=");
+                url.push_str(v);
+            }
             Ok(url)
         }
         DriverKind::Mysql => {
@@ -118,16 +117,15 @@ pub fn build_url_with(
                 port,
                 url_enc(db)
             );
-            // SQLx defaults MySQL to `PREFERRED`; use `DISABLED` rather than
-            // relying on that default when the UI selected (or defaulted to)
-            // plaintext.
-            let v = match ssl {
-                Some(SslMode::Require) => "REQUIRED",
-                Some(SslMode::VerifyFull) => "VERIFY_IDENTITY",
-                None => "DISABLED",
-            };
-            url.push_str("?ssl-mode=");
-            url.push_str(v);
+            if let Some(mode) = ssl {
+                let v = match mode {
+                    SslMode::Disable => "DISABLED",
+                    SslMode::Require => "REQUIRED",
+                    SslMode::VerifyFull => "VERIFY_IDENTITY",
+                };
+                url.push_str("?ssl-mode=");
+                url.push_str(v);
+            }
             Ok(url)
         }
         DriverKind::Redis => {
@@ -154,11 +152,14 @@ pub fn build_url_with(
             };
             // rediss:// negotiates TLS; "#insecure" skips cert verification.
             let (scheme, frag) = match ssl {
-                None => ("redis", ""),
+                None | Some(SslMode::Disable) => ("redis", ""),
                 Some(SslMode::Require) => ("rediss", "#insecure"),
                 Some(SslMode::VerifyFull) => ("rediss", ""),
             };
-            Ok(format!("{}://{}{}:{}/{}{}", scheme, auth, host, port, db_idx, frag))
+            Ok(format!(
+                "{}://{}{}:{}/{}{}",
+                scheme, auth, host, port, db_idx, frag
+            ))
         }
     }
 }
@@ -184,15 +185,9 @@ fn encode_sqlite_path(p: &str) -> String {
     let mut out = String::with_capacity(p.len());
     for b in p.bytes() {
         match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'/'
-            | b':'
-            | b'.'
-            | b'-'
-            | b'_'
-            | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }
@@ -292,14 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn build_url_tunnel_override_relaxes_verify_full() {
+    fn build_url_tunnel_override_rejects_verify_full() {
         let mut c = base_cfg(DriverKind::Postgres);
         c.username = Some("u".into());
         c.host = Some("db.internal".into());
         c.ssl_mode = Some("verify-full".into());
-        let url = build_url_with(&c, Some(("127.0.0.1", 54321))).unwrap();
-        assert!(url.contains("@127.0.0.1:54321/"), "{url}");
-        assert!(url.ends_with("?sslmode=require"), "{url}");
+        let err = build_url_with(&c, Some(("127.0.0.1", 54321))).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot be used through an SSH tunnel"));
     }
 
     #[test]
@@ -370,11 +366,9 @@ mod tests {
     fn build_url_postgres_defaults() {
         let mut c = base_cfg(DriverKind::Postgres);
         c.username = Some("me".into());
-        // The UI's default is plaintext, so absence of a persisted value must
-        // still override SQLx's `prefer` default.
         assert_eq!(
             build_url(&c).unwrap(),
-            "postgres://me:@localhost:5432/postgres?sslmode=disable"
+            "postgres://me:@localhost:5432/postgres"
         );
     }
 
@@ -387,10 +381,7 @@ mod tests {
         c.username = Some("me".into());
         c.password = Some("secret".into());
         let url = build_url(&c).unwrap();
-        assert_eq!(
-            url,
-            "postgres://me:secret@db.example.com:6543/mydb?sslmode=disable"
-        );
+        assert_eq!(url, "postgres://me:secret@db.example.com:6543/mydb");
     }
 
     #[test]
@@ -413,10 +404,7 @@ mod tests {
     fn build_url_mysql_defaults() {
         let mut c = base_cfg(DriverKind::Mysql);
         c.username = Some("root".into());
-        assert_eq!(
-            build_url(&c).unwrap(),
-            "mysql://root:@localhost:3306/?ssl-mode=DISABLED"
-        );
+        assert_eq!(build_url(&c).unwrap(), "mysql://root:@localhost:3306/");
     }
 
     #[test]

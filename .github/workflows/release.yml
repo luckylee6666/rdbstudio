@@ -22,9 +22,16 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to package (for example v0.1.3)"
+        required: true
+        type: string
 
 jobs:
   publish-tauri:
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     permissions:
       contents: write
     strategy:
@@ -43,6 +50,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: pnpm/action-setup@v3
         with:
@@ -73,6 +82,12 @@ jobs:
       - name: Type-check
         run: pnpm exec tsc --noEmit
 
+      - name: Run frontend tests
+        run: pnpm test
+
+      - name: Verify release version
+        run: pnpm check:release-version
+
       - name: Run Rust tests
         run: cd src-tauri && cargo test --no-default-features
 
@@ -94,10 +109,10 @@ jobs:
           # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "rdbstudio ${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "rdbstudio ${{ env.RELEASE_TAG }}"
           releaseBody: |
-            ## rdbstudio ${{ github.ref_name }}
+            ## rdbstudio ${{ env.RELEASE_TAG }}
 
             > **Unsigned build** — first launch needs an extra step:
             > - **macOS (arm64)**: 双击会提示"无法验证…是否包含恶意软件" →
@@ -112,5 +127,5 @@ jobs:
           # Auto-detect pre-releases by tag suffix so v0.1.0-rc.1 doesn't get
           # marked as a stable release. Add more markers (-pre, -dev, ...) here
           # if we adopt them.
-          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-rc') || contains(env.RELEASE_TAG, '-beta') || contains(env.RELEASE_TAG, '-alpha') }}
           args: ${{ matrix.args }}

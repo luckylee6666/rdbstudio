@@ -13,7 +13,7 @@ export interface ConnectionConfig {
   pinned?: boolean;
   /** Optional sidebar group label. Empty/undefined = ungrouped. */
   group?: string | null;
-  /** TLS mode for PG/MySQL/Redis: "disable" | "require" | "verify-full". */
+  /** TLS mode; null keeps the driver's legacy/default negotiation behavior. */
   ssl_mode?: string | null;
   /** Safety switch: all writes (DML/DDL, grid edits, import) rejected server-side. */
   read_only?: boolean;
@@ -254,4 +254,3 @@ export interface Snippet {
   sql: string;
   description?: string;
 }
-
