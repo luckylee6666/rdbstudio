@@ -6,6 +6,7 @@ pub mod model;
 mod secret;
 mod state;
 mod store;
+mod storage;
 
 use history::HistoryStore;
 use state::AppState;
@@ -17,7 +18,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().expect("no app data dir");
+            let legacy_data_dir = app.path().app_data_dir().expect("no app data dir");
+            let home_dir = app.path().home_dir().expect("no home dir");
+            let data_dir = storage::prepare_data_dir(&home_dir, &legacy_data_dir)?;
             let store = ConnectionStore::load(&data_dir)?;
             let history = HistoryStore::load(&data_dir)?;
             let snippets = store::SnippetStore::load(&data_dir)?;
