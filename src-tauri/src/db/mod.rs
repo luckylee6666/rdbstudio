@@ -32,8 +32,8 @@ pub fn target_addr(cfg: &ConnectionConfig) -> (String, u16) {
     (host, port)
 }
 
-/// Normalized TLS mode. `verify` controls whether the server certificate and
-/// hostname are checked; when `None` the connection is plaintext.
+/// Normalized TLS modes that request encryption. An omitted or `disable` mode
+/// is handled explicitly as plaintext when building SQL connection URLs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
     Require,
@@ -87,14 +87,16 @@ pub fn build_url_with(
                 port,
                 url_enc(db)
             );
-            if let Some(mode) = ssl {
-                let v = match mode {
-                    SslMode::Require => "require",
-                    SslMode::VerifyFull => "verify-full",
-                };
-                url.push_str("?sslmode=");
-                url.push_str(v);
-            }
+            // SQLx defaults PostgreSQL to `prefer`, so omitting sslmode would
+            // silently disagree with the UI's "disable" default. Always make
+            // the effective mode explicit.
+            let v = match ssl {
+                Some(SslMode::Require) => "require",
+                Some(SslMode::VerifyFull) => "verify-full",
+                None => "disable",
+            };
+            url.push_str("?sslmode=");
+            url.push_str(v);
             Ok(url)
         }
         DriverKind::Mysql => {
@@ -116,14 +118,16 @@ pub fn build_url_with(
                 port,
                 url_enc(db)
             );
-            if let Some(mode) = ssl {
-                let v = match mode {
-                    SslMode::Require => "REQUIRED",
-                    SslMode::VerifyFull => "VERIFY_IDENTITY",
-                };
-                url.push_str("?ssl-mode=");
-                url.push_str(v);
-            }
+            // SQLx defaults MySQL to `PREFERRED`; use `DISABLED` rather than
+            // relying on that default when the UI selected (or defaulted to)
+            // plaintext.
+            let v = match ssl {
+                Some(SslMode::Require) => "REQUIRED",
+                Some(SslMode::VerifyFull) => "VERIFY_IDENTITY",
+                None => "DISABLED",
+            };
+            url.push_str("?ssl-mode=");
+            url.push_str(v);
             Ok(url)
         }
         DriverKind::Redis => {
@@ -266,11 +270,25 @@ mod tests {
     }
 
     #[test]
-    fn build_url_disable_is_plaintext() {
+    fn build_url_postgres_sslmode_disable_is_explicit() {
         let mut c = base_cfg(DriverKind::Postgres);
         c.username = Some("u".into());
         c.ssl_mode = Some("disable".into());
-        assert!(!build_url(&c).unwrap().contains("sslmode"));
+        assert!(
+            build_url(&c).unwrap().ends_with("?sslmode=disable"),
+            "Postgres must not fall back to SQLx's default `prefer` mode"
+        );
+    }
+
+    #[test]
+    fn build_url_mysql_sslmode_disable_is_explicit() {
+        let mut c = base_cfg(DriverKind::Mysql);
+        c.username = Some("u".into());
+        c.ssl_mode = Some("disable".into());
+        assert!(
+            build_url(&c).unwrap().ends_with("?ssl-mode=DISABLED"),
+            "MySQL must not fall back to SQLx's default `PREFERRED` mode"
+        );
     }
 
     #[test]
@@ -352,9 +370,12 @@ mod tests {
     fn build_url_postgres_defaults() {
         let mut c = base_cfg(DriverKind::Postgres);
         c.username = Some("me".into());
-        let url = build_url(&c).unwrap();
-        // default port 5432, default host localhost, default db postgres
-        assert_eq!(url, "postgres://me:@localhost:5432/postgres");
+        // The UI's default is plaintext, so absence of a persisted value must
+        // still override SQLx's `prefer` default.
+        assert_eq!(
+            build_url(&c).unwrap(),
+            "postgres://me:@localhost:5432/postgres?sslmode=disable"
+        );
     }
 
     #[test]
@@ -366,7 +387,10 @@ mod tests {
         c.username = Some("me".into());
         c.password = Some("secret".into());
         let url = build_url(&c).unwrap();
-        assert_eq!(url, "postgres://me:secret@db.example.com:6543/mydb");
+        assert_eq!(
+            url,
+            "postgres://me:secret@db.example.com:6543/mydb?sslmode=disable"
+        );
     }
 
     #[test]
@@ -389,8 +413,10 @@ mod tests {
     fn build_url_mysql_defaults() {
         let mut c = base_cfg(DriverKind::Mysql);
         c.username = Some("root".into());
-        let url = build_url(&c).unwrap();
-        assert_eq!(url, "mysql://root:@localhost:3306/");
+        assert_eq!(
+            build_url(&c).unwrap(),
+            "mysql://root:@localhost:3306/?ssl-mode=DISABLED"
+        );
     }
 
     #[test]

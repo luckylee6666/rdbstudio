@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useId } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -19,6 +19,7 @@ export function Modal({
   children,
   footer,
   width = 520,
+  closeLabel = "Close",
 }: {
   open: boolean;
   onClose: () => void;
@@ -26,7 +27,10 @@ export function Modal({
   children: React.ReactNode;
   footer?: React.ReactNode;
   width?: number;
+  closeLabel?: string;
 }) {
+  const titleId = useId();
+
   useEffect(() => {
     if (!open) return;
     openModalCount++;
@@ -50,15 +54,22 @@ export function Modal({
       />
       <div
         className={cn(
-          "relative flex max-h-[88vh] flex-col overflow-hidden rounded-xl border border-border/80",
+          "relative flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden rounded-xl border border-border/80 sm:max-h-[88dvh]",
           "bg-surface-elevated shadow-elevated"
         )}
-        style={{ width }}
+        style={{ width, maxWidth: "calc(100vw - 2rem)" }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
       >
         <div className="flex items-center justify-between border-b border-border/60 px-5 py-3">
-          <h2 className="text-[14px] font-semibold tracking-tight">{title}</h2>
+          <h2 id={titleId} className="text-[14px] font-semibold tracking-tight">
+            {title}
+          </h2>
           <button
+            type="button"
             onClick={onClose}
+            aria-label={`${closeLabel}: ${title}`}
             className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <X className="h-4 w-4" />

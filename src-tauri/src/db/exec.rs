@@ -795,19 +795,20 @@ pub fn decode_mysql(rows: Vec<sqlx::mysql::MySqlRow>, start: Instant) -> QueryRe
 fn mysql_val(r: &sqlx::mysql::MySqlRow, i: usize) -> Json {
     let ty = r.columns()[i].type_info().name().to_uppercase();
     match ty.as_str() {
-        "TINYINT" | "BOOLEAN" | "BOOL" => try_bool(r, i)
-            .or_else(|| try_i64(r, i))
+        "BOOLEAN" | "BOOL" => try_bool(r, i)
+            .or_else(|| try_mysql_i64(r, i))
             .unwrap_or(Json::Null),
-        "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => {
-            try_i64(r, i).unwrap_or(Json::Null)
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => {
+            try_mysql_i64(r, i).unwrap_or(Json::Null)
         }
+        ty if mysql_uses_u64(ty) => try_u64(r, i).unwrap_or(Json::Null),
         "FLOAT" | "DOUBLE" => try_f64(r, i).unwrap_or(Json::Null),
         "DECIMAL" | "NUMERIC" => try_str(r, i)
             .or_else(|| try_f64(r, i))
             .unwrap_or(Json::Null),
         "CHAR" | "VARCHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM"
         | "SET" => try_str(r, i).unwrap_or(Json::Null),
-        "DATE" | "TIME" | "YEAR" | "DATETIME" | "TIMESTAMP" => r
+        "DATE" | "TIME" | "DATETIME" | "TIMESTAMP" => r
             .try_get::<Option<chrono::NaiveDateTime>, _>(i)
             .ok()
             .flatten()
@@ -823,10 +824,24 @@ fn mysql_val(r: &sqlx::mysql::MySqlRow, i: usize) -> Json {
             try_bytes_b64(r, i).unwrap_or(Json::Null)
         }
         _ => try_str(r, i)
-            .or_else(|| try_i64(r, i))
+            .or_else(|| try_mysql_i64(r, i))
             .or_else(|| try_f64(r, i))
             .unwrap_or(Json::Null),
     }
+}
+
+fn mysql_uses_u64(ty: &str) -> bool {
+    matches!(
+        ty,
+        "TINYINT UNSIGNED"
+            | "SMALLINT UNSIGNED"
+            | "MEDIUMINT UNSIGNED"
+            | "INT UNSIGNED"
+            | "INTEGER UNSIGNED"
+            | "BIGINT UNSIGNED"
+            | "YEAR"
+            | "BIT"
+    )
 }
 
 fn try_i64<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
@@ -838,6 +853,45 @@ where
         .ok()
         .flatten()
         .map(Json::from)
+}
+
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// JSON numbers become IEEE-754 doubles in the webview. Preserve large MySQL
+/// integers as decimal strings instead of silently rounding IDs.
+fn json_u64(v: u64) -> Json {
+    if v <= JS_MAX_SAFE_INTEGER {
+        Json::from(v)
+    } else {
+        Json::String(v.to_string())
+    }
+}
+
+fn json_i64(v: i64) -> Json {
+    let max = JS_MAX_SAFE_INTEGER as i64;
+    if (-max..=max).contains(&v) {
+        Json::from(v)
+    } else {
+        Json::String(v.to_string())
+    }
+}
+
+fn try_mysql_i64(r: &sqlx::mysql::MySqlRow, i: usize) -> Option<Json> {
+    r.try_get::<Option<i64>, _>(i)
+        .ok()
+        .flatten()
+        .map(json_i64)
+}
+
+fn try_u64<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
+where
+    u64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    r.try_get::<Option<u64>, _>(i)
+        .ok()
+        .flatten()
+        .map(json_u64)
 }
 
 fn try_f64<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
@@ -917,6 +971,62 @@ fn base64_like(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_unsigned_values_keep_javascript_safe_numbers_numeric() {
+        assert_eq!(json_u64(0), Json::from(0));
+        assert_eq!(
+            json_u64(JS_MAX_SAFE_INTEGER),
+            Json::from(JS_MAX_SAFE_INTEGER)
+        );
+    }
+
+    #[test]
+    fn mysql_unsigned_values_above_javascript_safe_range_stay_exact() {
+        assert_eq!(
+            json_u64(JS_MAX_SAFE_INTEGER + 1),
+            Json::String("9007199254740992".into())
+        );
+        assert_eq!(
+            json_u64(u64::MAX),
+            Json::String("18446744073709551615".into())
+        );
+    }
+
+    #[test]
+    fn mysql_signed_values_outside_javascript_safe_range_stay_exact() {
+        let max = JS_MAX_SAFE_INTEGER as i64;
+        assert_eq!(json_i64(max), Json::from(max));
+        assert_eq!(json_i64(-max), Json::from(-max));
+        assert_eq!(
+            json_i64(max + 1),
+            Json::String("9007199254740992".into())
+        );
+        assert_eq!(
+            json_i64(-max - 1),
+            Json::String("-9007199254740992".into())
+        );
+        assert_eq!(json_i64(i64::MAX), Json::String(i64::MAX.to_string()));
+        assert_eq!(json_i64(i64::MIN), Json::String(i64::MIN.to_string()));
+    }
+
+    #[test]
+    fn mysql_unsigned_integer_types_use_u64_decoder() {
+        for ty in [
+            "TINYINT UNSIGNED",
+            "SMALLINT UNSIGNED",
+            "MEDIUMINT UNSIGNED",
+            "INT UNSIGNED",
+            "INTEGER UNSIGNED",
+            "BIGINT UNSIGNED",
+            "YEAR",
+            "BIT",
+        ] {
+            assert!(mysql_uses_u64(ty), "{ty}");
+        }
+        assert!(!mysql_uses_u64("BIGINT"));
+        assert!(!mysql_uses_u64("BOOLEAN"));
+    }
 
     #[test]
     fn is_readonly_recognizes_select() {

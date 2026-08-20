@@ -192,7 +192,8 @@ export function ConnectionDialog({
       open={open}
       onClose={onClose}
       title={initial ? t("conn.dialog.edit") : t("conn.dialog.new")}
-      width={560}
+      width={620}
+      closeLabel={t("common.close")}
       footer={
         <div className="flex w-full flex-col gap-2">
           {(testing || result) && (
@@ -217,7 +218,7 @@ export function ConnectionDialog({
               })()}
             </div>
           )}
-          <div className="flex items-center justify-end gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button onClick={onTest} disabled={testing || saving}>
               {t("conn.dialog.test")}
             </Button>
@@ -231,10 +232,10 @@ export function ConnectionDialog({
         </div>
       }
     >
-      <div className="space-y-4">
-        <div className="flex items-center gap-3">
+      <div className="space-y-5">
+        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-end gap-3 sm:grid-cols-[auto_minmax(0,1fr)_150px]">
           <DriverBadge driver={cfg.driver} size="md" />
-          <div className="flex-1">
+          <div className="min-w-0">
             <Label>{t("conn.dialog.name")}</Label>
             <Input
               value={cfg.name}
@@ -242,7 +243,7 @@ export function ConnectionDialog({
               placeholder={t("conn.dialog.name.placeholder")}
             />
           </div>
-          <div className="w-[140px]">
+          <div className="col-start-2 min-w-0 sm:col-start-auto">
             <Label>{t("conn.dialog.driver")}</Label>
             <Select
               value={cfg.driver}
@@ -262,6 +263,7 @@ export function ConnectionDialog({
             <Label required>{t("conn.dialog.file")}</Label>
             <div className="flex gap-2">
               <Input
+                className="min-w-0 flex-1"
                 value={cfg.file_path ?? ""}
                 onChange={(e) => update("file_path", e.target.value)}
                 placeholder={t("conn.dialog.file.placeholder")}
@@ -274,8 +276,8 @@ export function ConnectionDialog({
           </div>
         ) : isRedis ? (
           <>
-            <div className="grid grid-cols-[1fr_120px_120px] gap-3">
-              <div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_120px_120px]">
+              <div className="min-w-0">
                 <Label required>{t("conn.dialog.host")}</Label>
                 <Input
                   value={cfg.host ?? ""}
@@ -304,8 +306,8 @@ export function ConnectionDialog({
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="min-w-0">
                 <Label hint={t("conn.dialog.redis.acl_user_hint")}>
                   {t("conn.dialog.redis.acl_user")}
                 </Label>
@@ -315,7 +317,7 @@ export function ConnectionDialog({
                   placeholder="default"
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <Label hint={initial ? t("conn.dialog.password.hint.edit") : t("conn.dialog.password.hint")}>
                   {t("conn.dialog.password")}
                 </Label>
@@ -330,8 +332,8 @@ export function ConnectionDialog({
           </>
         ) : (
           <>
-            <div className="grid grid-cols-[1fr_120px] gap-3">
-              <div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
+              <div className="min-w-0">
                 <Label required>{t("conn.dialog.host")}</Label>
                 <Input
                   value={cfg.host ?? ""}
@@ -349,8 +351,8 @@ export function ConnectionDialog({
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="min-w-0">
                 <Label>{t("conn.dialog.database")}</Label>
                 <Input
                   value={cfg.database ?? ""}
@@ -358,7 +360,7 @@ export function ConnectionDialog({
                   placeholder={cfg.driver === "postgres" ? "postgres" : ""}
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <Label required>{t("conn.dialog.username")}</Label>
                 <Input
                   value={cfg.username ?? ""}
@@ -381,33 +383,35 @@ export function ConnectionDialog({
         )}
 
         {!isSqlite && (
-          <div className="space-y-3 rounded-lg border border-border/70 bg-surface-muted/20 p-3">
-            <div className="grid grid-cols-[120px_1fr] items-center gap-3">
-              <Label>{t("conn.dialog.ssl")}</Label>
-              <Select
-                value={cfg.ssl_mode ?? "disable"}
-                onChange={(e) => update("ssl_mode", e.target.value)}
-              >
-                <option value="disable">{t("conn.ssl.disable")}</option>
-                <option value="require">{t("conn.ssl.require")}</option>
-                <option value="verify-full">{t("conn.ssl.verify")}</option>
-              </Select>
-            </div>
+          <div className="space-y-3 rounded-lg border border-border/70 bg-surface-muted/20 p-3.5">
+            <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
+              <div className="min-w-0">
+                <Label>{t("conn.dialog.ssl")}</Label>
+                <Select
+                  value={cfg.ssl_mode ?? "disable"}
+                  onChange={(e) => update("ssl_mode", e.target.value)}
+                >
+                  <option value="disable">{t("conn.ssl.disable")}</option>
+                  <option value="require">{t("conn.ssl.require")}</option>
+                  <option value="verify-full">{t("conn.ssl.verify")}</option>
+                </Select>
+              </div>
 
-            <label className="flex cursor-pointer items-center gap-2 text-[12.5px]">
-              <input
-                type="checkbox"
-                className="h-3.5 w-3.5 accent-brand"
-                checked={!!cfg.ssh}
-                onChange={(e) => toggleSsh(e.target.checked)}
-              />
-              {t("conn.ssh.enable")}
-            </label>
+              <label className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-border/70 bg-surface px-3 text-[12.5px] transition-colors hover:bg-accent/50">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 shrink-0 accent-brand"
+                  checked={!!cfg.ssh}
+                  onChange={(e) => toggleSsh(e.target.checked)}
+                />
+                <span className="min-w-0">{t("conn.ssh.enable")}</span>
+              </label>
+            </div>
 
             {cfg.ssh && (
               <div className="space-y-3 border-t border-border/60 pt-3">
-                <div className="grid grid-cols-[1fr_100px] gap-3">
-                  <div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_100px]">
+                  <div className="min-w-0">
                     <Label required>{t("conn.ssh.host")}</Label>
                     <Input
                       value={cfg.ssh.host}
@@ -426,15 +430,15 @@ export function ConnectionDialog({
                     />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="min-w-0">
                     <Label required>{t("conn.ssh.user")}</Label>
                     <Input
                       value={cfg.ssh.username}
                       onChange={(e) => updateSsh({ username: e.target.value })}
                     />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <Label>{t("conn.ssh.auth")}</Label>
                     <Select
                       value={cfg.ssh.auth ?? "password"}
@@ -451,6 +455,7 @@ export function ConnectionDialog({
                       <Label>{t("conn.ssh.key")}</Label>
                       <div className="flex gap-2">
                         <Input
+                          className="min-w-0 flex-1"
                           value={cfg.ssh.key_path ?? ""}
                           onChange={(e) => updateSsh({ key_path: e.target.value })}
                           placeholder="~/.ssh/id_ed25519"
@@ -497,45 +502,51 @@ export function ConnectionDialog({
           </div>
         )}
 
-        <div>
-          <Label>{t("conn.dialog.group")}</Label>
-          <Select
-            value={cfg.group ?? ""}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === NEW_GROUP_SENTINEL) {
-                setNewGroupOpen(true);
-                return;
-              }
-              update("group", v || null);
-            }}
-          >
-            <option value="">{t("conn.ungrouped")}</option>
-            {groupOptions.map((g) => (
-              <option key={g} value={g}>
-                {g}
+        <div className="grid grid-cols-1 items-end gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="min-w-0">
+            <Label>{t("conn.dialog.group")}</Label>
+            <Select
+              value={cfg.group ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === NEW_GROUP_SENTINEL) {
+                  setNewGroupOpen(true);
+                  return;
+                }
+                update("group", v || null);
+              }}
+            >
+              <option value="">{t("conn.ungrouped")}</option>
+              {groupOptions.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+              <option value={NEW_GROUP_SENTINEL}>
+                + {t("conn.new_group")}
               </option>
-            ))}
-            <option value={NEW_GROUP_SENTINEL}>
-              + {t("conn.new_group")}
-            </option>
-          </Select>
-        </div>
+            </Select>
+          </div>
 
-        <div className="grid grid-cols-2 items-start gap-3">
-          <div>
+          <div className="min-w-0 sm:min-w-[220px]">
             <Label>{t("conn.dialog.color")}</Label>
-            <div className="flex items-center gap-1.5 pt-1">
+            <div
+              className="flex h-9 items-center gap-2"
+              role="group"
+              aria-label={t("conn.dialog.color")}
+            >
               <button
                 type="button"
                 onClick={() => update("color", null)}
                 title={t("conn.dialog.color.none")}
+                aria-label={t("conn.dialog.color.none")}
+                aria-pressed={!cfg.color}
                 className={cn(
-                  "grid h-5 w-5 place-items-center rounded-full border border-border/80 text-muted-foreground hover:border-foreground/40",
+                  "grid h-6 w-6 place-items-center rounded-full border border-border/80 text-muted-foreground transition-colors hover:border-foreground/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
                   !cfg.color && "ring-2 ring-brand/70 ring-offset-2 ring-offset-surface"
                 )}
               >
-                <Ban className="h-3 w-3" />
+                <Ban className="h-3.5 w-3.5" />
               </button>
               {Object.entries(CONN_COLORS).map(([token, hex]) => (
                 <button
@@ -543,8 +554,10 @@ export function ConnectionDialog({
                   type="button"
                   onClick={() => update("color", token)}
                   title={token}
+                  aria-label={token}
+                  aria-pressed={cfg.color === token}
                   className={cn(
-                    "h-5 w-5 rounded-full border border-black/20 transition-transform hover:scale-110",
+                    "h-6 w-6 rounded-full border border-black/20 transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
                     cfg.color === token &&
                       "ring-2 ring-brand/70 ring-offset-2 ring-offset-surface"
                   )}
@@ -553,21 +566,34 @@ export function ConnectionDialog({
               ))}
             </div>
           </div>
-          <div>
-            <Label hint={t("conn.dialog.read_only.hint")}>
-              {t("conn.dialog.read_only")}
-            </Label>
-            <label className="flex h-8 cursor-pointer items-center gap-2 text-[12.5px]">
-              <input
-                type="checkbox"
-                className="h-3.5 w-3.5 accent-brand"
-                checked={!!cfg.read_only}
-                onChange={(e) => update("read_only", e.target.checked)}
-              />
-              {t("conn.dialog.read_only.label")}
-            </label>
-          </div>
         </div>
+
+        <label
+          className={cn(
+            "flex cursor-pointer items-start gap-3 rounded-lg border border-border/70 bg-surface/40 px-3.5 py-3 transition-colors hover:bg-accent/40",
+            cfg.read_only && "border-brand/40 bg-brand/[0.05]"
+          )}
+        >
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-brand"
+            checked={!!cfg.read_only}
+            onChange={(e) => update("read_only", e.target.checked)}
+          />
+          <span className="min-w-0">
+            <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="text-[12.5px] font-semibold">
+                {t("conn.dialog.read_only")}
+              </span>
+              <span className="text-[12px] text-muted-foreground">
+                {t("conn.dialog.read_only.label")}
+              </span>
+            </span>
+            <span className="mt-1 block text-[11.5px] leading-relaxed text-muted-foreground/80">
+              {t("conn.dialog.read_only.hint")}
+            </span>
+          </span>
+        </label>
       </div>
 
       <PromptDialog

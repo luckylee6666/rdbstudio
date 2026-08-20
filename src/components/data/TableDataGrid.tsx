@@ -59,6 +59,26 @@ const MIN_COL_WIDTH = 80;
 const DEFAULT_COL_WIDTH = 160;
 const ROW_HEIGHT = 28;
 
+const INTEGER_TYPE = /\b(?:tinyint|smallint|mediumint|bigint|int|integer|int2|int4|int8)\b/i;
+const NUMERIC_TYPE = /int|numeric|decimal|float|double|real/i;
+
+export function parseGridCellInput(
+  text: string,
+  column: Pick<ColumnInfo, "data_type" | "nullable">
+): unknown {
+  if (text === "" && column.nullable) return null;
+  if (text === "" || !NUMERIC_TYPE.test(column.data_type)) return text;
+
+  const n = Number(text);
+  if (Number.isNaN(n)) return text;
+  // Large database integers arrive as strings so JSON/WebView transport does
+  // not round them. Keep them as strings when the user commits an edit too.
+  if (INTEGER_TYPE.test(column.data_type) && !Number.isSafeInteger(n)) {
+    return text;
+  }
+  return n;
+}
+
 export function TableDataGrid({
   columns,
   rows,
@@ -425,9 +445,7 @@ function EditableCell({
 }) {
   const t = useT();
   const isNull = value === null || value === undefined;
-  const isNumeric = /int|numeric|decimal|float|double|real/i.test(
-    column.data_type
-  );
+  const isNumeric = NUMERIC_TYPE.test(column.data_type);
   const display = isNull
     ? "NULL"
     : typeof value === "string"
@@ -441,13 +459,7 @@ function EditableCell({
       <CellInput
         initial={isNull ? "" : display}
         width={width}
-        onCommit={(text) => {
-          if (text === "" && column.nullable) onCommit(null);
-          else if (isNumeric && text !== "") {
-            const n = Number(text);
-            onCommit(Number.isNaN(n) ? text : n);
-          } else onCommit(text);
-        }}
+        onCommit={(text) => onCommit(parseGridCellInput(text, column))}
         onCancel={onStopEdit}
       />
     );

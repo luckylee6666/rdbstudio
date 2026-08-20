@@ -319,7 +319,7 @@ const en: Dict = {
   "conn.dialog.password": "Password",
   "conn.dialog.password.hint": "stored in OS keychain",
   "conn.dialog.password.hint.edit": "leave blank to keep the saved password",
-  "conn.dialog.password.placeholder.keep": "(unchanged — type to replace)",
+  "conn.dialog.password.placeholder.keep": "(unchanged - type to replace)",
   "conn.dialog.file": "Database file",
   "conn.dialog.file.placeholder": "/path/to/database.db",
   "conn.dialog.test": "Test",
@@ -329,7 +329,7 @@ const en: Dict = {
   "conn.dialog.read_only": "Read-only mode",
   "conn.dialog.read_only.label": "Block all writes",
   "conn.dialog.read_only.hint":
-    "Rejects every write server-side: DML/DDL in the editor, grid edits, ALTER/DROP, CSV import, Redis write commands.",
+    "rdbstudio blocks editor DML/DDL, grid edits, ALTER/DROP, CSV imports, and Redis write commands.",
   "conn.badge.read_only": "read-only",
   "conn.dialog.group.placeholder": "Optional, e.g. Prod / Staging",
   "conn.dialog.ssl": "SSL / TLS",
@@ -875,7 +875,7 @@ const zh: Dict = {
   "conn.dialog.read_only": "只读模式",
   "conn.dialog.read_only.label": "拦截所有写操作",
   "conn.dialog.read_only.hint":
-    "服务端拒绝一切写入：编辑器 DML/DDL、网格编辑、ALTER/DROP、CSV 导入、Redis 写命令。",
+    "rdbstudio 会拦截编辑器 DML/DDL、网格编辑、ALTER/DROP、CSV 导入及 Redis 写命令。",
   "conn.badge.read_only": "只读",
   "conn.dialog.group.placeholder": "可选，如 生产 / 测试",
   "conn.dialog.ssl": "SSL / TLS",
