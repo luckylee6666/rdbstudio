@@ -102,6 +102,47 @@ async fn import_csv_append_mode() {
 }
 
 #[tokio::test]
+async fn import_csv_column_map_can_skip_source_columns() {
+    let pool = common::mem_pool().await;
+    let sqlite = match &pool {
+        rdbstudio_lib::db::pool::DbPool::Sqlite(p) => p,
+        _ => unreachable!(),
+    };
+    sqlx::query("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)")
+        .execute(sqlite)
+        .await
+        .expect("create table");
+
+    let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+    let path = tmp.path().to_path_buf();
+    drop(tmp);
+    std::fs::write(
+        &path,
+        "source_id,ignored,source_name\n1,unused,Alice\n2,unused,Bob\n",
+    )
+    .expect("write csv");
+
+    let opts = ImportCsvOptions {
+        path: path.to_string_lossy().into_owned(),
+        schema: None,
+        table: "people".into(),
+        delimiter: ',',
+        has_header: true,
+        mode: ImportMode::Append,
+        column_map: Some(vec!["id".into(), "".into(), "name".into()]),
+    };
+    let report = io::import_csv(&pool, &opts).await.expect("import");
+    assert_eq!(report.rows_inserted, 2, "errors={:?}", report.errors);
+    assert!(report.errors.is_empty(), "errors={:?}", report.errors);
+
+    let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM people ORDER BY id")
+        .fetch_all(sqlite)
+        .await
+        .expect("select imported rows");
+    assert_eq!(rows, vec![(1, "Alice".into()), (2, "Bob".into())]);
+}
+
+#[tokio::test]
 async fn export_json_parses_back_as_array() {
     let pool = common::mem_pool().await;
     common::seed_users(&pool).await;

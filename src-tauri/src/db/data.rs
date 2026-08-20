@@ -65,6 +65,14 @@ fn default_limit() -> u32 {
     100
 }
 
+/// Bound renderer-provided page sizes before interpolating them into a query.
+/// Export uses the same effective limit so its offset loop cannot stop early.
+pub(crate) const MAX_TABLE_PAGE_SIZE: u32 = 5_000;
+
+pub(crate) fn bounded_table_limit(limit: u32) -> u32 {
+    limit.clamp(1, MAX_TABLE_PAGE_SIZE)
+}
+
 pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
     match driver {
         DriverKind::Mysql => format!("`{}`", ident.replace('`', "``")),
@@ -277,9 +285,10 @@ pub async fn fetch(pool: &DbPool, q: &TableQuery) -> AppResult<QueryResult> {
         ),
         None => String::new(),
     };
+    let limit = bounded_table_limit(q.limit);
     let sql = format!(
         "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
-        target, w.sql, order, q.limit, q.offset
+        target, w.sql, order, limit, q.offset
     );
     let start = Instant::now();
     let rows = run_with_binds(pool, &sql, &w.values).await?;
@@ -801,6 +810,13 @@ fn sql_string_literal(driver: DriverKind, s: &str) -> String {
 mod tests {
     use super::*;
     use crate::model::DriverKind;
+
+    #[test]
+    fn table_page_limit_is_bounded() {
+        assert_eq!(bounded_table_limit(0), 1);
+        assert_eq!(bounded_table_limit(100), 100);
+        assert_eq!(bounded_table_limit(u32::MAX), MAX_TABLE_PAGE_SIZE);
+    }
 
     #[test]
     fn quote_ident_mysql_uses_backticks_and_escapes() {

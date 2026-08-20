@@ -5,6 +5,7 @@ use crate::error::{AppError, AppResult};
 use crate::model::DriverKind;
 use serde::{Deserialize, Serialize};
 use sqlx::Arguments;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -63,6 +64,7 @@ pub async fn export_table(
     let mut w = BufWriter::new(file);
 
     let mut offset: u32 = 0;
+    let batch_size = data::bounded_table_limit(opts.batch_size);
     let mut rows: u64 = 0;
     let mut first = true;
 
@@ -99,7 +101,7 @@ pub async fn export_table(
         let q = TableQuery {
             schema: schema.map(String::from),
             table: table.to_string(),
-            limit: opts.batch_size,
+            limit: batch_size,
             offset,
             order_by: order_by.clone(),
             filters: vec![],
@@ -115,10 +117,12 @@ pub async fn export_table(
         }
         write_rows(&mut w, &r, opts, rows, schema, table, pool.driver())?;
         rows += r.rows.len() as u64;
-        if r.rows.len() < opts.batch_size as usize {
+        if r.rows.len() < batch_size as usize {
             break;
         }
-        offset += opts.batch_size;
+        offset = offset
+            .checked_add(batch_size)
+            .ok_or_else(|| AppError::msg("export offset exceeds supported range"))?;
     }
 
     if let ExportFormat::Json = opts.format { w.write_all(b"\n]\n")? }
@@ -324,10 +328,30 @@ pub async fn import_csv(
         .flexible(true)
         .from_path(Path::new(&opts.path))?;
 
-    let columns: Vec<String> = if let Some(m) = &opts.column_map {
-        m.clone()
+    let (columns, source_indices): (Vec<String>, Vec<usize>) = if let Some(m) = &opts.column_map {
+        let mut seen = HashSet::new();
+        let mut columns = Vec::new();
+        let mut source_indices = Vec::new();
+        for (index, target) in m.iter().enumerate() {
+            // The import dialog represents "skip this CSV column" as an empty
+            // target. Keep the original source index for every retained field.
+            if target.is_empty() {
+                continue;
+            }
+            if !seen.insert(target.clone()) {
+                return Err(AppError::msg(format!(
+                    "target column is mapped more than once: {}",
+                    target
+                )));
+            }
+            columns.push(target.clone());
+            source_indices.push(index);
+        }
+        (columns, source_indices)
     } else if opts.has_header {
-        rdr.headers()?.iter().map(|s| s.to_string()).collect()
+        let columns: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        let source_indices = (0..columns.len()).collect();
+        (columns, source_indices)
     } else {
         return Err(AppError::msg(
             "CSV has no headers and no column_map provided",
@@ -388,7 +412,7 @@ pub async fn import_csv(
                 if batch.is_empty() {
                     first_row = rows_read;
                 }
-                batch.push(rec);
+                batch.push(project_csv_record(&rec, &source_indices));
                 if batch.len() >= rows_per_batch {
                     flush_batch_sqlite(
                         &mut tx,
@@ -444,7 +468,7 @@ pub async fn import_csv(
                 if batch.is_empty() {
                     first_row = rows_read;
                 }
-                batch.push(rec);
+                batch.push(project_csv_record(&rec, &source_indices));
                 if batch.len() >= rows_per_batch {
                     flush_batch_pg(
                         &mut tx,
@@ -480,7 +504,9 @@ pub async fn import_csv(
         DbPool::Mysql(p) => {
             let mut tx = p.begin().await?;
             if matches!(opts.mode, ImportMode::TruncateInsert) {
-                sqlx::query(&format!("TRUNCATE TABLE {}", target))
+                // MySQL TRUNCATE implicitly commits, so a later CSV/connection
+                // failure could permanently empty the table despite rollback.
+                sqlx::query(&clear_table_sql(driver, &target))
                     .execute(&mut *tx)
                     .await?;
             }
@@ -500,7 +526,7 @@ pub async fn import_csv(
                 if batch.is_empty() {
                     first_row = rows_read;
                 }
-                batch.push(rec);
+                batch.push(project_csv_record(&rec, &source_indices));
                 if batch.len() >= rows_per_batch {
                     flush_batch_mysql(
                         &mut tx,
@@ -541,6 +567,24 @@ pub async fn import_csv(
         errors,
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+fn project_csv_record(record: &csv::StringRecord, source_indices: &[usize]) -> csv::StringRecord {
+    let mut projected = csv::StringRecord::new();
+    for index in source_indices {
+        projected.push_field(record.get(*index).unwrap_or(""));
+    }
+    projected
+}
+
+fn clear_table_sql(driver: DriverKind, target: &str) -> String {
+    match driver {
+        DriverKind::Postgres => format!("TRUNCATE TABLE {}", target),
+        // SQLite has no TRUNCATE. MySQL's TRUNCATE is DDL and implicitly
+        // commits, so DELETE is required to preserve import rollback safety.
+        DriverKind::Sqlite | DriverKind::Mysql => format!("DELETE FROM {}", target),
+        DriverKind::Redis => String::new(),
+    }
 }
 
 /// Build a multi-row `INSERT INTO t (cols) VALUES (...), (...)` statement with
@@ -704,6 +748,19 @@ mod tests {
         assert_eq!(
             multi_insert_sql("`t`", "`a`", 1, 3, DriverKind::Mysql),
             "INSERT INTO `t` (`a`) VALUES (?), (?), (?)"
+        );
+    }
+
+    #[test]
+    fn clear_table_sql_keeps_mysql_transactional() {
+        assert_eq!(
+            clear_table_sql(DriverKind::Postgres, "\"t\""),
+            "TRUNCATE TABLE \"t\""
+        );
+        assert_eq!(clear_table_sql(DriverKind::Mysql, "`t`"), "DELETE FROM `t`");
+        assert_eq!(
+            clear_table_sql(DriverKind::Sqlite, "\"t\""),
+            "DELETE FROM \"t\""
         );
     }
 

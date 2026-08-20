@@ -189,9 +189,9 @@ fn skip_token(s: &str) -> &str {
     t[bytes..].trim_start()
 }
 
-/// SQLite PRAGMA is a grab-bag: `table_info(t)` is a read, `journal_mode=WAL`
-/// and `wal_checkpoint(...)` mutate. Assignment (`=`) or a known mutating
-/// name is a write; everything else stays a read.
+/// SQLite PRAGMA is a grab-bag: `table_info(t)` is a read, while both
+/// `journal_mode=WAL` and `journal_mode(WAL)` mutate. Fail closed for the
+/// parenthesized form and only allow names whose argument is purely a lookup.
 fn pragma_is_readonly(sql: &str) -> bool {
     let rest = skip_first_keyword(sql).trim_start();
     let name = pragma_name(rest);
@@ -204,7 +204,24 @@ fn pragma_is_readonly(sql: &str) -> bool {
     if MUTATING.contains(&name.as_str()) {
         return false;
     }
-    !pragma_has_assignment(rest)
+    if pragma_has_assignment(rest) {
+        return false;
+    }
+    if pragma_has_argument(rest) {
+        const READ_WITH_ARGUMENT: &[&str] = &[
+            "FOREIGN_KEY_CHECK",
+            "FOREIGN_KEY_LIST",
+            "INDEX_INFO",
+            "INDEX_LIST",
+            "INDEX_XINFO",
+            "INTEGRITY_CHECK",
+            "QUICK_CHECK",
+            "TABLE_INFO",
+            "TABLE_XINFO",
+        ];
+        return READ_WITH_ARGUMENT.contains(&name.as_str());
+    }
+    true
 }
 
 fn pragma_name(s: &str) -> String {
@@ -225,30 +242,32 @@ fn pragma_name(s: &str) -> String {
 }
 
 fn pragma_has_assignment(s: &str) -> bool {
+    pragma_suffix(s).contains('=')
+}
+
+fn pragma_has_argument(s: &str) -> bool {
+    pragma_suffix(s).starts_with('(')
+}
+
+fn pragma_suffix(s: &str) -> &str {
     let b = s.as_bytes();
     let mut i = 0;
-    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.') {
+    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
         i += 1;
     }
     while i < b.len() && b[i].is_ascii_whitespace() {
         i += 1;
     }
-    if i < b.len() && b[i] == b'(' {
-        let mut depth = 1usize;
+    if i < b.len() && b[i] == b'.' {
         i += 1;
-        while i < b.len() && depth > 0 {
-            match b[i] {
-                b'(' => depth += 1,
-                b')' => depth -= 1,
-                _ => {}
-            }
-            i += 1;
-        }
         while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+            i += 1;
+        }
     }
-    i < b.len() && b[i] == b'='
+    s.get(i..).unwrap_or("").trim_start()
 }
 
 pub fn is_readonly(sql: &str) -> bool {
@@ -1016,11 +1035,17 @@ mod tests {
     #[test]
     fn is_readonly_pragma_setters_are_writes() {
         assert!(is_readonly("PRAGMA table_info(users)"));
+        assert!(is_readonly("PRAGMA main.table_xinfo(users)"));
         assert!(is_readonly("PRAGMA foreign_key_list(users)"));
+        assert!(is_readonly("PRAGMA quick_check(1)"));
         assert!(is_readonly("PRAGMA journal_mode"));
         assert!(!is_readonly("PRAGMA journal_mode=WAL"));
         assert!(!is_readonly("PRAGMA journal_mode = WAL"));
+        assert!(!is_readonly("PRAGMA journal_mode(WAL)"));
         assert!(!is_readonly("PRAGMA foreign_keys=ON"));
+        assert!(!is_readonly("PRAGMA foreign_keys(ON)"));
+        assert!(!is_readonly("PRAGMA user_version(1)"));
+        assert!(!is_readonly("PRAGMA busy_timeout(5000)"));
         assert!(!is_readonly("PRAGMA wal_checkpoint(FULL)"));
         assert!(!is_readonly("PRAGMA optimize"));
     }

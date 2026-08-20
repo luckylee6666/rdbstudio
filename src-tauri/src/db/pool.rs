@@ -101,6 +101,6 @@ impl DbPool {
 fn redis_db_index(url: &str) -> u8 {
     let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let path = after_scheme.split_once('/').map(|(_, p)| p).unwrap_or("");
-    let num = path.split(|c| c == '?' || c == '#').next().unwrap_or("");
+    let num = path.split(['?', '#']).next().unwrap_or("");
     num.parse().unwrap_or(0)
 }

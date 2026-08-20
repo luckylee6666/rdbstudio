@@ -17,6 +17,11 @@ const SCAN_PAGE: u32 = 200;
 /// Default first-page batch size when callers don't specify one. Tree shows
 /// "Load more" to walk further when the cursor is non-zero.
 pub const DEFAULT_SCAN_LIMIT: usize = 500;
+pub const MAX_SCAN_LIMIT: usize = 1_000;
+
+fn bounded_scan_limit(limit: usize) -> usize {
+    limit.clamp(1, MAX_SCAN_LIMIT)
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScanPage {
@@ -55,6 +60,7 @@ pub async fn scan_keys(
     start_cursor: u64,
     limit: usize,
 ) -> AppResult<ScanPage> {
+    let limit = bounded_scan_limit(limit);
     let mut conn = handle.conn();
     let mut cursor = start_cursor;
     let mut out: Vec<TreeEntry> = Vec::new();
@@ -475,6 +481,13 @@ pub fn line_is_readonly(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_limit_is_bounded() {
+        assert_eq!(bounded_scan_limit(0), 1);
+        assert_eq!(bounded_scan_limit(DEFAULT_SCAN_LIMIT), DEFAULT_SCAN_LIMIT);
+        assert_eq!(bounded_scan_limit(usize::MAX), MAX_SCAN_LIMIT);
+    }
 
     #[test]
     fn parse_args_splits_on_whitespace() {

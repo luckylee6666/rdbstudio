@@ -7,6 +7,18 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.1.1] — 2026-08-20
+
+### Fixed
+- 标签页切换时隔离表格编辑状态、筛选条件与 SQL 草稿，避免跨表误提交和查询内容串用。
+- CSV 导入正确忽略未映射列，并拒绝重复目标列映射。
+- MySQL “清空后导入”改用可回滚的事务内删除，避免导入失败后原数据无法恢复。
+- 收紧只读 SQL 与 Redis 命令校验，限制分页、导出批次和 Redis 扫描数量，避免异常输入带来的越权写入或资源耗尽。
+- 拒绝重复查询 ID，修复查询状态互相覆盖的问题。
+
+### Changed
+- 移除未使用的 Tauri Shell 权限与 Rust 插件依赖，缩小桌面端权限范围。
+
 ## [0.1.0] — 2026-07-20
 
 First stable release: macOS (Apple Silicon) `.dmg` and Windows x64 `.msi`/`.exe` installers.

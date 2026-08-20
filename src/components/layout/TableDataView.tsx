@@ -60,6 +60,13 @@ function rowKeyOf(
 }
 
 export function TableDataView({ tab }: { tab: WorkspaceTab }) {
+  const identity = `${tab.connectionId ?? ""}\u0000${tab.schema ?? ""}\u0000${
+    tab.table ?? tab.title
+  }`;
+  return <TableDataViewContent key={identity} tab={tab} />;
+}
+
+function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
   const connectionId = tab.connectionId!;
   const schema = tab.schema;
   const table = tab.table ?? tab.title;
@@ -89,6 +96,30 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
   const pkCols = useMemo(() => columns.filter((c) => c.is_primary_key), [columns]);
   const openTab = useWorkspace((s) => s.openTab);
   const loadGen = useRef(0);
+  const viewIdentity = `${connectionId}\u0000${schema ?? ""}\u0000${table}`;
+  const mountedViewRef = useRef(viewIdentity);
+  const loadedColumnsForRef = useRef<string | null>(null);
+
+  // The workspace normally remounts on tab changes. Keep a second boundary
+  // here so any future reuse cannot carry filters or pending edits to a
+  // different table before its new metadata arrives.
+  useEffect(() => {
+    if (mountedViewRef.current === viewIdentity) return;
+    mountedViewRef.current = viewIdentity;
+    loadedColumnsForRef.current = null;
+    loadGen.current += 1;
+    setColumns([]);
+    setRows([]);
+    setRowCount(null);
+    setPage(0);
+    setOrder(undefined);
+    setFilters(tab.initialFilters ?? []);
+    setWhereRaw("");
+    setPending(new Map());
+    setPreview(null);
+    setPreviewOpen(false);
+    setApplyError(null);
+  }, [viewIdentity, tab.initialFilters]);
 
   // Single-column foreign keys, keyed by local column name — powers the
   // "jump to referenced row" affordance in the grid. Best-effort metadata.
@@ -168,7 +199,10 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
       setLoading(true);
       setError(null);
       try {
-        const needCols = forceCols || columns.length === 0;
+        const needCols =
+          forceCols ||
+          columns.length === 0 ||
+          loadedColumnsForRef.current !== viewIdentity;
         const [pkInfo, result, total] = await Promise.all([
           needCols
             ? api
@@ -196,9 +230,13 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
         // The grid MUST use the columns that came back with SELECT * so the
         // positional mapping of row values stays in sync. Enrich with PK / nullable
         // metadata from list_columns where names match.
-        if (needCols) {
+        const shapeChanged =
+          columns.length !== result.columns.length ||
+          result.columns.some((column, index) => column.name !== columns[index]?.name);
+        if (needCols || shapeChanged) {
+          const metadata = needCols ? pkInfo : columns;
           const merged: ColumnInfo[] = result.columns.map((rc) => {
-            const meta = pkInfo.find((p) => p.name === rc.name);
+            const meta = metadata.find((p) => p.name === rc.name);
             return {
               name: rc.name,
               data_type: meta?.data_type ?? rc.data_type,
@@ -208,6 +246,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
             };
           });
           setColumns(merged);
+          loadedColumnsForRef.current = viewIdentity;
         }
         setRows(result.rows);
         setElapsed(result.elapsed_ms);
@@ -220,7 +259,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
         if (loadGen.current === gen) setLoading(false);
       }
     },
-    [connectionId, table, schema, columns, makeQuery]
+    [connectionId, table, schema, columns, makeQuery, viewIdentity]
   );
 
   const hardRefresh = useCallback(() => {
@@ -495,6 +534,7 @@ export function TableDataView({ tab }: { tab: WorkspaceTab }) {
           <LoadingState />
         ) : (
           <TableDataGrid
+            key={viewIdentity}
             columns={columns}
             rows={gridRows}
             order={order}

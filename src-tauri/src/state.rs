@@ -59,8 +59,15 @@ impl AppState {
         self.tunnels.write().remove(id)
     }
 
-    pub fn register_query(&self, qid: &str, handle: AbortHandle) {
-        self.queries.write().insert(qid.to_string(), handle);
+    /// Register a cancellable query. Duplicate renderer-issued ids are
+    /// rejected so one task cannot overwrite another task's abort handle.
+    pub fn register_query(&self, qid: &str, handle: AbortHandle) -> bool {
+        let mut queries = self.queries.write();
+        if queries.contains_key(qid) {
+            return false;
+        }
+        queries.insert(qid.to_string(), handle);
+        true
     }
 
     pub fn unregister_query(&self, qid: &str) {

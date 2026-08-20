@@ -38,7 +38,10 @@ pub async fn execute_query(
     let task_sql = sql.clone();
     let task = tokio::spawn(async move { execute(&pool, &task_sql).await });
     if let Some(qid) = query_id.as_deref() {
-        state.register_query(qid, task.abort_handle());
+        if !state.register_query(qid, task.abort_handle()) {
+            task.abort();
+            return Err(AppError::msg("query id is already in use"));
+        }
     }
     let result = match task.await {
         Ok(r) => r,
@@ -111,7 +114,10 @@ pub async fn execute_script(
     let task_sqls = sqls.clone();
     let task = tokio::spawn(async move { crate::db::exec::execute_script(&pool, &task_sqls).await });
     if let Some(qid) = query_id.as_deref() {
-        state.register_query(qid, task.abort_handle());
+        if !state.register_query(qid, task.abort_handle()) {
+            task.abort();
+            return Err(AppError::msg("query id is already in use"));
+        }
     }
     let result = match task.await {
         Ok(r) => r,

@@ -64,26 +64,42 @@ function savedBuffer(tabId: string): string | null {
   }
 }
 
+function persistBuffer(tabId: string, sql: string) {
+  try {
+    if (sql.trim() && sql !== INITIAL) {
+      localStorage.setItem(`rdb:buf:${tabId}`, sql);
+    } else {
+      localStorage.removeItem(`rdb:buf:${tabId}`);
+    }
+  } catch {
+    /* storage unavailable — buffer stays volatile */
+  }
+}
+
 export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const [sql, setSql] = useState(
     () => primedFor(tab.id) ?? savedBuffer(tab.id) ?? INITIAL
   );
+  const latestSqlRef = useRef(sql);
+  latestSqlRef.current = sql;
 
   // Persist the buffer (debounced) so restarts restore what the user typed.
   useEffect(() => {
-    const h = setTimeout(() => {
-      try {
-        if (sql.trim() && sql !== INITIAL) {
-          localStorage.setItem(`rdb:buf:${tab.id}`, sql);
-        } else {
-          localStorage.removeItem(`rdb:buf:${tab.id}`);
-        }
-      } catch {
-        /* storage unavailable — buffer stays volatile */
-      }
-    }, 400);
+    const h = setTimeout(() => persistBuffer(tab.id, sql), 400);
     return () => clearTimeout(h);
   }, [sql, tab.id]);
+
+  // Switching active tabs unmounts this view. Flush the latest value so a
+  // switch inside the debounce window cannot lose text. A deliberately closed
+  // tab has already been removed from the store and must stay cleaned up.
+  useEffect(
+    () => () => {
+      if (useWorkspace.getState().tabs.some((item) => item.id === tab.id)) {
+        persistBuffer(tab.id, latestSqlRef.current);
+      }
+    },
+    [tab.id]
+  );
   const [state, setState] = useState<RunState>({ kind: "idle" });
   const connections = useConnections((s) => s.list);
   const statusMap = useConnections((s) => s.status);
@@ -759,4 +775,3 @@ function ResultHeader({ state, tab }: { state: RunState; tab: WorkspaceTab }) {
     </div>
   );
 }
-

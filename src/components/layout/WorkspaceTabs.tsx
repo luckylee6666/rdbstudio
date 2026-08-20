@@ -147,13 +147,23 @@ export function WorkspaceTabs() {
 
       <div className="min-h-0 flex-1">
         {!active && <Welcome />}
-        {active?.kind === "welcome" && <Welcome />}
-        {active?.kind === "table-data" && <TableDataView tab={active} />}
-        {active?.kind === "query" && <QueryEditorView tab={active} />}
-        {active?.kind === "designer" && <DesignerView tab={active} />}
-        {active?.kind === "er" && <ERView tab={active} />}
-        {active?.kind === "explain" && <ExplainView tab={active} />}
-        {active?.kind === "redis-key" && <RedisKeyView tab={active} />}
+        {active?.kind === "welcome" && <Welcome key={active.id} />}
+        {active?.kind === "table-data" && (
+          <TableDataView key={active.id} tab={active} />
+        )}
+        {active?.kind === "query" && (
+          <QueryEditorView key={active.id} tab={active} />
+        )}
+        {active?.kind === "designer" && (
+          <DesignerView key={active.id} tab={active} />
+        )}
+        {active?.kind === "er" && <ERView key={active.id} tab={active} />}
+        {active?.kind === "explain" && (
+          <ExplainView key={active.id} tab={active} />
+        )}
+        {active?.kind === "redis-key" && (
+          <RedisKeyView key={active.id} tab={active} />
+        )}
       </div>
 
       {ctx && (

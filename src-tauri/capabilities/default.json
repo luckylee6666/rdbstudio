@@ -10,7 +10,6 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "dialog:default",
-    "shell:allow-open",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text"
   ]
