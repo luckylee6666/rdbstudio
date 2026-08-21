@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { Globe, Moon, Sun, Trash2, Database, Loader2, CheckCircle2 } from "lucide-react";
+import {
+  Bot,
+  CheckCircle2,
+  Database,
+  Globe,
+  Loader2,
+  Moon,
+  Power,
+  ShieldOff,
+  Sun,
+  Trash2,
+} from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -9,6 +20,7 @@ import { useConnections } from "@/store/connections";
 import { toast } from "@/store/toasts";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import type { McpStatus } from "@/types";
 
 interface Props {
   open: boolean;
@@ -25,6 +37,8 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [clearing, setClearing] = useState(false);
   const [cleared, setCleared] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
+  const [mcpBusy, setMcpBusy] = useState(false);
 
   useEffect(() => {
     if (!open) {
@@ -32,7 +46,25 @@ export function SettingsDialog({ open, onClose }: Props) {
       return;
     }
     void api.appVersion().then(setVersion).catch(() => setVersion("?"));
+    void api.mcpStatus().then(setMcpStatus).catch(() => setMcpStatus(null));
   }, [open]);
+
+  const updateMcp = async (action: "start" | "stop" | "revoke") => {
+    setMcpBusy(true);
+    try {
+      const next =
+        action === "start"
+          ? await api.startMcp()
+          : action === "stop"
+            ? await api.stopMcp()
+            : await api.revokeMcpAuthorizations();
+      setMcpStatus(next);
+    } catch (error) {
+      toast.error(t("settings.mcp.failed"), String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  };
 
   const doClearHistory = async () => {
     setClearing(true);
@@ -50,7 +82,7 @@ export function SettingsDialog({ open, onClose }: Props) {
     <Modal
       open={open}
       onClose={onClose}
-      closeDisabled={clearing}
+      closeDisabled={clearing || mcpBusy}
       title={t("settings.title")}
       width={560}
       footer={
@@ -58,7 +90,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           <div className="mr-auto text-[11.5px] text-muted-foreground">
             rdbstudio · v{version || "…"}
           </div>
-          <Button variant="primary" onClick={onClose} disabled={clearing}>
+          <Button variant="primary" onClick={onClose} disabled={clearing || mcpBusy}>
             {t("common.done")}
           </Button>
         </>
@@ -120,6 +152,67 @@ export function SettingsDialog({ open, onClose }: Props) {
               )}
             </Button>
           </Row>
+        </Section>
+
+        <Section title={t("settings.mcp")}>
+          <div className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-2.5">
+                <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand/10 text-brand">
+                  <Bot className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-[13px] font-medium">
+                    <span
+                      className={cn(
+                        "h-1.5 w-1.5 rounded-full",
+                        mcpStatus?.running ? "bg-success" : "bg-muted-foreground/50"
+                      )}
+                    />
+                    {mcpStatus?.running
+                      ? t("settings.mcp.running")
+                      : t("settings.mcp.stopped")}
+                  </div>
+                  <div className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                    {t("settings.mcp.hint")}
+                  </div>
+                  {mcpStatus?.url && (
+                    <div className="mt-1 max-w-[300px] truncate font-mono text-[10.5px] text-muted-foreground">
+                      {mcpStatus.url}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <Button
+                onClick={() => void updateMcp(mcpStatus?.running ? "stop" : "start")}
+                disabled={mcpBusy}
+              >
+                {mcpBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Power className="h-3.5 w-3.5" />
+                )}
+                {mcpStatus?.running ? t("settings.mcp.stop") : t("settings.mcp.start")}
+              </Button>
+            </div>
+
+            {(mcpStatus?.authorization_count ?? 0) > 0 && (
+              <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2.5">
+                <span className="text-[11.5px] text-muted-foreground">
+                  {t("settings.mcp.grants", {
+                    count: mcpStatus?.authorization_count ?? 0,
+                  })}
+                </span>
+                <Button
+                  onClick={() => void updateMcp("revoke")}
+                  disabled={mcpBusy}
+                >
+                  <ShieldOff className="h-3.5 w-3.5" />
+                  {t("settings.mcp.revoke")}
+                </Button>
+              </div>
+            )}
+          </div>
         </Section>
 
         <Section title={t("settings.shortcuts")}>

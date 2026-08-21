@@ -447,6 +447,84 @@ async fn fetch_capped<T>(
     Ok((rows, truncated))
 }
 
+/// Decode a driver-specific row stream while keeping MCP's memory/response
+/// envelope substantially smaller than the interactive editor's. The stream
+/// is scoped inside the macro expansion so its mutable connection borrow ends
+/// before the caller issues ROLLBACK.
+macro_rules! fetch_mcp_bounded {
+    ($stream:expr, $decode:ident, $max_rows:expr, $max_json_bytes:expr) => {{
+        async {
+            use futures::TryStreamExt;
+
+            let mut stream = $stream;
+            let mut columns: Vec<ColumnMeta> = Vec::new();
+            let mut rows: Vec<Vec<Json>> = Vec::new();
+            let mut used_json_bytes = 0usize;
+            let mut truncated = false;
+
+            while let Some(row) = stream.try_next().await? {
+                if columns.is_empty() {
+                    columns = row
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnMeta {
+                            name: column.name().to_string(),
+                            data_type: column.type_info().name().to_string(),
+                        })
+                        .collect();
+                }
+                if rows.len() >= $max_rows {
+                    truncated = true;
+                    break;
+                }
+
+                let decoded: Vec<Json> = (0..row.columns().len())
+                    .map(|index| $decode(&row, index))
+                    .collect();
+                let row_bytes = serde_json::to_vec(&decoded)?.len();
+                if row_bytes > $max_json_bytes.saturating_sub(used_json_bytes) {
+                    truncated = true;
+                    break;
+                }
+                used_json_bytes = used_json_bytes.saturating_add(row_bytes + 1);
+                rows.push(decoded);
+            }
+
+            Ok::<_, AppError>((columns, rows, truncated))
+        }
+        .await
+    }};
+}
+
+/// Returns a pooled connection normally only after its read-only/session
+/// state has been restored. Cancellation or any early error closes the socket
+/// instead, preventing a dirty session from leaking back into the editor pool.
+struct McpPoolConnection<DB: sqlx::Database> {
+    inner: sqlx::pool::PoolConnection<DB>,
+    reusable: bool,
+}
+
+impl<DB: sqlx::Database> McpPoolConnection<DB> {
+    fn new(inner: sqlx::pool::PoolConnection<DB>) -> Self {
+        Self {
+            inner,
+            reusable: false,
+        }
+    }
+
+    fn mark_reusable(&mut self) {
+        self.reusable = true;
+    }
+}
+
+impl<DB: sqlx::Database> Drop for McpPoolConnection<DB> {
+    fn drop(&mut self) {
+        if !self.reusable {
+            self.inner.close_on_drop();
+        }
+    }
+}
+
 pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
     // Redis: editor input is a raw command line, not SQL.
     if let DbPool::Redis(h) = pool {
@@ -475,6 +553,106 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
             truncated: false,
         })
     }
+}
+
+/// Execute a single SQL query for the local MCP bridge with two independent
+/// safeguards:
+///
+/// 1. the database connection itself is put in read-only mode, so a SELECT
+///    that invokes a side-effecting stored function still cannot mutate data;
+/// 2. rows are decoded incrementally under row and JSON byte budgets instead
+///    of first buffering the editor's much larger `MAX_ROWS` allowance.
+///
+/// The caller still performs a fail-closed single-statement syntax check. The
+/// database-level guard here is the authoritative write barrier.
+pub async fn execute_mcp_readonly(
+    pool: &DbPool,
+    sql: &str,
+    max_rows: usize,
+    max_json_bytes: usize,
+) -> AppResult<QueryResult> {
+    if max_rows == 0 || max_json_bytes == 0 {
+        return Err(AppError::msg("MCP query result limits must be positive"));
+    }
+
+    let start = Instant::now();
+    let (columns, rows, truncated) = match pool {
+        DbPool::Redis(_) => {
+            return Err(AppError::msg(
+                "SQL read-only execution is not available for Redis",
+            ))
+        }
+        DbPool::Sqlite(pool) => {
+            // query_only is connection-local. close_on_drop is essential: if
+            // this future is cancelled or times out, the connection must not
+            // return to the shared editor pool with query_only still enabled.
+            let mut conn = McpPoolConnection::new(pool.acquire().await?);
+            sqlx::query("PRAGMA query_only = ON")
+                .execute(&mut *conn.inner)
+                .await?;
+            let result = fetch_mcp_bounded!(
+                sqlx::query(sql).fetch(&mut *conn.inner),
+                sqlite_val,
+                max_rows,
+                max_json_bytes
+            );
+            let cleanup = sqlx::query("PRAGMA query_only = OFF")
+                .execute(&mut *conn.inner)
+                .await;
+            if cleanup.is_ok() {
+                conn.mark_reusable();
+            }
+            let result = result?;
+            cleanup?;
+            result
+        }
+        DbPool::Postgres(pool) => {
+            let mut conn = McpPoolConnection::new(pool.acquire().await?);
+            sqlx::query("BEGIN READ ONLY")
+                .execute(&mut *conn.inner)
+                .await?;
+            let result = fetch_mcp_bounded!(
+                sqlx::query(sql).fetch(&mut *conn.inner),
+                pg_val,
+                max_rows,
+                max_json_bytes
+            );
+            let cleanup = sqlx::query("ROLLBACK").execute(&mut *conn.inner).await;
+            if cleanup.is_ok() {
+                conn.mark_reusable();
+            }
+            let result = result?;
+            cleanup?;
+            result
+        }
+        DbPool::Mysql(pool) => {
+            let mut conn = McpPoolConnection::new(pool.acquire().await?);
+            sqlx::query("START TRANSACTION READ ONLY")
+                .execute(&mut *conn.inner)
+                .await?;
+            let result = fetch_mcp_bounded!(
+                sqlx::query(sql).fetch(&mut *conn.inner),
+                mysql_val,
+                max_rows,
+                max_json_bytes
+            );
+            let cleanup = sqlx::query("ROLLBACK").execute(&mut *conn.inner).await;
+            if cleanup.is_ok() {
+                conn.mark_reusable();
+            }
+            let result = result?;
+            cleanup?;
+            result
+        }
+    };
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        rows_affected: None,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        truncated,
+    })
 }
 
 /// Outcome of a multi-statement script run inside one transaction. `Failed`

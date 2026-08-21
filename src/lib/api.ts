@@ -12,6 +12,8 @@ import type {
   ExportReport,
   ImportCsvOptions,
   ImportReport,
+  McpAuthorization,
+  McpStatus,
   NavicatImportPreview,
   ScanPage,
   Snippet,
@@ -87,6 +89,14 @@ export const api = {
   disconnect: (id: string) => invoke<void>("disconnect", { id }),
   connectionStatus: (id: string) =>
     invoke<ConnectionSummary>("connection_status", { id }),
+
+  mcpStatus: () => invoke<McpStatus>("mcp_status"),
+  startMcp: () => invoke<McpStatus>("start_mcp"),
+  stopMcp: () => invoke<McpStatus>("stop_mcp"),
+  revokeMcpAuthorizations: () =>
+    invoke<McpStatus>("revoke_mcp_authorizations"),
+  createMcpAuthorization: (id: string, ttlMinutes = 60) =>
+    invoke<McpAuthorization>("create_mcp_authorization", { id, ttlMinutes }),
 
   listDatabases: (id: string) => invoke<string[]>("list_databases", { id }),
   listSchemas: (id: string, database?: string) =>

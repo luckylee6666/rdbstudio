@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import {
   Activity,
   Binary,
+  Bot,
   Braces,
   AlertTriangle,
   ChevronRight,
@@ -66,6 +67,7 @@ import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { CreateTableDialog } from "./CreateTableDialog";
 import { NavicatImportDialog } from "./NavicatImportDialog";
+import { McpAccessDialog } from "./McpAccessDialog";
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useConnections, type ConnStatus } from "@/store/connections";
@@ -667,6 +669,7 @@ function ConnectionBranch({
   const [movePromptOpen, setMovePromptOpen] = useState(false);
   const [rowCtx, setRowCtx] = useState<{ x: number; y: number } | null>(null);
   const [createDbOpen, setCreateDbOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
   const [createDbError, setCreateDbError] = useState<string | null>(null);
   // Dump/restore in flight — shows the row spinner and disables the menu
   // entries so a second run can't stack on the first.
@@ -1052,6 +1055,12 @@ function ConnectionBranch({
                   {t("conn.remove_from_group")}
                 </MenuItem>
               )}
+              <MenuItem
+                icon={Bot}
+                onClick={() => { setMenuOpen(false); setMcpOpen(true); }}
+              >
+                {t("conn.mcp_access")}
+              </MenuItem>
               <MenuItem icon={Pencil} onClick={() => { setMenuOpen(false); onEdit(); }}>
                 {t("conn.edit")}
               </MenuItem>
@@ -1093,6 +1102,11 @@ function ConnectionBranch({
         suggestions={groupSuggestions}
         onSubmit={onMoveSubmit}
         onClose={() => setMovePromptOpen(false)}
+      />
+      <McpAccessDialog
+        open={mcpOpen}
+        config={cfg}
+        onClose={() => setMcpOpen(false)}
       />
       {restoreConfirm && (
         <ConfirmDialog
@@ -1177,6 +1191,12 @@ function ConnectionBranch({
                 (cfg.driver !== "postgres" && cfg.driver !== "mysql") ||
                 ioBusy != null,
               onClick: () => void pickRestore(),
+            },
+            {
+              id: "mcp",
+              label: t("conn.mcp_access"),
+              icon: Bot,
+              onClick: () => setMcpOpen(true),
             },
             {
               id: "edit",

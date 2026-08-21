@@ -89,6 +89,71 @@ async fn execute_select_caps_huge_results_and_flags_truncation() {
 }
 
 #[tokio::test]
+async fn mcp_execution_enforces_sqlite_read_only_at_the_database_layer() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let selected = exec::execute_mcp_readonly(
+        &pool,
+        "SELECT id, name FROM users ORDER BY id",
+        100,
+        64 * 1024,
+    )
+    .await
+    .expect("MCP read");
+    assert_eq!(selected.rows.len(), 3);
+
+    let write = exec::execute_mcp_readonly(
+        &pool,
+        "UPDATE users SET name = 'changed' WHERE id = 1",
+        100,
+        64 * 1024,
+    )
+    .await;
+    assert!(
+        write.is_err(),
+        "query_only must reject writes independently of SQL parsing"
+    );
+
+    // The failed MCP command must restore the shared session before returning.
+    let unchanged = exec::execute(&pool, "SELECT name FROM users WHERE id = 1")
+        .await
+        .expect("verify unchanged row");
+    assert_eq!(unchanged.rows[0][0].as_str(), Some("Alice"));
+
+    exec::execute(&pool, "UPDATE users SET age = 31 WHERE id = 1")
+        .await
+        .expect("editor connection remains writable after MCP cleanup");
+}
+
+#[tokio::test]
+async fn mcp_execution_streams_under_row_and_byte_budgets() {
+    let pool = common::mem_pool().await;
+
+    let by_rows = exec::execute_mcp_readonly(
+        &pool,
+        "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 10) SELECT x FROM cnt",
+        3,
+        64 * 1024,
+    )
+    .await
+    .expect("row-limited MCP query");
+    assert_eq!(by_rows.rows.len(), 3);
+    assert!(by_rows.truncated);
+
+    let by_bytes = exec::execute_mcp_readonly(
+        &pool,
+        "SELECT 'this value is deliberately larger than the tiny budget' AS value",
+        10,
+        8,
+    )
+    .await
+    .expect("byte-limited MCP query");
+    assert!(by_bytes.rows.is_empty());
+    assert!(by_bytes.truncated);
+}
+
+#[tokio::test]
 async fn execute_script_commits_all_statements() {
     let pool = common::mem_pool().await;
     common::seed_users(&pool).await;

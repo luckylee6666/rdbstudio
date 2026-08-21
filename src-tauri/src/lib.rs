@@ -5,8 +5,8 @@ mod history;
 pub mod model;
 mod secret;
 mod state;
-mod store;
 mod storage;
+mod store;
 
 use history::HistoryStore;
 use state::AppState;
@@ -72,6 +72,11 @@ pub fn run() {
             commands::meta::list_tables,
             commands::meta::list_columns,
             commands::meta::scan_redis_keys,
+            commands::mcp::mcp_status,
+            commands::mcp::start_mcp,
+            commands::mcp::stop_mcp,
+            commands::mcp::create_mcp_authorization,
+            commands::mcp::revoke_mcp_authorizations,
             commands::query::execute_query,
             commands::query::execute_script,
             commands::query::redis_rename_member,

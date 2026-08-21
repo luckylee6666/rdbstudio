@@ -114,11 +114,17 @@ pub fn save_connection(
 ) -> AppResult<ConnectionConfig> {
     // Persist secrets first and roll them back if a later keychain or config
     // write fails. A failed Save must never leave a changed config on disk.
-    save_connection_inner(&state.store, config, &OsSecretBackend)
+    let saved = save_connection_inner(&state.store, config, &OsSecretBackend)?;
+    // An MCP grant authorizes the exact target the user reviewed. Any edit to
+    // that connection must require a fresh authorization rather than letting
+    // an older token silently inherit a different host/database/identity.
+    state.mcp.revoke_connection(&saved.id);
+    Ok(saved)
 }
 
 #[tauri::command]
 pub fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<bool> {
+    state.mcp.revoke_connection(&id);
     let _ = secret::delete_password(&id);
     let _ = secret::delete_password(&ssh_secret_id(&id));
     if let Some(pool) = state.remove_pool(&id) {
@@ -187,16 +193,23 @@ async fn test_connection_inner(config: &ConnectionConfig) -> AppResult<String> {
 
 #[tauri::command]
 pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<ConnectionSummary> {
+    connect_stored(&state, &id).await
+}
+
+/// Connect using the persisted configuration and keychain secrets. Shared by
+/// the renderer command and the local MCP bridge so credentials never need to
+/// cross either IPC boundary.
+pub(crate) async fn connect_stored(state: &AppState, id: &str) -> AppResult<ConnectionSummary> {
     // A second connect for the same id while one is in flight (double-click,
     // impatient retry during a slow SSH handshake) would stack a duplicate
     // tunnel/pool and race the state inserts — reject it instead.
-    if !state.begin_connect(&id) {
+    if !state.begin_connect(id) {
         return Err(AppError::msg("a connection attempt is already in progress"));
     }
-    let result = tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, connect_inner(&state, &id))
+    let result = tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, connect_inner(state, id))
         .await
         .unwrap_or_else(|_| Err(connection_timeout_error()));
-    state.end_connect(&id);
+    state.end_connect(id);
     result
 }
 

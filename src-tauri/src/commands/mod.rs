@@ -3,6 +3,7 @@ pub mod data;
 pub mod design;
 pub mod dump;
 pub mod io;
+pub mod mcp;
 pub mod meta;
 pub mod navicat;
 pub mod query;

@@ -478,6 +478,94 @@ pub fn line_is_readonly(line: &str) -> bool {
     }
 }
 
+/// A deliberately narrower allowlist for temporary MCP authorizations.
+///
+/// The editor's connection-level read-only mode may expose operational
+/// introspection such as `CONFIG GET`, `CLIENT LIST`, `INFO`, or `SLOWLOG` to
+/// a human operator. Those commands are inappropriate for an AI bridge:
+/// configuration output can contain credentials and server topology, while
+/// commands such as KEYS/DUMP/XREAD BLOCK can also create avoidable load.
+/// Unknown commands and every administrative namespace fail closed.
+pub fn line_is_mcp_safe(line: &str) -> bool {
+    let args = match parse_args(line) {
+        Ok(args) => args,
+        Err(_) => return false,
+    };
+    let Some(command) = args.first() else {
+        return false;
+    };
+    matches!(
+        command.to_uppercase().as_str(),
+        // strings / generic key inspection
+        "GET"
+            | "MGET"
+            | "GETRANGE"
+            | "STRLEN"
+            | "EXISTS"
+            | "TYPE"
+            | "TTL"
+            | "PTTL"
+            | "SCAN"
+            | "RANDOMKEY"
+            | "DBSIZE"
+            // hash
+            | "HGET"
+            | "HGETALL"
+            | "HMGET"
+            | "HLEN"
+            | "HKEYS"
+            | "HVALS"
+            | "HSCAN"
+            | "HEXISTS"
+            | "HSTRLEN"
+            | "HRANDFIELD"
+            // list
+            | "LRANGE"
+            | "LLEN"
+            | "LINDEX"
+            | "LPOS"
+            // set
+            | "SMEMBERS"
+            | "SCARD"
+            | "SISMEMBER"
+            | "SMISMEMBER"
+            | "SSCAN"
+            | "SRANDMEMBER"
+            // sorted set
+            | "ZRANGE"
+            | "ZRANGEBYSCORE"
+            | "ZRANGEBYLEX"
+            | "ZREVRANGE"
+            | "ZCARD"
+            | "ZCOUNT"
+            | "ZSCORE"
+            | "ZMSCORE"
+            | "ZRANK"
+            | "ZREVRANK"
+            | "ZSCAN"
+            | "ZRANDMEMBER"
+            // stream (non-blocking forms only)
+            | "XRANGE"
+            | "XREVRANGE"
+            | "XLEN"
+            // bit / HyperLogLog
+            | "BITCOUNT"
+            | "BITPOS"
+            | "GETBIT"
+            | "PFCOUNT"
+            // health check
+            | "PING"
+            // RedisJSON reads
+            | "JSON.GET"
+            | "JSON.MGET"
+            | "JSON.TYPE"
+            | "JSON.STRLEN"
+            | "JSON.ARRLEN"
+            | "JSON.OBJKEYS"
+            | "JSON.OBJLEN"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +638,24 @@ mod tests {
         assert!(!line_is_readonly("SOMEFUTURECMD foo"));
         assert!(!line_is_readonly("GET \"unterminated"));
         assert!(!line_is_readonly(""));
+    }
+
+    #[test]
+    fn mcp_allowlist_rejects_sensitive_and_expensive_introspection() {
+        assert!(line_is_mcp_safe("GET profile:1"));
+        assert!(line_is_mcp_safe("HGETALL profile:1"));
+        assert!(line_is_mcp_safe("SCAN 0 MATCH profile:* COUNT 100"));
+        assert!(line_is_mcp_safe("JSON.GET profile:1 $"));
+
+        assert!(!line_is_mcp_safe("CONFIG GET requirepass"));
+        assert!(!line_is_mcp_safe("CLIENT LIST"));
+        assert!(!line_is_mcp_safe("INFO replication"));
+        assert!(!line_is_mcp_safe("SLOWLOG GET 10"));
+        assert!(!line_is_mcp_safe("MEMORY STATS"));
+        assert!(!line_is_mcp_safe("KEYS *"));
+        assert!(!line_is_mcp_safe("DUMP profile:1"));
+        assert!(!line_is_mcp_safe("XREAD BLOCK 0 STREAMS events $"));
+        assert!(!line_is_mcp_safe("SET profile:1 value"));
     }
 
     #[test]

@@ -39,6 +39,21 @@ export interface ConnectionSummary {
   server_version?: string | null;
 }
 
+export interface McpStatus {
+  running: boolean;
+  url?: string | null;
+  authorization_count: number;
+}
+
+export interface McpAuthorization {
+  server_url: string;
+  token: string;
+  connection_id: string;
+  connection_name: string;
+  expires_at: string;
+  config_json: string;
+}
+
 export interface NavicatImportPreview {
   connections: ConnectionConfig[];
   source_count: number;
