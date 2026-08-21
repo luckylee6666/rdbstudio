@@ -90,4 +90,40 @@ describe("ConnectionDialog", () => {
     );
     expect(screen.getByDisplayValue("自动（兼容旧配置）")).toHaveValue("");
   });
+
+  it("offers CA-only verification for SQL databases but not Redis", () => {
+    const { unmount } = render(
+      <ConnectionDialog
+        open
+        initial={{
+          id: "pg",
+          name: "Postgres",
+          driver: "postgres",
+          host: "localhost",
+          port: 5432,
+          username: "user",
+          ssl_mode: "verify-ca",
+        }}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.getByDisplayValue("校验 CA 证书")).toHaveValue("verify-ca");
+    unmount();
+
+    render(
+      <ConnectionDialog
+        open
+        initial={{
+          id: "redis",
+          name: "Redis",
+          driver: "redis",
+          host: "localhost",
+          port: 6379,
+          ssl_mode: "disable",
+        }}
+        onClose={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole("option", { name: "校验 CA 证书" })).not.toBeInTheDocument();
+  });
 });

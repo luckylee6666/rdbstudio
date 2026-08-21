@@ -63,6 +63,7 @@ pub fn run() {
             commands::connections::connect,
             commands::connections::disconnect,
             commands::connections::connection_status,
+            commands::navicat::preview_navicat_connections,
             commands::snippets::list_snippets,
             commands::snippets::save_snippet,
             commands::snippets::delete_snippet,

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Activity,
   Binary,
@@ -46,7 +47,12 @@ import {
   save as saveDialog,
   open as openDialog,
 } from "@tauri-apps/plugin-dialog";
-import type { ConnectionConfig, DriverKind, TreeEntry } from "@/types";
+import type {
+  ConnectionConfig,
+  DriverKind,
+  NavicatImportPreview,
+  TreeEntry,
+} from "@/types";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { api } from "@/lib/api";
 import { toast } from "@/store/toasts";
@@ -59,6 +65,7 @@ import { connColorValue } from "@/lib/connColors";
 import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { CreateTableDialog } from "./CreateTableDialog";
+import { NavicatImportDialog } from "./NavicatImportDialog";
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useConnections, type ConnStatus } from "@/store/connections";
@@ -124,6 +131,10 @@ export function ConnectionTree() {
     loadEmptyGroups()
   );
   const [promptOpen, setPromptOpen] = useState(false);
+  const [navicatPreview, setNavicatPreview] =
+    useState<NavicatImportPreview | null>(null);
+  const [navicatFileName, setNavicatFileName] = useState("");
+  const [navicatOpen, setNavicatOpen] = useState(false);
   const t = useT();
 
   useEffect(() => {
@@ -143,6 +154,23 @@ export function ConnectionTree() {
   };
 
   const newGroup = () => setPromptOpen(true);
+
+  const importNavicat = async () => {
+    const picked = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Navicat Connections", extensions: ["ncx"] }],
+    });
+    if (typeof picked !== "string" || !picked) return;
+    try {
+      const preview = await api.previewNavicatConnections(picked);
+      setNavicatPreview(preview);
+      setNavicatFileName(picked.split(/[\\/]/).pop() || picked);
+      setNavicatOpen(true);
+    } catch (error) {
+      toast.error(t("conn.navicat.failed"), String(error));
+    }
+  };
 
   const onNewGroupSubmit = (raw: string) => {
     const name = raw.trim();
@@ -172,6 +200,13 @@ export function ConnectionTree() {
             className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <FolderPlus className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => void importNavicat()}
+            title={t("conn.navicat.import")}
+            className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <FileUp className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={newConn}
@@ -208,6 +243,13 @@ export function ConnectionTree() {
         open={dlgOpen}
         initial={editing}
         onClose={() => setDlgOpen(false)}
+      />
+
+      <NavicatImportDialog
+        open={navicatOpen}
+        preview={navicatPreview}
+        fileName={navicatFileName}
+        onClose={() => setNavicatOpen(false)}
       />
 
       <PromptDialog
@@ -330,6 +372,22 @@ type ConnDragState = {
 
 const dragListeners = new Set<() => void>();
 let connDragState: ConnDragState = null;
+let connDragPreviewElement: HTMLDivElement | null = null;
+let connDragPoint = { x: 0, y: 0 };
+
+function positionConnDragPreview(element: HTMLDivElement) {
+  element.style.transform = `translate3d(${connDragPoint.x + 14}px, ${connDragPoint.y + 12}px, 0)`;
+}
+
+function updateConnDragPoint(x: number, y: number) {
+  connDragPoint = { x, y };
+  if (connDragPreviewElement) positionConnDragPreview(connDragPreviewElement);
+}
+
+function setConnDragPreviewElement(element: HTMLDivElement | null) {
+  connDragPreviewElement = element;
+  if (element) positionConnDragPreview(element);
+}
 
 function getConnDrag(): ConnDragState {
   return connDragState;
@@ -474,7 +532,7 @@ function UngroupedDropZone({ children }: { children: React.ReactNode }) {
       {...{ [CONN_DROP_ATTR]: "" }}
       className={cn(
         "min-h-[24px] rounded-md transition-colors",
-        over && "ring-1 ring-brand/60 bg-brand/5"
+        over && "bg-brand/10 ring-2 ring-inset ring-brand/80 shadow-sm"
       )}
     >
       {children}
@@ -533,7 +591,7 @@ function GroupFolder({
       {...{ [CONN_DROP_ATTR]: name }}
       className={cn(
         "group/group mb-1 rounded-md transition-colors",
-        over && "ring-1 ring-brand/60 bg-brand/5"
+        over && "bg-brand/10 ring-2 ring-inset ring-brand/80 shadow-sm"
       )}
     >
       <div className="flex items-center gap-0.5 rounded-md hover:bg-accent/40">
@@ -615,6 +673,16 @@ function ConnectionBranch({
   const [ioBusy, setIoBusy] = useState<"dump" | "restore" | null>(null);
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
   const t = useT();
+  const drag = useConnDrag();
+  const isDragging = drag?.connId === cfg.id;
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+    },
+    []
+  );
 
   const doDump = async () => {
     const isSqlite = cfg.driver === "sqlite";
@@ -740,11 +808,16 @@ function ConnectionBranch({
 
   return (
     <div
-      className="group mb-1"
+      className={cn(
+        "group mb-1 select-none transition-opacity",
+        isDragging && "opacity-45"
+      )}
       onMouseDown={(e) => {
         // Manual drag: only left button, only when click starts on the row
         // (not on the chevron/buttons inside — those need their own clicks).
         if (e.button !== 0) return;
+        if ((e.target as Element).closest("[data-conn-drag-ignore]")) return;
+        dragCleanupRef.current?.();
         const startX = e.clientX;
         const startY = e.clientY;
         const onMove = (ev: MouseEvent) => {
@@ -756,18 +829,27 @@ function ConnectionBranch({
           ) {
             return; // not a drag yet
           }
-          if (getConnDrag() == null) {
-            setConnDrag({ connId: cfg.id, hoverGroup: null });
-          }
+          updateConnDragPoint(ev.clientX, ev.clientY);
           const hover = dropTargetAt(ev.clientX, ev.clientY);
           const cur = getConnDrag();
-          if (cur && cur.hoverGroup !== hover) {
+          if (cur == null) {
+            document.body.style.cursor = "grabbing";
+            document.body.style.userSelect = "none";
+            setConnDrag({
+              connId: cfg.id,
+              hoverGroup: hover,
+            });
+          } else if (cur.hoverGroup !== hover) {
             setConnDrag({ ...cur, hoverGroup: hover });
           }
         };
         const onUp = (ev: MouseEvent) => {
           window.removeEventListener("mousemove", onMove);
           window.removeEventListener("mouseup", onUp);
+          window.removeEventListener("blur", onCancel);
+          dragCleanupRef.current = null;
+          document.body.style.cursor = "";
+          document.body.style.userSelect = "";
           const cur = getConnDrag();
           setConnDrag(null);
           if (!cur) return; // never crossed threshold — treat as click
@@ -779,18 +861,77 @@ function ConnectionBranch({
             window.removeEventListener("click", swallow, true);
           };
           window.addEventListener("click", swallow, { capture: true, once: true });
+          window.setTimeout(
+            () => window.removeEventListener("click", swallow, true),
+            0
+          );
           const target = dropTargetAt(ev.clientX, ev.clientY);
           if (target == null) return;
           const groupName = target === "" ? null : target;
           const currentGroup = (cfg.group ?? "").trim() || null;
           if (currentGroup === groupName) return;
-          void save({ ...cfg, group: groupName });
+          void save({ ...cfg, group: groupName })
+            .then(() => {
+              toast.success(
+                groupName
+                  ? t("conn.move.done", { group: groupName })
+                  : t("conn.move.done_ungrouped")
+              );
+            })
+            .catch((error) => {
+              toast.error(t("conn.move.failed"), String(error));
+            });
+        };
+        const onCancel = () => {
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+          window.removeEventListener("blur", onCancel);
+          dragCleanupRef.current = null;
+          document.body.style.cursor = "";
+          document.body.style.userSelect = "";
+          setConnDrag(null);
         };
         window.addEventListener("mousemove", onMove);
         window.addEventListener("mouseup", onUp);
+        window.addEventListener("blur", onCancel);
+        dragCleanupRef.current = onCancel;
       }}
       style={{ cursor: "grab" }}
     >
+      {isDragging &&
+        createPortal(
+          <div
+            ref={setConnDragPreviewElement}
+            aria-hidden="true"
+            className="pointer-events-none fixed z-[100] w-max max-w-[260px] rounded-lg border border-brand/50 bg-surface-elevated/95 px-3 py-2 shadow-elevated backdrop-blur"
+            style={{
+              left: 0,
+              top: 0,
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <DriverBadge driver={cfg.driver} />
+              <span className="max-w-[190px] truncate text-[13px] font-medium text-foreground">
+                {cfg.name}
+              </span>
+            </div>
+            <div
+              className={cn(
+                "mt-1 pl-8 text-[11px]",
+                drag.hoverGroup == null
+                  ? "text-muted-foreground"
+                  : "font-medium text-brand"
+              )}
+            >
+              {drag.hoverGroup == null
+                ? t("conn.drag.choose_target")
+                : drag.hoverGroup === ""
+                ? t("conn.drag.to_ungrouped")
+                : t("conn.drag.to_group", { group: drag.hoverGroup })}
+            </div>
+          </div>,
+          document.body
+        )}
       <div
         className="flex items-center gap-1 rounded-md hover:bg-accent/50"
         onContextMenu={(e) => {
@@ -847,7 +988,10 @@ function ConnectionBranch({
             />
           )}
         </button>
-        <div className="relative pr-1 opacity-0 group-hover:opacity-100">
+        <div
+          data-conn-drag-ignore
+          className="relative pr-1 opacity-0 group-hover:opacity-100"
+        >
           {status === "connected" && (
             <>
               <button

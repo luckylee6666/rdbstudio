@@ -39,6 +39,16 @@ export interface ConnectionSummary {
   server_version?: string | null;
 }
 
+export interface NavicatImportPreview {
+  connections: ConnectionConfig[];
+  source_count: number;
+  unsupported_types: string[];
+  password_count: number;
+  ssh_password_count: number;
+  http_tunnel_count: number;
+  unsupported_ssl_count: number;
+}
+
 export interface TreeEntry {
   name: string;
   kind: string;

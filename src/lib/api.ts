@@ -12,6 +12,7 @@ import type {
   ExportReport,
   ImportCsvOptions,
   ImportReport,
+  NavicatImportPreview,
   ScanPage,
   Snippet,
   TableDescription,
@@ -75,6 +76,8 @@ export const api = {
   listConnections: () => invoke<ConnectionConfig[]>("list_connections"),
   saveConnection: (config: ConnectionConfig) =>
     invoke<ConnectionConfig>("save_connection", { config }),
+  previewNavicatConnections: (path: string) =>
+    invoke<NavicatImportPreview>("preview_navicat_connections", { path }),
   deleteConnection: (id: string) =>
     invoke<boolean>("delete_connection", { id }),
   testConnection: (config: ConnectionConfig) =>

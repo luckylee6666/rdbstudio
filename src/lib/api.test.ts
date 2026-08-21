@@ -61,6 +61,24 @@ describe("api", () => {
     expect(saved).toEqual(cfg);
   });
 
+  it("previewNavicatConnections passes the selected ncx path", async () => {
+    const preview = {
+      connections: [],
+      source_count: 0,
+      unsupported_types: [],
+      password_count: 0,
+      ssh_password_count: 0,
+      http_tunnel_count: 0,
+      unsupported_ssl_count: 0,
+    };
+    const calls = installRecorder(() => preview);
+
+    await api.previewNavicatConnections("/tmp/connections.ncx");
+
+    expect(calls[0].cmd).toBe("preview_navicat_connections");
+    expect(calls[0].payload).toEqual({ path: "/tmp/connections.ncx" });
+  });
+
   it("executeQuery passes id and sql and returns QueryResult", async () => {
     const result = {
       columns: [{ name: "a", data_type: "INT" }],

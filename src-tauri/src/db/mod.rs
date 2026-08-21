@@ -35,6 +35,7 @@ pub fn target_addr(cfg: &ConnectionConfig) -> (String, u16) {
 pub enum SslMode {
     Disable,
     Require,
+    VerifyCa,
     VerifyFull,
 }
 
@@ -42,6 +43,7 @@ pub fn ssl_mode_of(cfg: &ConnectionConfig) -> Option<SslMode> {
     match cfg.ssl_mode.as_deref().map(str::trim) {
         Some("disable") => Some(SslMode::Disable),
         Some("require") => Some(SslMode::Require),
+        Some("verify-ca") | Some("verify_ca") => Some(SslMode::VerifyCa),
         Some("verify-full") | Some("verify_full") => Some(SslMode::VerifyFull),
         _ => None,
     }
@@ -91,6 +93,7 @@ pub fn build_url_with(
                 let v = match mode {
                     SslMode::Disable => "disable",
                     SslMode::Require => "require",
+                    SslMode::VerifyCa => "verify-ca",
                     SslMode::VerifyFull => "verify-full",
                 };
                 url.push_str("?sslmode=");
@@ -121,6 +124,7 @@ pub fn build_url_with(
                 let v = match mode {
                     SslMode::Disable => "DISABLED",
                     SslMode::Require => "REQUIRED",
+                    SslMode::VerifyCa => "VERIFY_CA",
                     SslMode::VerifyFull => "VERIFY_IDENTITY",
                 };
                 url.push_str("?ssl-mode=");
@@ -154,6 +158,11 @@ pub fn build_url_with(
             let (scheme, frag) = match ssl {
                 None | Some(SslMode::Disable) => ("redis", ""),
                 Some(SslMode::Require) => ("rediss", "#insecure"),
+                Some(SslMode::VerifyCa) => {
+                    return Err(AppError::msg(
+                        "verify-ca TLS is not supported for Redis; choose verify-full or require",
+                    ));
+                }
                 Some(SslMode::VerifyFull) => ("rediss", ""),
             };
             Ok(format!(
@@ -253,6 +262,24 @@ mod tests {
         c.ssl_mode = Some("verify-full".into());
         let url = build_url(&c).unwrap();
         assert!(url.ends_with("?ssl-mode=VERIFY_IDENTITY"), "{url}");
+    }
+
+    #[test]
+    fn build_url_postgres_sslmode_verify_ca() {
+        let mut c = base_cfg(DriverKind::Postgres);
+        c.username = Some("u".into());
+        c.ssl_mode = Some("verify-ca".into());
+        let url = build_url(&c).unwrap();
+        assert!(url.ends_with("?sslmode=verify-ca"), "{url}");
+    }
+
+    #[test]
+    fn build_url_mysql_sslmode_verify_ca() {
+        let mut c = base_cfg(DriverKind::Mysql);
+        c.username = Some("u".into());
+        c.ssl_mode = Some("verify-ca".into());
+        let url = build_url(&c).unwrap();
+        assert!(url.ends_with("?ssl-mode=VERIFY_CA"), "{url}");
     }
 
     #[test]

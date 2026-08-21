@@ -395,6 +395,9 @@ export function ConnectionDialog({
                   <option value="">{t("conn.ssl.auto")}</option>
                   <option value="disable">{t("conn.ssl.disable")}</option>
                   <option value="require">{t("conn.ssl.require")}</option>
+                  {cfg.driver !== "redis" && (
+                    <option value="verify-ca">{t("conn.ssl.verify_ca")}</option>
+                  )}
                   <option value="verify-full">{t("conn.ssl.verify")}</option>
                 </Select>
               </div>

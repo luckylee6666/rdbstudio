@@ -3244,6 +3244,7 @@ dependencies = [
  "futures",
  "keyring",
  "parking_lot",
+ "quick-xml 0.38.4",
  "redis",
  "serde",
  "serde_json",

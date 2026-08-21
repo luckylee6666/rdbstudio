@@ -4,6 +4,7 @@ pub mod design;
 pub mod dump;
 pub mod io;
 pub mod meta;
+pub mod navicat;
 pub mod query;
 pub mod schema;
 pub mod snippets;

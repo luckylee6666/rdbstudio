@@ -124,6 +124,7 @@ fn apply_pg_ssl(
             match mode {
                 SslMode::Disable => "disable",
                 SslMode::Require => "require",
+                SslMode::VerifyCa => "verify-ca",
                 SslMode::VerifyFull => "verify-full",
             },
         );
@@ -140,6 +141,7 @@ fn apply_mysql_ssl(
         cmd.arg("--ssl-mode").arg(match mode {
             SslMode::Disable => "DISABLED",
             SslMode::Require => "REQUIRED",
+            SslMode::VerifyCa => "VERIFY_CA",
             SslMode::VerifyFull => "VERIFY_IDENTITY",
         });
     }
