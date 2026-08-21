@@ -81,7 +81,14 @@ impl DbPool {
             }
             DriverKind::Redis => {
                 let client = redis::Client::open(url)?;
-                let mgr = ConnectionManager::new(client).await?;
+                let mgr =
+                    tokio::time::timeout(Duration::from_secs(10), ConnectionManager::new(client))
+                        .await
+                        .map_err(|_| {
+                            crate::error::AppError::msg(
+                                "Redis connection timed out after 10 seconds",
+                            )
+                        })??;
                 Ok(Self::Redis(RedisHandle::new(mgr, redis_db_index(url))))
             }
         }

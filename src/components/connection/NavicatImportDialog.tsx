@@ -147,9 +147,8 @@ export function NavicatImportDialog({
   return (
     <Modal
       open={open}
-      onClose={() => {
-        if (!importing) onClose();
-      }}
+      onClose={onClose}
+      closeDisabled={importing}
       title={t("conn.navicat.title")}
       closeLabel={t("common.close")}
       width={640}

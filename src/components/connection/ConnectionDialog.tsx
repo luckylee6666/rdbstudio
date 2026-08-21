@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -53,6 +53,7 @@ export function ConnectionDialog({
     null
   );
   const [newGroupOpen, setNewGroupOpen] = useState(false);
+  const testAttemptRef = useRef(0);
 
   const save = useConnections((s) => s.save);
   const allConnections = useConnections((s) => s.list);
@@ -73,6 +74,8 @@ export function ConnectionDialog({
   })();
 
   useEffect(() => {
+    testAttemptRef.current += 1;
+    setTesting(false);
     if (!open) return;
     setResult(null);
     if (initial) {
@@ -82,12 +85,27 @@ export function ConnectionDialog({
     }
   }, [open, initial]);
 
+  const invalidateTest = () => {
+    testAttemptRef.current += 1;
+    setTesting(false);
+    setResult(null);
+  };
+
+  const handleClose = () => {
+    invalidateTest();
+    onClose();
+  };
+
   const update = <K extends keyof ConnectionConfig>(
     k: K,
     v: ConnectionConfig[K]
-  ) => setCfg((c) => ({ ...c, [k]: v }));
+  ) => {
+    invalidateTest();
+    setCfg((c) => ({ ...c, [k]: v }));
+  };
 
   const onDriverChange = (d: DriverKind) => {
+    invalidateTest();
     setCfg((c) => ({
       ...c,
       driver: d,
@@ -125,7 +143,8 @@ export function ConnectionDialog({
   };
 
   // Toggle the SSH tunnel on/off. Enabling seeds sensible defaults.
-  const toggleSsh = (on: boolean) =>
+  const toggleSsh = (on: boolean) => {
+    invalidateTest();
     setCfg((c) => ({
       ...c,
       ssh: on
@@ -139,8 +158,10 @@ export function ConnectionDialog({
           }
         : null,
     }));
+  };
 
-  const updateSsh = (patch: Partial<SshConfig>) =>
+  const updateSsh = (patch: Partial<SshConfig>) => {
+    invalidateTest();
     setCfg((c) => ({
       ...c,
       ssh: {
@@ -152,6 +173,7 @@ export function ConnectionDialog({
         ...patch,
       },
     }));
+  };
 
   const pickKey = async () => {
     const picked = await openDialog({
@@ -161,19 +183,23 @@ export function ConnectionDialog({
   };
 
   const onTest = async () => {
+    const attempt = ++testAttemptRef.current;
     setTesting(true);
     setResult(null);
     try {
       const v = await api.testConnection(cfg);
+      if (testAttemptRef.current !== attempt) return;
       setResult({ ok: true, msg: v });
     } catch (e) {
+      if (testAttemptRef.current !== attempt) return;
       setResult({ ok: false, msg: String(e) });
     } finally {
-      setTesting(false);
+      if (testAttemptRef.current === attempt) setTesting(false);
     }
   };
 
   const onSave = async () => {
+    invalidateTest();
     setSaving(true);
     try {
       await save(cfg);
@@ -191,7 +217,8 @@ export function ConnectionDialog({
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={handleClose}
+      closeDisabled={saving}
       title={initial ? t("conn.dialog.edit") : t("conn.dialog.new")}
       width={620}
       closeLabel={t("common.close")}
@@ -223,7 +250,7 @@ export function ConnectionDialog({
             <Button onClick={onTest} disabled={testing || saving}>
               {t("conn.dialog.test")}
             </Button>
-            <Button variant="ghost" onClick={onClose} disabled={saving}>
+            <Button variant="ghost" onClick={handleClose} disabled={saving}>
               {t("common.cancel")}
             </Button>
             <Button variant="primary" onClick={onSave} disabled={saving}>
@@ -275,65 +302,12 @@ export function ConnectionDialog({
               </Button>
             </div>
           </div>
-        ) : isRedis ? (
-          <>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_120px_120px]">
-              <div className="min-w-0">
-                <Label required>{t("conn.dialog.host")}</Label>
-                <Input
-                  value={cfg.host ?? ""}
-                  onChange={(e) => update("host", e.target.value)}
-                />
-              </div>
-              <div>
-                <Label required>{t("conn.dialog.port")}</Label>
-                <Input
-                  type="number"
-                  value={cfg.port ?? ""}
-                  onChange={(e) =>
-                    update("port", e.target.value ? Number(e.target.value) : null)
-                  }
-                />
-              </div>
-              <div>
-                <Label>{t("conn.dialog.redis.db_index")}</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  max={15}
-                  value={cfg.database ?? "0"}
-                  onChange={(e) => update("database", e.target.value)}
-                  placeholder="0"
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="min-w-0">
-                <Label hint={t("conn.dialog.redis.acl_user_hint")}>
-                  {t("conn.dialog.redis.acl_user")}
-                </Label>
-                <Input
-                  value={cfg.username ?? ""}
-                  onChange={(e) => update("username", e.target.value)}
-                  placeholder="default"
-                />
-              </div>
-              <div className="min-w-0">
-                <Label hint={initial ? t("conn.dialog.password.hint.edit") : t("conn.dialog.password.hint")}>
-                  {t("conn.dialog.password")}
-                </Label>
-                <Input
-                  type="password"
-                  value={cfg.password ?? ""}
-                  onChange={(e) => update("password", e.target.value)}
-                  placeholder={initial ? t("conn.dialog.password.placeholder.keep") : "••••••••"}
-                />
-              </div>
-            </div>
-          </>
         ) : (
           <>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
+            <div
+              className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_120px]"
+              data-testid="connection-network-fields"
+            >
               <div className="min-w-0">
                 <Label required>{t("conn.dialog.host")}</Label>
                 <Input
@@ -352,21 +326,49 @@ export function ConnectionDialog({
                 />
               </div>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div
+              className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2"
+              data-testid="connection-auth-fields"
+            >
               <div className="min-w-0">
-                <Label>{t("conn.dialog.database")}</Label>
-                <Input
-                  value={cfg.database ?? ""}
-                  onChange={(e) => update("database", e.target.value)}
-                  placeholder={cfg.driver === "postgres" ? "postgres" : ""}
-                />
+                <Label>
+                  {isRedis
+                    ? t("conn.dialog.redis.db_index")
+                    : t("conn.dialog.database")}
+                </Label>
+                {isRedis ? (
+                  <Input
+                    type="number"
+                    min={0}
+                    max={15}
+                    value={cfg.database ?? "0"}
+                    onChange={(e) => update("database", e.target.value)}
+                    placeholder="0"
+                  />
+                ) : (
+                  <Input
+                    value={cfg.database ?? ""}
+                    onChange={(e) => update("database", e.target.value)}
+                    placeholder={cfg.driver === "postgres" ? "postgres" : ""}
+                  />
+                )}
               </div>
               <div className="min-w-0">
-                <Label required>{t("conn.dialog.username")}</Label>
+                <Label required={!isRedis}>
+                  {isRedis
+                    ? t("conn.dialog.redis.acl_user")
+                    : t("conn.dialog.username")}
+                </Label>
                 <Input
                   value={cfg.username ?? ""}
                   onChange={(e) => update("username", e.target.value)}
+                  placeholder={isRedis ? "default" : undefined}
                 />
+                {isRedis && (
+                  <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground/75">
+                    {t("conn.dialog.redis.acl_user_hint")}
+                  </p>
+                )}
               </div>
             </div>
             <div>

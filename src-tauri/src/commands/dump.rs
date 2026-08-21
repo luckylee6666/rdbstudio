@@ -157,6 +157,59 @@ fn tail_of(s: &str, max: usize) -> String {
     }
 }
 
+fn mysql_database(cfg: &ConnectionConfig) -> Option<&str> {
+    cfg.database
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// A connection created without a default database represents the whole MySQL
+/// server in the tree. Dump all databases in that case instead of rejecting the
+/// root-level "Dump Database" action.
+fn apply_mysql_dump_scope(cmd: &mut tokio::process::Command, database: Option<&str>) {
+    match database {
+        Some(database) => {
+            // --databases preserves CREATE DATABASE / USE statements and also
+            // makes a database name beginning with '-' unambiguous.
+            cmd.arg("--databases").arg(database);
+        }
+        None => {
+            cmd.arg("--all-databases");
+        }
+    }
+}
+
+fn apply_pg_dump_scope(cmd: &mut tokio::process::Command, schema: Option<&str>, schema_only: bool) {
+    if let Some(schema) = schema {
+        cmd.arg("--schema").arg(schema);
+    }
+    if schema_only {
+        cmd.arg("--schema-only");
+    }
+}
+
+async fn dump_sqlite_schema(pool: &sqlx::SqlitePool, dest_path: &str) -> AppResult<()> {
+    let statements = sqlx::query_scalar::<_, String>(
+        "SELECT sql FROM sqlite_master \
+         WHERE sql IS NOT NULL \
+           AND name NOT LIKE 'sqlite_%' \
+           AND type IN ('table', 'index', 'trigger', 'view') \
+         ORDER BY CASE type \
+           WHEN 'table' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut sql = String::from("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n\n");
+    for statement in statements {
+        sql.push_str(statement.trim_end_matches(';'));
+        sql.push_str(";\n\n");
+    }
+    sql.push_str("COMMIT;\n");
+    std::fs::write(dest_path, sql)?;
+    Ok(())
+}
+
 async fn run_tool(mut cmd: tokio::process::Command, tool: &str) -> AppResult<()> {
     let out = cmd
         .output()
@@ -178,6 +231,8 @@ pub async fn dump_database(
     state: State<'_, AppState>,
     id: String,
     dest_path: String,
+    database: Option<String>,
+    schema_only: bool,
 ) -> AppResult<DumpReport> {
     let cfg = state
         .store
@@ -198,12 +253,21 @@ pub async fn dump_database(
             let DbPool::Sqlite(p) = &pool else {
                 return Err(AppError::msg("not a SQLite connection"));
             };
-            // VACUUM INTO refuses to overwrite; the save dialog already asked.
-            if Path::new(&dest_path).exists() {
-                std::fs::remove_file(&dest_path)?;
+            if let Some(database) = database.as_deref() {
+                if database != "main" {
+                    return Err(AppError::msg("SQLite only supports the main database"));
+                }
             }
-            let sql = format!("VACUUM INTO '{}'", dest_path.replace('\'', "''"));
-            sqlx::query(&sql).execute(p).await?;
+            if schema_only {
+                dump_sqlite_schema(p, &dest_path).await?;
+            } else {
+                // VACUUM INTO refuses to overwrite; the save dialog already asked.
+                if Path::new(&dest_path).exists() {
+                    std::fs::remove_file(&dest_path)?;
+                }
+                let sql = format!("VACUUM INTO '{}'", dest_path.replace('\'', "''"));
+                sqlx::query(&sql).execute(p).await?;
+            }
         }
         DriverKind::Postgres => {
             let bin = find_binary(&["pg_dump"]).ok_or_else(|| {
@@ -229,6 +293,7 @@ pub async fn dump_database(
                 .arg("--format=plain")
                 .arg("--file")
                 .arg(&dest_path);
+            apply_pg_dump_scope(&mut cmd, database.as_deref(), schema_only);
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--username").arg(u);
             }
@@ -246,11 +311,6 @@ pub async fn dump_database(
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
             let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
-            let db = cfg
-                .database
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| AppError::msg("set a database on the connection first"))?;
             let mut cmd = tokio::process::Command::new(bin);
             cmd.arg("--host")
                 .arg(&host)
@@ -259,8 +319,14 @@ pub async fn dump_database(
                 .arg("--single-transaction")
                 .arg("--routines")
                 .arg("--result-file")
-                .arg(&dest_path)
-                .arg(db);
+                .arg(&dest_path);
+            if schema_only {
+                cmd.arg("--no-data");
+            }
+            apply_mysql_dump_scope(
+                &mut cmd,
+                database.as_deref().or_else(|| mysql_database(&cfg)),
+            );
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--user").arg(u);
             }
@@ -343,19 +409,16 @@ pub async fn restore_database(
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
             let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
-            let db = cfg
-                .database
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| AppError::msg("set a database on the connection first"))?;
             let file = std::fs::File::open(&src_path)?;
             let mut cmd = tokio::process::Command::new(bin);
             cmd.arg("--host")
                 .arg(&host)
                 .arg("--port")
                 .arg(port.to_string())
-                .arg(db)
                 .stdin(std::process::Stdio::from(file));
+            if let Some(database) = mysql_database(&cfg) {
+                cmd.arg(database);
+            }
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--user").arg(u);
             }
@@ -386,6 +449,70 @@ mod tests {
     fn find_binary_locates_sh_from_path() {
         // /bin isn't in EXTRA_DIRS, but PATH on any dev/CI box resolves `sh`.
         assert!(find_binary(&["sh"]).is_some());
+    }
+
+    #[test]
+    fn mysql_dump_without_default_database_uses_all_databases() {
+        let mut cmd = tokio::process::Command::new("mysqldump");
+        apply_mysql_dump_scope(&mut cmd, None);
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--all-databases"]);
+    }
+
+    #[test]
+    fn mysql_dump_with_default_database_keeps_single_database_scope() {
+        let mut cmd = tokio::process::Command::new("mysqldump");
+        apply_mysql_dump_scope(&mut cmd, Some("app"));
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--databases", "app"]);
+    }
+
+    #[test]
+    fn postgres_single_schema_dump_can_be_structure_only() {
+        let mut cmd = tokio::process::Command::new("pg_dump");
+        apply_pg_dump_scope(&mut cmd, Some("public"), true);
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--schema", "public", "--schema-only"]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_structure_only_dump_omits_table_rows() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (name) VALUES ('secret-row')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.sql");
+
+        dump_sqlite_schema(&pool, path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let sql = std::fs::read_to_string(path).unwrap();
+        assert!(sql.contains("CREATE TABLE users"));
+        assert!(!sql.contains("secret-row"));
+        assert!(!sql.contains("INSERT INTO"));
     }
 
     #[cfg(target_os = "windows")]

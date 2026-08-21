@@ -13,6 +13,7 @@ fn csv_opts(path: &str) -> ExportOptions {
         quote_all: false,
         batch_size: 1000,
         include_ddl: false,
+        include_data: true,
     }
 }
 
@@ -159,6 +160,7 @@ async fn export_json_parses_back_as_array() {
         quote_all: false,
         batch_size: 1000,
         include_ddl: false,
+        include_data: true,
     };
     io::export_table(&pool, None, "users", &opts)
         .await
@@ -193,6 +195,7 @@ async fn export_sql_includes_insert_into_users() {
         quote_all: false,
         batch_size: 1000,
         include_ddl: true,
+        include_data: true,
     };
     io::export_table(&pool, None, "users", &opts)
         .await
@@ -213,6 +216,39 @@ async fn export_sql_includes_insert_into_users() {
     // should have 3 insert lines
     let count = text.matches("INSERT INTO").count();
     assert_eq!(count, 3, "expected 3 INSERT lines, got: {}", text);
+}
+
+#[tokio::test]
+async fn export_sql_structure_only_omits_all_rows() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+    let path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    let report = io::export_table(
+        &pool,
+        None,
+        "users",
+        &ExportOptions {
+            format: ExportFormat::Sql,
+            path: path.to_string_lossy().into_owned(),
+            delimiter: ',',
+            include_header: false,
+            quote_all: false,
+            batch_size: 1000,
+            include_ddl: true,
+            include_data: false,
+        },
+    )
+    .await
+    .expect("export structure");
+
+    let text = std::fs::read_to_string(&path).expect("read sql");
+    assert!(text.contains("CREATE TABLE"), "missing DDL: {text}");
+    assert!(!text.contains("INSERT INTO"), "unexpected data: {text}");
+    assert_eq!(report.rows_written, 0);
 }
 
 #[tokio::test]

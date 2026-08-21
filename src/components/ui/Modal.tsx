@@ -30,6 +30,7 @@ export function Modal({
   footer,
   width = 520,
   closeLabel = "Close",
+  closeDisabled = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -38,13 +39,17 @@ export function Modal({
   footer?: React.ReactNode;
   width?: number;
   closeLabel?: string;
+  /** Prevent Escape, backdrop and close-button dismissal during an operation. */
+  closeDisabled?: boolean;
 }) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const modalToken = useRef(Symbol("modal"));
   const previousFocus = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
+  const closeDisabledRef = useRef(closeDisabled);
   onCloseRef.current = onClose;
+  closeDisabledRef.current = closeDisabled;
 
   useEffect(() => {
     if (!open) return;
@@ -62,7 +67,7 @@ export function Modal({
       if (modalStack.at(-1) !== token) return;
       if (e.key === "Escape") {
         e.preventDefault();
-        onCloseRef.current();
+        if (!closeDisabledRef.current) onCloseRef.current();
         return;
       }
       if (e.key !== "Tab") return;
@@ -108,7 +113,9 @@ export function Modal({
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div
         className="absolute inset-0 bg-black/55 backdrop-blur-sm"
-        onClick={onClose}
+        onClick={() => {
+          if (!closeDisabled) onClose();
+        }}
       />
       <div
         ref={dialogRef}
@@ -128,9 +135,12 @@ export function Modal({
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => {
+              if (!closeDisabled) onClose();
+            }}
+            disabled={closeDisabled}
             aria-label={`${closeLabel}: ${title}`}
-            className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
             <X className="h-4 w-4" />
           </button>

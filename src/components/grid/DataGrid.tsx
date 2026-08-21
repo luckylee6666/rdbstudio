@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Braces, Check, Clipboard, FileText, Terminal, X } from "lucide-react";
 import { createPortal } from "react-dom";
@@ -58,7 +58,15 @@ export function DataGrid({
   const [ctx, setCtx] = useState<(CellSel & { x: number; y: number }) | null>(
     null
   );
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const t = useT();
+
+  useEffect(
+    () => () => {
+      resizeCleanupRef.current?.();
+    },
+    []
+  );
 
   const copyMenu = (sel: CellSel): MenuEntry[] => {
     const row = rows[sel.row] ?? [];
@@ -121,22 +129,42 @@ export function DataGrid({
   ) => {
     e.preventDefault();
     e.stopPropagation();
+    resizeCleanupRef.current?.();
     const startX = e.clientX;
     const startW = widths[index];
-    const onMove = (ev: MouseEvent) => {
-      const next = Math.max(MIN_COL_WIDTH, startW + (ev.clientX - startX));
+    let latestX = startX;
+    let frame: number | null = null;
+    const applyWidth = () => {
+      frame = null;
+      const next = Math.max(MIN_COL_WIDTH, startW + (latestX - startX));
       setWidths((w) => {
         const copy = w.slice();
         copy[index] = next;
         return copy;
       });
     };
-    const onUp = () => {
+    const onMove = (ev: MouseEvent) => {
+      latestX = ev.clientX;
+      if (frame == null) frame = window.requestAnimationFrame(applyWidth);
+    };
+    const cleanup = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", cleanup);
+      if (frame != null) window.cancelAnimationFrame(frame);
+      frame = null;
+      if (resizeCleanupRef.current === cleanup) resizeCleanupRef.current = null;
+    };
+    const onUp = (ev: MouseEvent) => {
+      latestX = ev.clientX;
+      if (frame != null) window.cancelAnimationFrame(frame);
+      applyWidth();
+      cleanup();
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", cleanup);
+    resizeCleanupRef.current = cleanup;
   };
 
   return (

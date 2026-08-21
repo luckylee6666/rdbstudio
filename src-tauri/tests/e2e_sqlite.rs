@@ -308,6 +308,7 @@ async fn export_csv_then_import_csv_round_trip() {
             quote_all: false,
             batch_size: 100,
             include_ddl: false,
+            include_data: true,
         },
     )
     .await

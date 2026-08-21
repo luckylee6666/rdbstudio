@@ -1,5 +1,13 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "@/lib/api";
 import { useConnections } from "@/store/connections";
 import { useI18n } from "@/store/i18n";
 import { ConnectionDialog } from "./ConnectionDialog";
@@ -8,6 +16,10 @@ describe("ConnectionDialog", () => {
   beforeEach(() => {
     useI18n.setState({ lang: "zh" });
     useConnections.setState({ list: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("groups connection safeguards without losing their interactions", () => {
@@ -125,5 +137,86 @@ describe("ConnectionDialog", () => {
       />
     );
     expect(screen.queryByRole("option", { name: "校验 CA 证书" })).not.toBeInTheDocument();
+  });
+
+  it("uses one consistent field grid for every network database driver", () => {
+    render(<ConnectionDialog open initial={null} onClose={vi.fn()} />);
+
+    const driver = screen.getByDisplayValue("PostgreSQL");
+    const expectStandardNetworkGrid = () => {
+      const network = screen.getByTestId("connection-network-fields");
+      expect(network).toHaveClass(
+        "sm:grid-cols-[minmax(0,1fr)_120px]"
+      );
+      expect(within(network).getByText("主机")).toBeInTheDocument();
+      expect(within(network).getByText("端口")).toBeInTheDocument();
+
+      const auth = screen.getByTestId("connection-auth-fields");
+      expect(auth).toHaveClass("sm:grid-cols-2");
+      return auth;
+    };
+
+    let auth = expectStandardNetworkGrid();
+    expect(within(auth).getByText("数据库")).toBeInTheDocument();
+    expect(within(auth).getByText("用户名")).toBeInTheDocument();
+
+    fireEvent.change(driver, { target: { value: "mysql" } });
+    auth = expectStandardNetworkGrid();
+    expect(within(auth).getByText("数据库")).toBeInTheDocument();
+    expect(within(auth).getByText("用户名")).toBeInTheDocument();
+
+    fireEvent.change(driver, { target: { value: "redis" } });
+    auth = expectStandardNetworkGrid();
+    expect(within(auth).getByText("DB 编号")).toBeInTheDocument();
+    expect(within(auth).getByText("用户")).toBeInTheDocument();
+    expect(
+      within(auth).getByText(/Redis 6\+ ACL 用户名/)
+    ).toBeInTheDocument();
+    expect(within(auth).queryByText("密码")).not.toBeInTheDocument();
+
+    fireEvent.change(driver, { target: { value: "sqlite" } });
+    expect(
+      screen.queryByTestId("connection-network-fields")
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("数据库文件")).toBeInTheDocument();
+  });
+
+  it("invalidates an unfinished connection test when the dialog closes", async () => {
+    let resolveTest!: (version: string) => void;
+    vi.spyOn(api, "testConnection").mockReturnValue(
+      new Promise<string>((resolve) => {
+        resolveTest = resolve;
+      })
+    );
+    const initial = {
+      id: "redis-slow",
+      name: "Slow Redis",
+      driver: "redis" as const,
+      host: "203.0.113.1",
+      port: 6379,
+      database: "0",
+      username: "",
+      ssl_mode: "disable",
+    };
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <ConnectionDialog open initial={initial} onClose={onClose} />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(await screen.findByText(/测试中/)).toBeInTheDocument();
+
+    rerender(
+      <ConnectionDialog open={false} initial={initial} onClose={onClose} />
+    );
+    rerender(<ConnectionDialog open initial={initial} onClose={onClose} />);
+
+    expect(screen.queryByText(/测试中/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "测试连接" })).toBeEnabled();
+
+    await act(async () => resolveTest("Redis 7.2.0"));
+    await waitFor(() => {
+      expect(screen.queryByText("Redis 7.2.0")).not.toBeInTheDocument();
+    });
   });
 });

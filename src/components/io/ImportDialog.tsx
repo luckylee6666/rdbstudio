@@ -141,6 +141,7 @@ export function ImportDialog({
     <Modal
       open={open}
       onClose={onClose}
+      closeDisabled={running}
       title={t("import.title", {
         target: `${schema ? schema + "." : ""}${table}`,
       })}

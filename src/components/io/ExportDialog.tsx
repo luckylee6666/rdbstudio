@@ -34,7 +34,9 @@ export function ExportDialog({
   const [delimiter, setDelimiter] = useState(",");
   const [header, setHeader] = useState(true);
   const [quoteAll, setQuoteAll] = useState(false);
-  const [includeDdl, setIncludeDdl] = useState(true);
+  const [sqlContent, setSqlContent] = useState<
+    "structure_data" | "structure_only" | "data_only"
+  >("structure_data");
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<ExportReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +76,8 @@ export function ExportDialog({
           delimiter,
           include_header: header,
           quote_all: quoteAll,
-          include_ddl: includeDdl,
+          include_ddl: sqlContent !== "data_only",
+          include_data: sqlContent !== "structure_only",
         },
         schema
       );
@@ -90,6 +93,7 @@ export function ExportDialog({
     <Modal
       open={open}
       onClose={onClose}
+      closeDisabled={running}
       title={t("export.title", {
         target: `${schema ? schema + "." : ""}${table}`,
       })}
@@ -192,13 +196,30 @@ export function ExportDialog({
 
         {format === "sql" && (
           <div className="space-y-3 rounded-lg border border-border/70 bg-surface-muted/30 p-3">
-            <Check
-              label={t("export.include_ddl")}
-              checked={includeDdl}
-              onChange={setIncludeDdl}
-            />
+            <div>
+              <Label>{t("export.sql_content")}</Label>
+              <Select
+                value={sqlContent}
+                onChange={(event) =>
+                  setSqlContent(
+                    event.target.value as
+                      | "structure_data"
+                      | "structure_only"
+                      | "data_only"
+                  )
+                }
+              >
+                <option value="structure_data">
+                  {t("export.sql.structure_data")}
+                </option>
+                <option value="structure_only">
+                  {t("export.sql.structure_only")}
+                </option>
+                <option value="data_only">{t("export.sql.data_only")}</option>
+              </Select>
+            </div>
             <p className="text-[12px] text-muted-foreground">
-              {t("export.sql_note")}
+              {t(`export.sql_note.${sqlContent}`)}
             </p>
           </div>
         )}

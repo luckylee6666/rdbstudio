@@ -58,7 +58,7 @@ import { api } from "@/lib/api";
 import { toast } from "@/store/toasts";
 import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
-import { ImportDialog } from "@/components/io/ImportDialog";
+import { DatabaseExportDialog } from "@/components/io/DatabaseExportDialog";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
 import { connColorValue } from "@/lib/connColors";
@@ -813,6 +813,11 @@ function ConnectionBranch({
         isDragging && "opacity-45"
       )}
       onMouseDown={(e) => {
+        // React events from portals (context menus / dialogs) still bubble
+        // through this component tree even though their DOM nodes live under
+        // document.body. Never interpret those interactions as a connection
+        // drag, otherwise a tiny pointer movement swallows the menu click.
+        if (!e.currentTarget.contains(e.target as Node)) return;
         // Manual drag: only left button, only when click starts on the row
         // (not on the chevron/buttons inside — those need their own clicks).
         if (e.button !== 0) return;
@@ -1268,6 +1273,7 @@ function DatabaseNode({
   const tablesError = branch?.tablesError?.[schemaKey];
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const t = useT();
 
   const openEr = () =>
@@ -1329,6 +1335,16 @@ function DatabaseNode({
               },
             },
             {
+              id: "export_database",
+              label:
+                driver === "postgres"
+                  ? t("tree.export_schema")
+                  : t("tree.export_database"),
+              icon: HardDriveDownload,
+              disabled: driver === "redis",
+              onClick: () => setExportOpen(true),
+            },
+            {
               id: "query",
               label: t("tree.new_query"),
               icon: Terminal,
@@ -1385,6 +1401,13 @@ function DatabaseNode({
         onCreated={() => {
           void loadTables(connectionId, schemaKey, passSchema);
         }}
+      />
+      <DatabaseExportDialog
+        open={exportOpen}
+        connectionId={connectionId}
+        driver={driver}
+        database={database}
+        onClose={() => setExportOpen(false)}
       />
     </div>
   );
@@ -1463,7 +1486,6 @@ function Folder({
   const [open, setOpen] = useState(defaultOpen);
   const [ctx, setCtx] = useState<{ x: number; y: number; entry: TreeEntry } | null>(null);
   const [exportTarget, setExportTarget] = useState<TreeEntry | null>(null);
-  const [importTarget, setImportTarget] = useState<TreeEntry | null>(null);
   const [dropTarget, setDropTarget] = useState<TreeEntry | null>(null);
   const [dropError, setDropError] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<TreeEntry | null>(null);
@@ -1475,6 +1497,7 @@ function Folder({
   const openTab = useWorkspace((s) => s.openTab);
   const closeTab = useWorkspace((s) => s.closeTab);
   const refreshBranch = useConnections((s) => s.refreshBranch);
+  const loadTables = useConnections((s) => s.loadTables);
   const branch = useConnections((s) => s.branches[connectionId]);
   const loadMoreRedisKeys = useConnections((s) => s.loadMoreRedisKeys);
   const isKeysFolder = label === "Keys";
@@ -1571,10 +1594,15 @@ function Folder({
         // stale data/designers.
         closeTab(`data:${connectionId}:${schema ?? ""}:${e.name}`);
         closeTab(`design:${connectionId}:${schema ?? ""}:${e.name}`);
+        toast.success(t("tree.rename.done", { name: newName ?? e.name }));
+      } else if (op === "copy_structure") {
+        toast.success(t("tree.copy_structure.done", { name: newName ?? e.name }));
+      } else {
+        toast.success(t("tree.truncate.done", { name: e.name }));
       }
-      if (op !== "truncate") await refreshBranch(connectionId);
-    } catch (err) {
-      setDropError(String(err));
+      if (op !== "truncate") {
+        await loadTables(connectionId, cacheKey, schema);
+      }
     } finally {
       setOpBusy(null);
     }
@@ -1629,16 +1657,10 @@ function Folder({
     { id: "sep1", label: "", separator: true },
     {
       id: "export",
-      label: t("tree.export"),
+      label: e.kind === "table" ? t("tree.export_table") : t("tree.export"),
       icon: FileDown,
+      disabled: e.kind !== "table" && e.kind !== "view",
       onClick: () => setExportTarget(e),
-    },
-    {
-      id: "import",
-      label: t("tree.import_csv"),
-      icon: FileUp,
-      disabled: e.kind !== "table",
-      onClick: () => setImportTarget(e),
     },
     { id: "sep2", label: "", separator: true },
     {
@@ -1802,13 +1824,6 @@ function Folder({
         schema={schema}
         onClose={() => setExportTarget(null)}
       />
-      <ImportDialog
-        open={!!importTarget}
-        connectionId={connectionId}
-        table={importTarget?.name ?? ""}
-        schema={schema}
-        onClose={() => setImportTarget(null)}
-      />
       {dropTarget && (
         <ConfirmDialog
           open={!!dropTarget}
@@ -1844,11 +1859,14 @@ function Folder({
         initialValue={renameTarget?.name ?? ""}
         submitLabel={t("common.save")}
         cancelLabel={t("common.cancel")}
-        onSubmit={(v) => {
+        onSubmit={async (v) => {
           const trimmed = v.trim();
-          if (renameTarget && trimmed && trimmed !== renameTarget.name) {
-            void runTableOp("rename", renameTarget, trimmed);
+          if (!renameTarget) return;
+          if (!trimmed) throw new Error(t("tree.rename.required"));
+          if (trimmed === renameTarget.name) {
+            throw new Error(t("tree.rename.unchanged"));
           }
+          await runTableOp("rename", renameTarget, trimmed);
         }}
         onClose={() => setRenameTarget(null)}
       />
@@ -1859,11 +1877,11 @@ function Folder({
         initialValue={copyTarget ? `${copyTarget.name}_copy` : ""}
         submitLabel={t("common.save")}
         cancelLabel={t("common.cancel")}
-        onSubmit={(v) => {
+        onSubmit={async (v) => {
           const trimmed = v.trim();
-          if (copyTarget && trimmed) {
-            void runTableOp("copy_structure", copyTarget, trimmed);
-          }
+          if (!copyTarget) return;
+          if (!trimmed) throw new Error(t("tree.rename.required"));
+          await runTableOp("copy_structure", copyTarget, trimmed);
         }}
         onClose={() => setCopyTarget(null)}
       />
@@ -1875,7 +1893,11 @@ function Folder({
           confirmLabel={t("tree.truncate.go")}
           cancelLabel={t("common.cancel")}
           danger
-          onConfirm={() => void runTableOp("truncate", truncateTarget)}
+          onConfirm={() => {
+            void runTableOp("truncate", truncateTarget).catch((error) => {
+              setDropError(String(error));
+            });
+          }}
           onClose={() => setTruncateTarget(null)}
         />
       )}

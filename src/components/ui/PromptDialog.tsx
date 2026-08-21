@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { Input, Label } from "./Field";
@@ -27,10 +28,12 @@ export function PromptDialog({
   cancelLabel?: string;
   /** Values to expose via <datalist> for autocompletion. */
   suggestions?: string[];
-  onSubmit: (value: string) => void;
+  onSubmit: (value: string) => void | Promise<void>;
   onClose: () => void;
 }) {
   const [value, setValue] = useState(initialValue);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Reset value whenever the dialog opens with a new initialValue, and focus
@@ -38,13 +41,24 @@ export function PromptDialog({
   useEffect(() => {
     if (!open) return;
     setValue(initialValue);
+    setSubmitting(false);
+    setError(null);
     const h = setTimeout(() => inputRef.current?.focus(), 0);
     return () => clearTimeout(h);
   }, [open, initialValue]);
 
-  const submit = () => {
-    onSubmit(value);
-    onClose();
+  const submit = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit(value);
+      onClose();
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const listId = suggestions && suggestions.length ? "rdb-prompt-suggest" : undefined;
@@ -53,14 +67,16 @@ export function PromptDialog({
     <Modal
       open={open}
       onClose={onClose}
+      closeDisabled={submitting}
       title={title}
       width={420}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={onClose} disabled={submitting}>
             {cancelLabel}
           </Button>
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" onClick={() => void submit()} disabled={submitting}>
+            {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             {submitLabel}
           </Button>
         </>
@@ -77,10 +93,16 @@ export function PromptDialog({
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              submit();
+              void submit();
             }
           }}
+          disabled={submitting}
         />
+        {error && (
+          <p role="alert" className="text-[12px] leading-relaxed text-danger">
+            {error}
+          </p>
+        )}
         {listId && (
           <datalist id={listId}>
             {suggestions!.map((s) => (

@@ -34,6 +34,10 @@ pub struct ExportOptions {
     /// self-contained dump rather than bare INSERTs. Ignored for CSV/JSON.
     #[serde(default)]
     pub include_ddl: bool,
+    /// SQL format only: include INSERT statements. Set this to false while
+    /// `include_ddl` is true for a structure-only export.
+    #[serde(default = "default_true")]
+    pub include_data: bool,
 }
 
 fn default_delim() -> char {
@@ -60,6 +64,21 @@ pub async fn export_table(
     opts: &ExportOptions,
 ) -> AppResult<ExportReport> {
     let start = std::time::Instant::now();
+
+    if matches!(opts.format, ExportFormat::Sql) && !opts.include_ddl && !opts.include_data {
+        return Err(AppError::msg(
+            "SQL export must include table structure, data, or both",
+        ));
+    }
+
+    // Fetch requested DDL before truncating the destination. In particular, a
+    // structure-only failure must not leave an empty file reported as success.
+    let ddl = if matches!(opts.format, ExportFormat::Sql) && opts.include_ddl {
+        Some(crate::db::design::ddl(pool, schema, table).await?)
+    } else {
+        None
+    };
+
     let file = File::create(&opts.path)?;
     let mut w = BufWriter::new(file);
 
@@ -67,6 +86,25 @@ pub async fn export_table(
     let batch_size = data::bounded_table_limit(opts.batch_size);
     let mut rows: u64 = 0;
     let mut first = true;
+
+    if let Some(ddl) = ddl {
+        let ddl = ddl.trim_end();
+        w.write_all(ddl.as_bytes())?;
+        if !ddl.ends_with(';') {
+            w.write_all(b";")?;
+        }
+        w.write_all(b"\n\n")?;
+    }
+
+    if matches!(opts.format, ExportFormat::Sql) && !opts.include_data {
+        w.flush()?;
+        let size = std::fs::metadata(&opts.path).map(|m| m.len()).unwrap_or(0);
+        return Ok(ExportReport {
+            rows_written: 0,
+            bytes: size,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
 
     // Deterministic paging: without a stable ORDER BY, LIMIT/OFFSET batches
     // can overlap or skip rows mid-export. Order by the first PK column when
@@ -79,21 +117,6 @@ pub async fn export_table(
             column: c.name,
             direction: data::SortDir::Asc,
         });
-
-    // SQL dump: emit the CREATE TABLE statement up front (best-effort — a
-    // describe failure shouldn't abort the data export).
-    if let ExportFormat::Sql = opts.format {
-        if opts.include_ddl {
-            if let Ok(ddl) = crate::db::design::ddl(pool, schema, table).await {
-                let ddl = ddl.trim_end();
-                w.write_all(ddl.as_bytes())?;
-                if !ddl.ends_with(';') {
-                    w.write_all(b";")?;
-                }
-                w.write_all(b"\n\n")?;
-            }
-        }
-    }
 
     if let ExportFormat::Json = opts.format { w.write_all(b"[\n")? }
 

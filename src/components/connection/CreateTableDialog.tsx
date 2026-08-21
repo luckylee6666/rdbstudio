@@ -269,6 +269,7 @@ export function CreateTableDialog({
     <Modal
       open={open}
       onClose={handleClose}
+      closeDisabled={saving}
       title={t("create.table.title")}
       width={780}
       footer={

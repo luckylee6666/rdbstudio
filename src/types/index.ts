@@ -197,6 +197,8 @@ export interface ExportOptions {
   batch_size?: number;
   /** SQL format only: prepend CREATE TABLE DDL to make a self-contained dump. */
   include_ddl?: boolean;
+  /** SQL format only: include INSERT statements. False produces structure-only SQL. */
+  include_data?: boolean;
 }
 
 export interface ExportReport {

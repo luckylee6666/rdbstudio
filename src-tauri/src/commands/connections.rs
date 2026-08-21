@@ -5,7 +5,10 @@ use crate::secret;
 use crate::state::AppState;
 use crate::store::ConnectionStore;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::State;
+
+const CONNECTION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Keychain entry id for a connection's SSH password/passphrase (kept separate
 /// from the DB password stored under the bare connection id).
@@ -156,19 +159,25 @@ fn hydrate_secrets_for_test(config: &mut ConnectionConfig) -> AppResult<()> {
 #[tauri::command]
 pub async fn test_connection(mut config: ConnectionConfig) -> AppResult<String> {
     hydrate_secrets_for_test(&mut config)?;
+    tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, test_connection_inner(&config))
+        .await
+        .map_err(|_| connection_timeout_error())?
+}
+
+async fn test_connection_inner(config: &ConnectionConfig) -> AppResult<String> {
     // If an SSH tunnel is configured, stand it up for the duration of the test
     // (the secret travels inline on the test request). `_tunnel` holds the
     // forward open; dropping it at scope end tears it down.
     let _tunnel;
     let url = if let Some(ssh_cfg) = config.ssh.as_ref() {
-        let (db_host, db_port) = target_addr(&config);
+        let (db_host, db_port) = target_addr(config);
         let secret = ssh_cfg.password.as_deref().filter(|s| !s.is_empty());
         let tunnel = ssh::open(ssh_cfg, &db_host, db_port, secret).await?;
         let local = (tunnel.local_host.clone(), tunnel.local_port);
         _tunnel = tunnel;
-        build_url_with(&config, Some((local.0.as_str(), local.1)))?
+        build_url_with(config, Some((local.0.as_str(), local.1)))?
     } else {
-        build_url_with(&config, None)?
+        build_url_with(config, None)?
     };
     let pool = DbPool::connect(config.driver, &url).await?;
     let v = crate::db::meta::server_version(&pool).await?;
@@ -184,9 +193,18 @@ pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<Connec
     if !state.begin_connect(&id) {
         return Err(AppError::msg("a connection attempt is already in progress"));
     }
-    let result = connect_inner(&state, &id).await;
+    let result = tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, connect_inner(&state, &id))
+        .await
+        .unwrap_or_else(|_| Err(connection_timeout_error()));
     state.end_connect(&id);
     result
+}
+
+fn connection_timeout_error() -> AppError {
+    AppError::msg(format!(
+        "Connection attempt timed out after {} seconds",
+        CONNECTION_ATTEMPT_TIMEOUT.as_secs()
+    ))
 }
 
 async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummary> {

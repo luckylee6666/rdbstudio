@@ -50,6 +50,7 @@ export function SettingsDialog({ open, onClose }: Props) {
     <Modal
       open={open}
       onClose={onClose}
+      closeDisabled={clearing}
       title={t("settings.title")}
       width={560}
       footer={
@@ -57,7 +58,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           <div className="mr-auto text-[11.5px] text-muted-foreground">
             rdbstudio · v{version || "…"}
           </div>
-          <Button variant="primary" onClick={onClose}>
+          <Button variant="primary" onClick={onClose} disabled={clearing}>
             {t("common.done")}
           </Button>
         </>

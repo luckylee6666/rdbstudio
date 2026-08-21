@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Modal } from "./Modal";
 
 function NestedModals() {
@@ -38,5 +38,29 @@ describe("Modal keyboard ownership", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Parent" })).not.toBeInTheDocument();
+  });
+
+  it("blocks every dismissal path while closing is disabled", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <Modal open closeDisabled onClose={onClose} title="Working">
+        Exporting
+      </Modal>
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Working" });
+    const backdrop = dialog.parentElement?.firstElementChild;
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Close: Working" }));
+    fireEvent.click(backdrop!);
+    expect(onClose).not.toHaveBeenCalled();
+
+    rerender(
+      <Modal open onClose={onClose} title="Working">
+        Done
+      </Modal>
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

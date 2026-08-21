@@ -191,8 +191,18 @@ export const api = {
     }),
   importCsv: (id: string, options: ImportCsvOptions) =>
     invoke<ImportReport>("import_csv", { id, options }),
-  dumpDatabase: (id: string, destPath: string) =>
-    invoke<DumpReport>("dump_database", { id, destPath }),
+  dumpDatabase: (
+    id: string,
+    destPath: string,
+    database?: string,
+    schemaOnly = false
+  ) =>
+    invoke<DumpReport>("dump_database", {
+      id,
+      destPath,
+      database: database ?? null,
+      schemaOnly,
+    }),
   restoreDatabase: (id: string, srcPath: string) =>
     invoke<RestoreReport>("restore_database", { id, srcPath }),
   previewCsv: (path: string, delimiter: string, hasHeader: boolean, limit = 5) =>

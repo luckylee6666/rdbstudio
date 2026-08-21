@@ -165,6 +165,7 @@ export function DesignerView({ tab }: { tab: WorkspaceTab }) {
       <Modal
         open={planOpen}
         onClose={() => setPlanOpen(false)}
+        closeDisabled={applying}
         title={t("design.plan.title")}
         width={720}
         footer={
@@ -174,7 +175,11 @@ export function DesignerView({ tab }: { tab: WorkspaceTab }) {
                 n: plan?.statements.length ?? 0,
               })}
             </div>
-            <Button variant="ghost" onClick={() => setPlanOpen(false)}>
+            <Button
+              variant="ghost"
+              onClick={() => setPlanOpen(false)}
+              disabled={applying}
+            >
               {t("common.close")}
             </Button>
             <Button

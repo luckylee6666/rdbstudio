@@ -603,6 +603,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
       <Modal
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
+        closeDisabled={applying}
         title={t("table.preview.title")}
         width={720}
         footer={
@@ -610,7 +611,11 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
             <div className="mr-auto text-[12px] text-muted-foreground">
               {t("table.preview.summary", { n: pendingCount })}
             </div>
-            <Button variant="ghost" onClick={() => setPreviewOpen(false)}>
+            <Button
+              variant="ghost"
+              onClick={() => setPreviewOpen(false)}
+              disabled={applying}
+            >
               {t("common.close")}
             </Button>
             <Button variant="primary" onClick={apply} disabled={applying}>
