@@ -5,6 +5,10 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.5] — 2026-09-03
+
 ### Fixed
 - MySQL 查询编辑器改用文本协议发送语句，`PREPARE` / `EXECUTE` / `DEALLOCATE PREPARE`、`USE`、`LOCK TABLES` 等语句不再报 `1295 (HY000): This command is not supported in the prepared statement protocol yet`，条件建表/加列脚本可以正常执行。
 - MySQL 脚本中途失败时不再一律提示「已整体回滚」：MySQL 的 DDL 会隐式提交，后端按实际执行过的语句判断回滚是否完整，遇到 DDL 或 `EXECUTE` / `CALL` 这类运行期才确定的语句会明确提示结构变更已经生效、需要人工核对。SQLite 和 PostgreSQL 的 DDL 仍在事务内，提示不变。
