@@ -488,6 +488,10 @@ const en: Dict = {
   "query.err.statement": "Statement {{n}} of {{m}} failed:",
   "query.err.statement_rolled_back":
     "Statement {{n}} of {{m}} failed — the whole script was rolled back:",
+  "query.err.statement_partial_rollback":
+    "Statement {{n}} of {{m}} failed. MySQL commits DDL implicitly, so schema changes made earlier in this script are already applied — check the objects it touched before re-running:",
+  "query.err.statement_self_managed":
+    "Statement {{n}} of {{m}} failed. This script manages its own transaction, so whether the earlier statements stand is up to your own BEGIN / COMMIT / ROLLBACK:",
   "query.err.export": "Export failed: {{error}}",
 
   // visual explain plan
@@ -1111,6 +1115,10 @@ const zh: Dict = {
   "query.err.cancelled": "查询已取消。",
   "query.err.statement": "第 {{n}}/{{m}} 条语句失败：",
   "query.err.statement_rolled_back": "第 {{n}}/{{m}} 条语句失败——已整体回滚：",
+  "query.err.statement_partial_rollback":
+    "第 {{n}}/{{m}} 条语句失败。MySQL 的 DDL 会隐式提交，脚本中之前的结构变更已经生效——重跑前请先核对相关对象：",
+  "query.err.statement_self_managed":
+    "第 {{n}}/{{m}} 条语句失败。脚本自行管理事务，之前的语句是否生效取决于你写的 BEGIN / COMMIT / ROLLBACK：",
   "query.err.export": "导出失败：{{error}}",
 
   // visual explain plan

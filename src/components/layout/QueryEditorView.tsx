@@ -20,7 +20,7 @@ import { DataGrid, type GridColumn } from "@/components/grid/DataGrid";
 import { ContextMenu } from "@/components/ui/ContextMenu";
 import { saveTextFile, toCSV } from "@/lib/csv";
 import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
-import { explainWrap, splitStatements } from "@/lib/sql";
+import { explainWrap, splitRedisCommands, splitStatements } from "@/lib/sql";
 import { getSchemaColumns, setSchemaColumns } from "@/lib/schemaCache";
 import { cn } from "@/lib/cn";
 import { useT } from "@/store/i18n";
@@ -289,7 +289,8 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       if (opts?.explain) {
         statements = [explainWrap(source, targetCfg?.driver ?? "")];
       } else if (isRedis) {
-        statements = [source];
+        statements = splitRedisCommands(source);
+        if (statements.length === 0) statements = [source];
       } else {
         statements = splitStatements(source);
         if (statements.length === 0) statements = [source];
@@ -301,28 +302,40 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       // the session that still owns the ref may touch the result display.
       const owns = () => runSessionRef.current === session;
 
-      // Multi-statement batches run atomically inside one backend transaction —
-      // unless the user manages transactions explicitly, in which case we stay
-      // out of the way and keep the per-statement loop.
+      // Multi-statement batches always go to the backend as one script so
+      // they share a single connection: a per-statement loop over the pool can
+      // land BEGIN and COMMIT on different connections, which silently
+      // autocommits the writes in between. `atomic` decides whether rdbstudio
+      // wraps them in its own transaction — a script with its own BEGIN/COMMIT
+      // manages that itself.
       const managesOwnTxn = statements.some((s) =>
         /^\s*(begin|commit|rollback|start\s+transaction|end)\b/i.test(s)
       );
-      const atomic = statements.length > 1 && !isRedis && !managesOwnTxn;
+      const asScript = statements.length > 1 && !isRedis;
 
       setState({ kind: "running" });
       try {
-        if (atomic) {
+        if (asScript) {
           const outcome = await api.executeScript(
             targetId,
             statements,
-            session.qid
+            session.qid,
+            !managesOwnTxn
           );
           if (!owns()) return;
           if (outcome.status === "failed") {
+            // "The whole script was rolled back" is a promise only the
+            // backend can make: MySQL commits DDL implicitly, and a script
+            // with its own BEGIN/COMMIT was never ours to roll back.
+            const heading = {
+              complete: "query.err.statement_rolled_back",
+              partial: "query.err.statement_partial_rollback",
+              self_managed: "query.err.statement_self_managed",
+            }[outcome.rollback];
             setState({
               kind: "error",
               message:
-                t("query.err.statement_rolled_back", {
+                t(heading, {
                   n: outcome.failed_index + 1,
                   m: outcome.statements,
                 }) +

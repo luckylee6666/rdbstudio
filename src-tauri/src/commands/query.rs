@@ -1,4 +1,4 @@
-use crate::db::exec::{execute, QueryResult, ScriptOutcome};
+use crate::db::exec::{execute, execute_readonly, QueryResult, RollbackState, ScriptOutcome};
 use crate::error::{AppError, AppResult};
 use crate::history::HistoryEntry;
 use crate::state::AppState;
@@ -17,15 +17,21 @@ pub async fn execute_query(
 
     // Connection-level read-only mode: classify the statement and reject
     // writes before anything reaches the driver. SQL uses the same detector
-    // as the result-shape branch; Redis gets a command whitelist.
-    if state.store.get(&id).map(|c| c.read_only).unwrap_or(false) {
+    // as the result-shape branch; Redis gets a command whitelist. The
+    // classification is the first of two layers — the run below puts the
+    // database itself in read-only mode.
+    let read_only = state.store.get(&id).map(|c| c.read_only).unwrap_or(false);
+    if read_only {
         let readonly_stmt = match &pool {
             crate::db::pool::DbPool::Redis(_) => crate::db::redis_ops::line_is_readonly(&sql),
-            _ => crate::db::exec::is_readonly(&sql),
+            // MySQL editor SQL travels unprepared, so one round trip can carry
+            // several statements while `is_readonly` only speaks for the
+            // first — a trailing statement has to be refused outright.
+            _ => crate::db::exec::is_single_statement(&sql) && crate::db::exec::is_readonly(&sql),
         };
         if !readonly_stmt {
             return Err(AppError::msg(
-                "connection is read-only — write statements are blocked",
+                "connection is read-only — write statements and multi-statement input are blocked",
             ));
         }
     }
@@ -36,7 +42,13 @@ pub async fn execute_query(
     // Aborting drops the sqlx future; the underlying connection is closed
     // rather than returned to the pool, which is the safe teardown.
     let task_sql = sql.clone();
-    let task = tokio::spawn(async move { execute(&pool, &task_sql).await });
+    let task = tokio::spawn(async move {
+        if read_only {
+            execute_readonly(&pool, &task_sql).await
+        } else {
+            execute(&pool, &task_sql).await
+        }
+    });
     if let Some(qid) = query_id.as_deref() {
         if !state.register_query(qid, task.abort_handle()) {
             task.abort();
@@ -89,21 +101,27 @@ pub async fn execute_script(
     id: String,
     sqls: Vec<String>,
     query_id: Option<String>,
+    // False when the script drives its own BEGIN/COMMIT: it still runs on one
+    // connection, but rdbstudio must not wrap (or roll back) it.
+    atomic: bool,
 ) -> AppResult<ScriptOutcome> {
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
 
-    if state.store.get(&id).map(|c| c.read_only).unwrap_or(false) {
+    let read_only = state.store.get(&id).map(|c| c.read_only).unwrap_or(false);
+    if read_only {
         let all_readonly = match &pool {
             crate::db::pool::DbPool::Redis(_) => sqls
                 .iter()
                 .all(|s| crate::db::redis_ops::line_is_readonly(s)),
-            _ => sqls.iter().all(|s| crate::db::exec::is_readonly(s)),
+            _ => sqls.iter().all(|s| {
+                crate::db::exec::is_single_statement(s) && crate::db::exec::is_readonly(s)
+            }),
         };
         if !all_readonly {
             return Err(AppError::msg(
-                "connection is read-only — write statements are blocked",
+                "connection is read-only — write statements and multi-statement input are blocked",
             ));
         }
     }
@@ -112,7 +130,15 @@ pub async fn execute_script(
     let joined = sqls.join(";\n");
 
     let task_sqls = sqls.clone();
-    let task = tokio::spawn(async move { crate::db::exec::execute_script(&pool, &task_sqls).await });
+    let task = tokio::spawn(async move {
+        if read_only {
+            // Nothing writes, so each statement runs behind the database's own
+            // read-only mode instead of inside a transaction of ours.
+            crate::db::exec::execute_script_readonly(&pool, &task_sqls).await
+        } else {
+            crate::db::exec::execute_script(&pool, &task_sqls, atomic).await
+        }
+    });
     if let Some(qid) = query_id.as_deref() {
         if !state.register_query(qid, task.abort_handle()) {
             task.abort();
@@ -148,6 +174,7 @@ pub async fn execute_script(
             failed_index,
             statements,
             error,
+            rollback,
         }) => HistoryEntry {
             id: uuid::Uuid::new_v4().to_string(),
             connection_id: id.clone(),
@@ -156,10 +183,15 @@ pub async fn execute_script(
             row_count: None,
             rows_affected: None,
             error: Some(format!(
-                "statement {}/{}: {} (rolled back)",
+                "statement {}/{}: {} ({})",
                 failed_index + 1,
                 statements,
-                error
+                error,
+                match rollback {
+                    RollbackState::Complete => "rolled back",
+                    RollbackState::Partial => "rollback incomplete — DDL committed implicitly",
+                    RollbackState::SelfManaged => "script manages its own transaction",
+                }
             )),
             at: at.clone(),
         },

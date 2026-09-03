@@ -163,7 +163,9 @@ async fn execute_script_commits_all_statements() {
         "UPDATE users SET age = 20 WHERE id = 2".to_string(),
         "SELECT count(*) AS n FROM users WHERE age IN (10, 20)".to_string(),
     ];
-    let out = exec::execute_script(&pool, &stmts).await.expect("script");
+    let out = exec::execute_script(&pool, &stmts, true)
+        .await
+        .expect("script");
     match out {
         exec::ScriptOutcome::Ok {
             result,
@@ -191,7 +193,7 @@ async fn execute_script_rolls_back_earlier_statements_on_failure() {
         "UPDATE users SET age = 111 WHERE id = 1".to_string(),
         "INSERT INTO no_such_table VALUES (1)".to_string(),
     ];
-    let out = exec::execute_script(&pool, &stmts)
+    let out = exec::execute_script(&pool, &stmts, true)
         .await
         .expect("failed scripts still return an outcome, not Err");
     match out {
@@ -199,10 +201,13 @@ async fn execute_script_rolls_back_earlier_statements_on_failure() {
             failed_index,
             statements,
             error,
+            rollback,
         } => {
             assert_eq!(failed_index, 1);
             assert_eq!(statements, 2);
             assert!(!error.is_empty());
+            // SQLite rolls DDL back like anything else.
+            assert!(matches!(rollback, exec::RollbackState::Complete));
         }
         other => panic!("expected Failed, got {:?}", other),
     }
@@ -214,4 +219,100 @@ async fn execute_script_rolls_back_earlier_statements_on_failure() {
         Some(111),
         "statement before the failure must be rolled back"
     );
+}
+
+#[tokio::test]
+async fn empty_result_set_still_carries_its_columns() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    // No rows to build the header from — the grid would otherwise be blank.
+    let r = exec::execute(&pool, "SELECT id, name FROM users WHERE 1 = 0")
+        .await
+        .expect("execute select");
+    assert!(r.rows.is_empty());
+    let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["id", "name"]);
+}
+
+#[tokio::test]
+async fn empty_result_set_in_a_script_keeps_its_columns() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let stmts = vec![
+        "SELECT 1".to_string(),
+        "SELECT id, name FROM users WHERE 1 = 0".to_string(),
+    ];
+    match exec::execute_script(&pool, &stmts, true)
+        .await
+        .expect("script")
+    {
+        exec::ScriptOutcome::Ok { result, .. } => {
+            let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, vec!["id", "name"]);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_only_connections_are_enforced_by_the_database() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    // Statement classification is the first layer; this is the one that holds
+    // when the classification is wrong (a SELECT calling a writing function).
+    let err = exec::execute_readonly(&pool, "UPDATE users SET age = 1 WHERE id = 1")
+        .await
+        .expect_err("SQLite itself must refuse the write");
+    assert!(
+        err.to_string().to_lowercase().contains("readonly"),
+        "expected a read-only error, got {err}"
+    );
+
+    // The guard is lifted again, so the connection stays usable for reads.
+    let r = exec::execute_readonly(&pool, "SELECT age FROM users WHERE id = 1")
+        .await
+        .expect("read after a refused write");
+    assert_eq!(
+        r.rows[0][0].as_i64(),
+        Some(30),
+        "the UPDATE must not have run"
+    );
+}
+
+#[tokio::test]
+async fn read_only_scripts_run_without_a_wrapping_transaction() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let stmts = vec![
+        "SELECT count(*) AS n FROM users".to_string(),
+        "SELECT name FROM users ORDER BY id".to_string(),
+    ];
+    match exec::execute_script_readonly(&pool, &stmts)
+        .await
+        .expect("read-only script")
+    {
+        exec::ScriptOutcome::Ok {
+            result, statements, ..
+        } => {
+            assert_eq!(statements, 2);
+            assert_eq!(result.rows[0][0].as_str(), Some("Alice"));
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let failing = vec![
+        "SELECT 1".to_string(),
+        "UPDATE users SET age = 1".to_string(),
+    ];
+    match exec::execute_script_readonly(&pool, &failing)
+        .await
+        .expect("read-only script")
+    {
+        exec::ScriptOutcome::Failed { failed_index, .. } => assert_eq!(failed_index, 1),
+        other => panic!("expected Failed, got {other:?}"),
+    }
 }

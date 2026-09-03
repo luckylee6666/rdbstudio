@@ -5,7 +5,17 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- MySQL 查询编辑器改用文本协议发送语句，`PREPARE` / `EXECUTE` / `DEALLOCATE PREPARE`、`USE`、`LOCK TABLES` 等语句不再报 `1295 (HY000): This command is not supported in the prepared statement protocol yet`，条件建表/加列脚本可以正常执行。
+- MySQL 脚本中途失败时不再一律提示「已整体回滚」：MySQL 的 DDL 会隐式提交，后端按实际执行过的语句判断回滚是否完整，遇到 DDL 或 `EXECUTE` / `CALL` 这类运行期才确定的语句会明确提示结构变更已经生效、需要人工核对。SQLite 和 PostgreSQL 的 DDL 仍在事务内，提示不变。
+- 编辑器里自己写 `BEGIN` / `COMMIT` / `ROLLBACK` 的脚本现在整批在同一条连接上执行。此前逐条语句各自从连接池取连接，`INSERT` 可能落在与 `BEGIN` 不同的连接上被立即提交，用户的 `ROLLBACK` 实际什么都没撤销；执行 `BEGIN` 的连接还会带着未结束的事务回到池里。这类批次结束后连接不再复用，避免 `USE`、`SET`、临时表、预处理语句名泄漏到其他查询。
+- Redis 编辑器按行执行命令。此前整个缓冲区被当成一条命令下发，`parse_args` 把换行当普通分隔符，`PING` + `PING` 会变成 `PING PING` 并静默返回 `PING`；后端现在也拒绝单次调用里出现多条命令。
+- 空结果集不再丢失列名：`SELECT ... WHERE 1 = 0` 会通过语句描述补齐表头，四种驱动一致。
+- 修复 MCP 桥的 MySQL 只读查询全部失败（`1295 … prepared statement protocol`）：只读保护语句 `START TRANSACTION READ ONLY` 之前走了预处理协议，MySQL 不支持，导致 0.1.4 起经 MCP 查询 MySQL 必然报错。
+
+### Security
+- 只读连接在执行前额外校验单条语句，防止 `SELECT 1; DELETE FROM t` 这类多语句输入借文本协议绕过只读判定。
+- 只读连接改由数据库原生只读模式强制保护（SQLite `PRAGMA query_only`、PostgreSQL `BEGIN READ ONLY`、MySQL `START TRANSACTION READ ONLY`），不再只依赖语句关键字分类，`SELECT` 调用有副作用的函数或 `nextval()` 也会被数据库拒绝。Redis 只读连接仍由命令白名单把关，并对多行输入 fail closed。
 
 ## [0.1.4] — 2026-08-21
 

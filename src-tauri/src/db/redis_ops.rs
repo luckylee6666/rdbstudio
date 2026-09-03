@@ -173,6 +173,15 @@ return 1"#
 
 pub async fn execute(handle: &RedisHandle, command_line: &str) -> AppResult<QueryResult> {
     let start = Instant::now();
+    // One command per call. `parse_args` treats a newline like any other
+    // separator, so a two-line buffer would quietly become one command with
+    // the second line as its arguments (`PING\nPING` → "PING"). Callers split
+    // by line; anything else is refused rather than silently reinterpreted.
+    if !is_single_command(command_line) {
+        return Err(AppError::msg(
+            "one Redis command per call — send each line separately",
+        ));
+    }
     let args = parse_args(command_line)?;
     if args.is_empty() {
         return Err(AppError::msg("empty Redis command"));
@@ -426,7 +435,30 @@ pub fn unsupported<T>(action: &str) -> AppResult<T> {
 /// True when a raw editor command line is a read-only Redis command. Used by
 /// the connection-level read-only guard. Unknown or unparsable commands are
 /// treated as writes — deny by default.
+/// True when `line` holds a single command: no bare newline outside a quoted
+/// argument. Quoted values keep their newlines — the parser accepts those.
+pub fn is_single_command(line: &str) -> bool {
+    let mut quoted = false;
+    let mut chars = line.trim().chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if quoted => {
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            '\n' | '\r' if !quoted => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 pub fn line_is_readonly(line: &str) -> bool {
+    // Fail closed on multi-line input: the verdict below only speaks for the
+    // first command.
+    if !is_single_command(line) {
+        return false;
+    }
     let args = match parse_args(line) {
         Ok(a) => a,
         Err(_) => return false,
@@ -575,6 +607,23 @@ mod tests {
         assert_eq!(bounded_scan_limit(0), 1);
         assert_eq!(bounded_scan_limit(DEFAULT_SCAN_LIMIT), DEFAULT_SCAN_LIMIT);
         assert_eq!(bounded_scan_limit(usize::MAX), MAX_SCAN_LIMIT);
+    }
+
+    #[test]
+    fn single_command_rejects_a_second_line() {
+        assert!(is_single_command("GET foo"));
+        assert!(is_single_command("  GET foo  \n"));
+        // A newline inside a quoted value is data, not a separator.
+        assert!(is_single_command("SET k \"line1\nline2\""));
+        assert!(!is_single_command("GET foo\nDEL bar"));
+        assert!(!is_single_command("PING\nPING"));
+    }
+
+    #[test]
+    fn readonly_verdict_fails_closed_on_multiple_commands() {
+        assert!(line_is_readonly("GET foo"));
+        // The verdict only speaks for the first command, so refuse the rest.
+        assert!(!line_is_readonly("GET foo\nDEL bar"));
     }
 
     #[test]

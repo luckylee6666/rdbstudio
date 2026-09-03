@@ -301,93 +301,17 @@ fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
     let mut chars = sql.chars().peekable();
     let mut word = String::new();
     while let Some(c) = chars.next() {
+        if skip_quoted_or_comment(c, &word, &mut chars).is_some() {
+            word.clear();
+            continue;
+        }
         match c {
-            // PG escape string: the E prefix is sitting in `word` when we hit
-            // the opening quote; inside, a backslash escapes the next char.
-            '\'' if word == "E" => {
-                let mut escaped = false;
-                while let Some(n) = chars.next() {
-                    if escaped {
-                        escaped = false;
-                        continue;
-                    }
-                    match n {
-                        '\\' => escaped = true,
-                        '\'' => {
-                            if chars.peek() == Some(&'\'') {
-                                chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                word.clear();
-            }
-            '\'' | '"' | '`' => {
-                // Skip the quoted literal/identifier; a doubled quote escapes.
-                while let Some(n) = chars.next() {
-                    if n == c {
-                        if chars.peek() == Some(&c) {
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                word.clear();
-            }
-            '-' if chars.peek() == Some(&'-') => {
-                for n in chars.by_ref() {
-                    if n == '\n' {
-                        break;
-                    }
-                }
-                word.clear();
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut prev = ' ';
-                for n in chars.by_ref() {
-                    if prev == '*' && n == '/' {
-                        break;
-                    }
-                    prev = n;
-                }
-                word.clear();
-            }
             '$' => {
                 if !word.is_empty() && pred(&word) {
                     return true;
                 }
                 word.clear();
-                match chars.peek().copied() {
-                    Some(c) if c.is_ascii_digit() => {
-                        // `$1` is a placeholder, not a dollar-quote.
-                    }
-                    Some('$') => {
-                        chars.next();
-                        skip_dollar_quoted(&mut chars, "");
-                    }
-                    Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-                        let mut tag = String::new();
-                        while let Some(n) = chars.peek().copied() {
-                            if n == '$' {
-                                chars.next();
-                                skip_dollar_quoted(&mut chars, &tag);
-                                break;
-                            }
-                            if n.is_ascii_alphanumeric() || n == '_' {
-                                tag.push(n);
-                                chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                skip_dollar_quote_body(&mut chars);
             }
             c if c.is_alphanumeric() || c == '_' => word.push(c.to_ascii_uppercase()),
             _ => {
@@ -399,6 +323,154 @@ fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
         }
     }
     !word.is_empty() && pred(&word)
+}
+
+/// What `skip_quoted_or_comment` consumed. The distinction only matters to
+/// `is_single_statement`, where a comment after `;` is harmless trailing text
+/// while a literal is the start of a second statement.
+enum Lexeme {
+    Literal,
+    Comment,
+}
+
+/// Consume a quoted literal/identifier or a comment opening at `c`, returning
+/// `None` — with the iterator untouched — when `c` opens neither. `prev_word`
+/// carries the pending bare word so Postgres' `E'…'` escape strings honor
+/// backslash escapes and `E'O\'Brien'` doesn't desync the literal tracking.
+fn skip_quoted_or_comment(
+    c: char,
+    prev_word: &str,
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+) -> Option<Lexeme> {
+    match c {
+        '\'' if prev_word == "E" => {
+            let mut escaped = false;
+            while let Some(n) = chars.next() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match n {
+                    '\\' => escaped = true,
+                    '\'' => {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(Lexeme::Literal)
+        }
+        '\'' | '"' | '`' => {
+            // Skip the quoted literal/identifier; a doubled quote escapes.
+            while let Some(n) = chars.next() {
+                if n == c {
+                    if chars.peek() == Some(&c) {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            Some(Lexeme::Literal)
+        }
+        '-' if chars.peek() == Some(&'-') => {
+            for n in chars.by_ref() {
+                if n == '\n' {
+                    break;
+                }
+            }
+            Some(Lexeme::Comment)
+        }
+        '/' if chars.peek() == Some(&'*') => {
+            chars.next();
+            let mut prev = ' ';
+            for n in chars.by_ref() {
+                if prev == '*' && n == '/' {
+                    break;
+                }
+                prev = n;
+            }
+            Some(Lexeme::Comment)
+        }
+        _ => None,
+    }
+}
+
+/// Consume a Postgres dollar-quoted string whose opening `$` was just read.
+/// `$1` is a bind placeholder, not a quote, and leaves the iterator alone.
+fn skip_dollar_quote_body(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
+    match chars.peek().copied() {
+        Some(c) if c.is_ascii_digit() => {}
+        Some('$') => {
+            chars.next();
+            skip_dollar_quoted(chars, "");
+        }
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            let mut tag = String::new();
+            while let Some(n) = chars.peek().copied() {
+                if n == '$' {
+                    chars.next();
+                    skip_dollar_quoted(chars, &tag);
+                    break;
+                }
+                if n.is_ascii_alphanumeric() || n == '_' {
+                    tag.push(n);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True when `sql` carries at most one statement: only whitespace, comments,
+/// or further empty statements follow the first bare `;`.
+///
+/// MySQL editor SQL is sent unprepared (see `mysql_select`) and one such round
+/// trip may carry several statements. `is_readonly` classifies a single one,
+/// so a read-only connection has to reject anything trailing before it reaches
+/// the driver — otherwise `SELECT 1; DELETE FROM t` would pass as a read.
+pub fn is_single_statement(sql: &str) -> bool {
+    let mut chars = sql.chars().peekable();
+    let mut word = String::new();
+    let mut terminated = false;
+    while let Some(c) = chars.next() {
+        match skip_quoted_or_comment(c, &word, &mut chars) {
+            Some(Lexeme::Comment) => {
+                word.clear();
+                continue;
+            }
+            Some(Lexeme::Literal) => {
+                if terminated {
+                    return false;
+                }
+                word.clear();
+                continue;
+            }
+            None => {}
+        }
+        match c {
+            ';' => {
+                terminated = true;
+                word.clear();
+            }
+            c if c.is_whitespace() => word.clear(),
+            _ if terminated => return false,
+            '$' => {
+                word.clear();
+                skip_dollar_quote_body(&mut chars);
+            }
+            c if c.is_alphanumeric() || c == '_' => word.push(c.to_ascii_uppercase()),
+            _ => word.clear(),
+        }
+    }
+    true
 }
 
 /// Skip the body of a `$tag$ … $tag$` dollar-quoted string (Postgres).
@@ -445,6 +517,31 @@ async fn fetch_capped<T>(
         rows.push(row);
     }
     Ok((rows, truncated))
+}
+
+/// Column metadata for a statement that came back with no rows. sqlx builds
+/// columns out of the rows themselves, so an empty result set would otherwise
+/// reach the grid with no headers at all — `SELECT id, name FROM t WHERE 1 = 0`
+/// rendered as a blank rectangle. Costs one extra round trip, and only when
+/// there is nothing else to go on. A driver that refuses to describe the
+/// statement (MySQL cannot prepare all of them — see `mysql_select`) leaves the
+/// result headerless, exactly as before, rather than failing the query.
+async fn describe_columns<'e, DB, E>(executor: E, sql: &str) -> Vec<ColumnMeta>
+where
+    DB: sqlx::Database,
+    E: sqlx::Executor<'e, Database = DB>,
+{
+    match executor.describe(sql).await {
+        Ok(described) => described
+            .columns()
+            .iter()
+            .map(|c| ColumnMeta {
+                name: c.name().to_string(),
+                data_type: c.type_info().name().to_string(),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Decode a driver-specific row stream while keeping MCP's memory/response
@@ -499,12 +596,13 @@ macro_rules! fetch_mcp_bounded {
 /// Returns a pooled connection normally only after its read-only/session
 /// state has been restored. Cancellation or any early error closes the socket
 /// instead, preventing a dirty session from leaking back into the editor pool.
-struct McpPoolConnection<DB: sqlx::Database> {
+/// Shared by the MCP bridge and the editor's read-only connections.
+struct GuardedConnection<DB: sqlx::Database> {
     inner: sqlx::pool::PoolConnection<DB>,
     reusable: bool,
 }
 
-impl<DB: sqlx::Database> McpPoolConnection<DB> {
+impl<DB: sqlx::Database> GuardedConnection<DB> {
     fn new(inner: sqlx::pool::PoolConnection<DB>) -> Self {
         Self {
             inner,
@@ -517,7 +615,7 @@ impl<DB: sqlx::Database> McpPoolConnection<DB> {
     }
 }
 
-impl<DB: sqlx::Database> Drop for McpPoolConnection<DB> {
+impl<DB: sqlx::Database> Drop for GuardedConnection<DB> {
     fn drop(&mut self) {
         if !self.reusable {
             self.inner.close_on_drop();
@@ -542,7 +640,8 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
         let rows_affected = match pool {
             DbPool::Sqlite(p) => sqlx::query(sql).execute(p).await?.rows_affected(),
             DbPool::Postgres(p) => sqlx::query(sql).execute(p).await?.rows_affected(),
-            DbPool::Mysql(p) => sqlx::query(sql).execute(p).await?.rows_affected(),
+            // Text protocol, for the reasons documented on `mysql_select`.
+            DbPool::Mysql(p) => sqlx::raw_sql(sql).execute(p).await?.rows_affected(),
             DbPool::Redis(_) => unreachable!("handled above"),
         };
         Ok(QueryResult {
@@ -553,6 +652,115 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
             truncated: false,
         })
     }
+}
+
+/// Execute one statement with the database's own read-only mode switched on,
+/// for connections the user marked read-only.
+///
+/// Classifying the SQL (`is_readonly`) is not enough on its own: a `SELECT`
+/// that calls a side-effecting function or `nextval()` reads like a read and
+/// writes like a write. The MCP bridge has been guarded at the database layer
+/// since 0.1.4; this puts the editor's read-only connections behind the same
+/// barrier, with the editor's own row cap instead of MCP's byte budget.
+pub async fn execute_readonly(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
+    // Redis has no transactional read-only mode; its guard is the command
+    // allowlist the caller already applied.
+    if let DbPool::Redis(h) = pool {
+        return redis_ops::execute(h, sql).await;
+    }
+    let start = Instant::now();
+    match pool {
+        DbPool::Redis(_) => unreachable!("handled above"),
+        DbPool::Sqlite(pool) => {
+            let mut conn = GuardedConnection::new(pool.acquire().await?);
+            sqlx::query("PRAGMA query_only = ON")
+                .execute(&mut *conn.inner)
+                .await?;
+            let fetched = fetch_capped(sqlx::query(sql).fetch(&mut *conn.inner)).await;
+            let cleanup = sqlx::query("PRAGMA query_only = OFF")
+                .execute(&mut *conn.inner)
+                .await;
+            if cleanup.is_ok() {
+                conn.mark_reusable();
+            }
+            let (rows, truncated) = fetched?;
+            cleanup?;
+            let mut out = decode_sqlite(rows, start);
+            out.truncated = truncated;
+            if out.columns.is_empty() {
+                out.columns = describe_columns(&mut *conn.inner, sql).await;
+            }
+            Ok(out)
+        }
+        DbPool::Postgres(pool) => {
+            let mut conn = GuardedConnection::new(pool.acquire().await?);
+            sqlx::query("BEGIN READ ONLY")
+                .execute(&mut *conn.inner)
+                .await?;
+            let fetched = fetch_capped(sqlx::query(sql).fetch(&mut *conn.inner)).await;
+            let cleanup = sqlx::query("ROLLBACK").execute(&mut *conn.inner).await;
+            if cleanup.is_ok() {
+                conn.mark_reusable();
+            }
+            let (rows, truncated) = fetched?;
+            cleanup?;
+            let mut out = decode_postgres(rows, start);
+            out.truncated = truncated;
+            if out.columns.is_empty() {
+                out.columns = describe_columns(&mut *conn.inner, sql).await;
+            }
+            Ok(out)
+        }
+        DbPool::Mysql(pool) => {
+            let mut conn = GuardedConnection::new(pool.acquire().await?);
+            // Text protocol for the guard itself: MySQL rejects
+            // `START TRANSACTION` over the prepared protocol with error 1295,
+            // which would fail the query instead of protecting it.
+            sqlx::Executor::execute(&mut *conn.inner, "START TRANSACTION READ ONLY").await?;
+            // Text protocol too, like every other editor path (see
+            // `mysql_select`). A single round trip can carry several
+            // statements, which the caller's single-statement check rules out
+            // before we get here.
+            let fetched = fetch_capped(sqlx::Executor::fetch(&mut *conn.inner, sql)).await;
+            let cleanup = sqlx::Executor::execute(&mut *conn.inner, "ROLLBACK").await;
+            if cleanup.is_ok() {
+                conn.mark_reusable();
+            }
+            let (rows, truncated) = fetched?;
+            cleanup?;
+            let mut out = decode_mysql(rows, start);
+            out.truncated = truncated;
+            if out.columns.is_empty() {
+                out.columns = describe_columns(&mut *conn.inner, sql).await;
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Run a read-only script statement by statement, each behind the database's
+/// own read-only mode. Nothing writes, so there is no transaction to wrap.
+pub async fn execute_script_readonly(pool: &DbPool, stmts: &[String]) -> AppResult<ScriptOutcome> {
+    if stmts.is_empty() {
+        return Err(AppError::msg("empty script"));
+    }
+    let start = Instant::now();
+    let mut last: Option<QueryResult> = None;
+    for (i, sql) in stmts.iter().enumerate() {
+        match execute_readonly(pool, sql).await {
+            Ok(r) => last = Some(r),
+            Err(e) => {
+                return Ok(ScriptOutcome::Failed {
+                    failed_index: i,
+                    statements: stmts.len(),
+                    error: e.to_string(),
+                    // Read-only throughout: nothing could have been left behind.
+                    rollback: RollbackState::Complete,
+                });
+            }
+        }
+    }
+    script_ok(last, 0, stmts.len(), start)
 }
 
 /// Execute a single SQL query for the local MCP bridge with two independent
@@ -586,7 +794,7 @@ pub async fn execute_mcp_readonly(
             // query_only is connection-local. close_on_drop is essential: if
             // this future is cancelled or times out, the connection must not
             // return to the shared editor pool with query_only still enabled.
-            let mut conn = McpPoolConnection::new(pool.acquire().await?);
+            let mut conn = GuardedConnection::new(pool.acquire().await?);
             sqlx::query("PRAGMA query_only = ON")
                 .execute(&mut *conn.inner)
                 .await?;
@@ -607,7 +815,7 @@ pub async fn execute_mcp_readonly(
             result
         }
         DbPool::Postgres(pool) => {
-            let mut conn = McpPoolConnection::new(pool.acquire().await?);
+            let mut conn = GuardedConnection::new(pool.acquire().await?);
             sqlx::query("BEGIN READ ONLY")
                 .execute(&mut *conn.inner)
                 .await?;
@@ -626,17 +834,20 @@ pub async fn execute_mcp_readonly(
             result
         }
         DbPool::Mysql(pool) => {
-            let mut conn = McpPoolConnection::new(pool.acquire().await?);
-            sqlx::query("START TRANSACTION READ ONLY")
-                .execute(&mut *conn.inner)
-                .await?;
+            let mut conn = GuardedConnection::new(pool.acquire().await?);
+            // The guard has to travel over the text protocol: MySQL refuses
+            // `START TRANSACTION` in the prepared protocol (error 1295), so
+            // preparing it failed every MySQL query this bridge ever ran.
+            // The query below deliberately stays prepared — that is what keeps
+            // a second statement from riding along in the same round trip.
+            sqlx::Executor::execute(&mut *conn.inner, "START TRANSACTION READ ONLY").await?;
             let result = fetch_mcp_bounded!(
                 sqlx::query(sql).fetch(&mut *conn.inner),
                 mysql_val,
                 max_rows,
                 max_json_bytes
             );
-            let cleanup = sqlx::query("ROLLBACK").execute(&mut *conn.inner).await;
+            let cleanup = sqlx::Executor::execute(&mut *conn.inner, "ROLLBACK").await;
             if cleanup.is_ok() {
                 conn.mark_reusable();
             }
@@ -670,14 +881,93 @@ pub enum ScriptOutcome {
         failed_index: usize,
         statements: usize,
         error: String,
+        rollback: RollbackState,
     },
 }
 
-/// Run statements sequentially inside a single transaction; any failure rolls
-/// the whole script back. The returned `result` is the last statement's
-/// (matching the editor's "last result wins" display), with `elapsed_ms`
-/// covering the full script.
-pub async fn execute_script(pool: &DbPool, stmts: &[String]) -> AppResult<ScriptOutcome> {
+/// What survived a failed script.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackState {
+    /// Everything the script ran was undone.
+    Complete,
+    /// The server kept part of it: MySQL commits DDL implicitly, so a script
+    /// that altered a table before failing leaves that change behind.
+    Partial,
+    /// The script drives its own `BEGIN` / `COMMIT`, so nothing was rolled
+    /// back on its behalf — what stands is whatever the user's own
+    /// transaction statements committed.
+    SelfManaged,
+}
+
+/// True when a MySQL statement leaves the surrounding transaction intact.
+///
+/// This is an allowlist on purpose. MySQL's implicit-commit set is long and
+/// version-dependent (all DDL, account management, `LOCK TABLES`, `FLUSH`,
+/// `ANALYZE`/`OPTIMIZE`/`REPAIR TABLE`, …), and a statement we fail to
+/// recognise must not be allowed to claim a clean rollback. `EXECUTE` and
+/// `CALL` are excluded for the same reason: what they run is only known at
+/// runtime, and the conditional-DDL idiom (`PREPARE stmt FROM @ddl; EXECUTE
+/// stmt`) hides an `ALTER TABLE` behind a user variable — exactly the case
+/// worth warning about.
+fn mysql_keeps_transaction(sql: &str) -> bool {
+    match first_keyword(sql).as_str() {
+        // Session and user variables are fine; `SET autocommit` and
+        // `SET PASSWORD` commit.
+        "SET" => {
+            let rest = skip_first_keyword(sql).trim_start().to_ascii_uppercase();
+            !rest.starts_with("PASSWORD") && !rest.starts_with("AUTOCOMMIT")
+        }
+        "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "WITH" | "VALUES" | "TABLE"
+        | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "PREPARE" | "DEALLOCATE" | "DO" | "USE"
+        | "SAVEPOINT" | "HANDLER" | "HELP" => true,
+        _ => false,
+    }
+}
+
+/// Whether rolling back the statements that ran (`ran` ends with the one that
+/// failed — MySQL's implicit commit happens *before* a statement executes, so
+/// a failing DDL still committed everything before it) undoes all of them.
+fn mysql_rollback_state(ran: &[String]) -> RollbackState {
+    if ran.iter().all(|s| mysql_keeps_transaction(s)) {
+        RollbackState::Complete
+    } else {
+        RollbackState::Partial
+    }
+}
+
+/// SQLite and Postgres are transactional for DDL too: a rollback is total.
+fn rollback_always_complete(_ran: &[String]) -> RollbackState {
+    RollbackState::Complete
+}
+
+/// A self-managed batch borrows one connection for the whole run and then
+/// throws it away instead of returning it to the pool. `USE`, `SET`, temp
+/// tables, prepared statement names and — worst of all — a transaction the
+/// script opened but never closed all live on the connection; handing it back
+/// would leak that state into whatever query picks it up next.
+fn close_after_batch<DB: sqlx::Database>(mut conn: sqlx::pool::PoolConnection<DB>) {
+    conn.close_on_drop();
+}
+
+/// SQLite keeps its connection: session state there is limited to `PRAGMA`,
+/// and closing would destroy an in-memory database outright.
+fn reuse_after_batch<DB: sqlx::Database>(_conn: sqlx::pool::PoolConnection<DB>) {}
+
+/// Run statements sequentially on **one** connection. `atomic` wraps them in a
+/// transaction so any failure rolls the whole script back; a script that
+/// drives its own `BEGIN` / `COMMIT` passes `atomic = false` and gets the bare
+/// connection instead — running those statement by statement over a shared
+/// pool used to scatter them across connections, which silently turned the
+/// user's `ROLLBACK` into a no-op over an already autocommitted write.
+///
+/// The returned `result` is the last statement's (matching the editor's "last
+/// result wins" display), with `elapsed_ms` covering the full script.
+pub async fn execute_script(
+    pool: &DbPool,
+    stmts: &[String],
+    atomic: bool,
+) -> AppResult<ScriptOutcome> {
     if stmts.is_empty() {
         return Err(AppError::msg("empty script"));
     }
@@ -686,77 +976,167 @@ pub async fn execute_script(pool: &DbPool, stmts: &[String]) -> AppResult<Script
         DbPool::Redis(_) => Err(AppError::msg(
             "multi-statement scripts are not supported for Redis",
         )),
-        DbPool::Sqlite(p) => sqlite_script(p, stmts, start).await,
-        DbPool::Postgres(p) => pg_script(p, stmts, start).await,
-        DbPool::Mysql(p) => mysql_script(p, stmts, start).await,
+        DbPool::Sqlite(p) => sqlite_script(p, stmts, start, atomic).await,
+        DbPool::Postgres(p) => pg_script(p, stmts, start, atomic).await,
+        DbPool::Mysql(p) => mysql_script(p, stmts, start, atomic).await,
     }
 }
 
+/// Shared tail of both script paths: the last statement's result carries the
+/// whole run's elapsed time.
+fn script_ok(
+    last: Option<QueryResult>,
+    total: u64,
+    statements: usize,
+    start: Instant,
+) -> AppResult<ScriptOutcome> {
+    let mut result = last.expect("non-empty script always yields a result");
+    result.elapsed_ms = start.elapsed().as_millis() as u64;
+    Ok(ScriptOutcome::Ok {
+        result,
+        total_affected: total,
+        statements,
+    })
+}
+
+/// Drive `$stmts` over one connection handle, stopping at the first failure.
+/// Expands inline (it awaits) so the transactional and the self-managed path
+/// can share the loop while each holds its own kind of handle.
+macro_rules! run_statements {
+    ($holder:expr, $stmts:expr, $decode:ident, $proto:ident) => {{
+        let mut total: u64 = 0;
+        let mut last: Option<QueryResult> = None;
+        let mut failure: Option<(usize, String)> = None;
+        for (i, sql) in $stmts.iter().enumerate() {
+            let one: AppResult<QueryResult> = if is_readonly(sql) || has_returning(sql) {
+                let stmt_start = Instant::now();
+                match fetch_capped(script_fetch!($proto, &mut *$holder, sql)).await {
+                    Ok((rows, truncated)) => {
+                        let mut out = $decode(rows, stmt_start);
+                        out.truncated = truncated;
+                        if out.columns.is_empty() {
+                            out.columns = describe_columns(&mut *$holder, sql).await;
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                match script_execute!($proto, &mut *$holder, sql).await {
+                    Ok(r) => Ok(QueryResult {
+                        columns: vec![],
+                        rows: vec![],
+                        rows_affected: Some(r.rows_affected()),
+                        elapsed_ms: 0,
+                        truncated: false,
+                    }),
+                    Err(e) => Err(e.into()),
+                }
+            };
+            match one {
+                Ok(r) => {
+                    if let Some(n) = r.rows_affected {
+                        total += n;
+                    }
+                    last = Some(r);
+                }
+                Err(e) => {
+                    failure = Some((i, e.to_string()));
+                    break;
+                }
+            }
+        }
+        (last, total, failure)
+    }};
+}
+
+/// Per-driver statement dispatch inside a script transaction. `prepared` is
+/// the default (`sqlx::query`); `text` hands the executor a bare `&str`, which
+/// sqlx sends unprepared — see `mysql_select` for why MySQL needs that.
+macro_rules! script_fetch {
+    (prepared, $tx:expr, $sql:expr) => {
+        sqlx::query($sql.as_str()).fetch($tx)
+    };
+    (text, $tx:expr, $sql:expr) => {
+        sqlx::Executor::fetch($tx, $sql.as_str())
+    };
+}
+
+macro_rules! script_execute {
+    (prepared, $tx:expr, $sql:expr) => {
+        sqlx::query($sql.as_str()).execute($tx)
+    };
+    (text, $tx:expr, $sql:expr) => {
+        sqlx::Executor::execute($tx, $sql.as_str())
+    };
+}
+
 macro_rules! script_impl {
-    ($fn_name:ident, $pool_ty:ty, $decode:ident) => {
+    ($fn_name:ident, $pool_ty:ty, $decode:ident, $proto:ident, $rollback:path, $release:path) => {
         async fn $fn_name(
             pool: &$pool_ty,
             stmts: &[String],
             start: Instant,
+            atomic: bool,
         ) -> AppResult<ScriptOutcome> {
-            let mut tx = pool.begin().await?;
-            let mut total: u64 = 0;
-            let mut last: Option<QueryResult> = None;
-            for (i, sql) in stmts.iter().enumerate() {
-                let one: AppResult<QueryResult> = if is_readonly(sql) || has_returning(sql) {
-                    let stmt_start = Instant::now();
-                    match fetch_capped(sqlx::query(sql).fetch(&mut *tx)).await {
-                        Ok((rows, truncated)) => {
-                            let mut out = $decode(rows, stmt_start);
-                            out.truncated = truncated;
-                            Ok(out)
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    match sqlx::query(sql).execute(&mut *tx).await {
-                        Ok(r) => Ok(QueryResult {
-                            columns: vec![],
-                            rows: vec![],
-                            rows_affected: Some(r.rows_affected()),
-                            elapsed_ms: 0,
-                            truncated: false,
-                        }),
-                        Err(e) => Err(e.into()),
-                    }
-                };
-                match one {
-                    Ok(r) => {
-                        if let Some(n) = r.rows_affected {
-                            total += n;
-                        }
-                        last = Some(r);
-                    }
-                    Err(e) => {
-                        let _ = tx.rollback().await;
-                        return Ok(ScriptOutcome::Failed {
-                            failed_index: i,
-                            statements: stmts.len(),
-                            error: e.to_string(),
-                        });
-                    }
+            if atomic {
+                let mut tx = pool.begin().await?;
+                let (last, total, failure) = run_statements!(tx, stmts, $decode, $proto);
+                if let Some((i, error)) = failure {
+                    let _ = tx.rollback().await;
+                    return Ok(ScriptOutcome::Failed {
+                        failed_index: i,
+                        statements: stmts.len(),
+                        error,
+                        rollback: $rollback(&stmts[..=i]),
+                    });
                 }
+                tx.commit().await?;
+                script_ok(last, total, stmts.len(), start)
+            } else {
+                // The script's own BEGIN/COMMIT only mean anything if every
+                // statement lands on the same connection.
+                let mut conn = pool.acquire().await?;
+                let (last, total, failure) = run_statements!(conn, stmts, $decode, $proto);
+                $release(conn);
+                if let Some((i, error)) = failure {
+                    return Ok(ScriptOutcome::Failed {
+                        failed_index: i,
+                        statements: stmts.len(),
+                        error,
+                        rollback: RollbackState::SelfManaged,
+                    });
+                }
+                script_ok(last, total, stmts.len(), start)
             }
-            tx.commit().await?;
-            let mut result = last.expect("non-empty script always yields a result");
-            result.elapsed_ms = start.elapsed().as_millis() as u64;
-            Ok(ScriptOutcome::Ok {
-                result,
-                total_affected: total,
-                statements: stmts.len(),
-            })
         }
     };
 }
 
-script_impl!(sqlite_script, sqlx::SqlitePool, decode_sqlite);
-script_impl!(pg_script, sqlx::PgPool, decode_postgres);
-script_impl!(mysql_script, sqlx::MySqlPool, decode_mysql);
+script_impl!(
+    sqlite_script,
+    sqlx::SqlitePool,
+    decode_sqlite,
+    prepared,
+    rollback_always_complete,
+    reuse_after_batch
+);
+script_impl!(
+    pg_script,
+    sqlx::PgPool,
+    decode_postgres,
+    prepared,
+    rollback_always_complete,
+    close_after_batch
+);
+script_impl!(
+    mysql_script,
+    sqlx::MySqlPool,
+    decode_mysql,
+    text,
+    mysql_rollback_state,
+    close_after_batch
+);
 
 async fn sqlite_select(
     pool: &sqlx::SqlitePool,
@@ -766,6 +1146,9 @@ async fn sqlite_select(
     let (rows, truncated) = fetch_capped(sqlx::query(sql).fetch(pool)).await?;
     let mut out = decode_sqlite(rows, start);
     out.truncated = truncated;
+    if out.columns.is_empty() {
+        out.columns = describe_columns(pool, sql).await;
+    }
     Ok(out)
 }
 
@@ -834,6 +1217,9 @@ async fn pg_select(
     let (rows, truncated) = fetch_capped(sqlx::query(sql).fetch(pool)).await?;
     let mut out = decode_postgres(rows, start);
     out.truncated = truncated;
+    if out.columns.is_empty() {
+        out.columns = describe_columns(pool, sql).await;
+    }
     Ok(out)
 }
 
@@ -929,14 +1315,28 @@ fn pg_val(r: &sqlx::postgres::PgRow, i: usize) -> Json {
     }
 }
 
+/// Editor SQL reaches MySQL over the text protocol (`raw_sql`), not the
+/// prepared-statement protocol `sqlx::query` uses. MySQL refuses a whole class
+/// of statements once they are prepared — `PREPARE` / `EXECUTE` / `DEALLOCATE
+/// PREPARE`, `USE`, `LOCK TABLES`, `LOAD DATA`, some `SHOW` variants — with
+/// error 1295 ("This command is not supported in the prepared statement
+/// protocol yet"), and hand-written migration scripts routinely use them. The
+/// editor never binds parameters, so preparing buys nothing here.
+///
+/// `execute_mcp_readonly` deliberately stays on `sqlx::query`: the prepared
+/// protocol rejects multi-statement input, which is one of the bridge's write
+/// barriers.
 async fn mysql_select(
     pool: &sqlx::MySqlPool,
     sql: &str,
     start: Instant,
 ) -> AppResult<QueryResult> {
-    let (rows, truncated) = fetch_capped(sqlx::query(sql).fetch(pool)).await?;
+    let (rows, truncated) = fetch_capped(sqlx::raw_sql(sql).fetch(pool)).await?;
     let mut out = decode_mysql(rows, start);
     out.truncated = truncated;
+    if out.columns.is_empty() {
+        out.columns = describe_columns(pool, sql).await;
+    }
     Ok(out)
 }
 
@@ -1149,6 +1549,124 @@ fn base64_like(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_rollback_survives_dml_and_session_state() {
+        for sql in [
+            "SELECT 1",
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "REPLACE INTO t VALUES (1)",
+            "SET @ddl := 'ALTER TABLE t ADD COLUMN a INT'",
+            "PREPARE s FROM @ddl",
+            "DEALLOCATE PREPARE s",
+            "SHOW COLUMNS FROM t",
+            "-- note\nSELECT 1",
+        ] {
+            assert!(
+                mysql_keeps_transaction(sql),
+                "expected rollbackable: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_rollback_cannot_undo_ddl_or_dynamic_statements() {
+        for sql in [
+            "ALTER TABLE t ADD COLUMN a INT",
+            "CREATE INDEX i ON t (a)",
+            "DROP TABLE t",
+            "TRUNCATE TABLE t",
+            "RENAME TABLE t TO u",
+            "LOCK TABLES t WRITE",
+            "FLUSH TABLES",
+            "GRANT SELECT ON *.* TO u",
+            "SET autocommit = 1",
+            "SET PASSWORD FOR u = 'x'",
+            // Opaque: what these run is only known at runtime.
+            "EXECUTE add_column_stmt",
+            "CALL do_migration()",
+            "TOTALLY UNKNOWN STATEMENT",
+        ] {
+            assert!(
+                !mysql_keeps_transaction(sql),
+                "expected implicit commit: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_rollback_complete_judges_every_statement_that_ran() {
+        let dml = ["SET @n := 1".to_string(), "UPDATE t SET a = 1".to_string()];
+        assert!(matches!(
+            mysql_rollback_state(&dml),
+            RollbackState::Complete
+        ));
+
+        // The conditional-DDL idiom: the ALTER hides inside @ddl, so the
+        // EXECUTE is what marks the script as no longer rollbackable.
+        let conditional = [
+            "SET @ddl := 'ALTER TABLE t ADD COLUMN a INT'".to_string(),
+            "PREPARE s FROM @ddl".to_string(),
+            "EXECUTE s".to_string(),
+        ];
+        assert!(matches!(
+            mysql_rollback_state(&conditional),
+            RollbackState::Partial
+        ));
+
+        assert!(matches!(
+            rollback_always_complete(&conditional),
+            RollbackState::Complete
+        ));
+    }
+
+    #[test]
+    fn single_statement_accepts_one_statement_with_trailing_noise() {
+        for sql in [
+            "SELECT 1",
+            "SELECT 1;",
+            "SELECT 1;   \n\n",
+            "SELECT 1;;;",
+            "SELECT 1; -- trailing note",
+            "SELECT 1; /* trailing note */",
+            "-- leading note\nSELECT 1;",
+        ] {
+            assert!(is_single_statement(sql), "expected single: {sql:?}");
+        }
+    }
+
+    #[test]
+    fn single_statement_ignores_semicolons_inside_literals_and_comments() {
+        for sql in [
+            "SELECT 'a;b' FROM t",
+            "SELECT \"a;b\" FROM t",
+            "SELECT `a;b` FROM t",
+            "SELECT 1 -- a;b\n",
+            "SELECT 1 /* a;b */",
+            "SELECT $$a;b$$",
+            "SELECT $tag$a;b$tag$",
+            "SELECT E'it\\';s' FROM t",
+        ] {
+            assert!(is_single_statement(sql), "expected single: {sql:?}");
+        }
+    }
+
+    #[test]
+    fn single_statement_rejects_a_trailing_statement() {
+        // MySQL sends editor SQL unprepared, so without this the read-only
+        // guard would classify `SELECT 1` and let the DELETE through.
+        for sql in [
+            "SELECT 1; DELETE FROM t",
+            "SELECT 1;\nDELETE FROM t;",
+            "SELECT 1; -- note\nDELETE FROM t",
+            "SELECT 1; 'orphan literal'",
+            "SELECT 1;; DROP TABLE t",
+        ] {
+            assert!(!is_single_statement(sql), "expected multiple: {sql:?}");
+        }
+    }
 
     #[test]
     fn mysql_unsigned_values_keep_javascript_safe_numbers_numeric() {

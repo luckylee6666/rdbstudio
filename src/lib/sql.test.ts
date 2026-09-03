@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { explainWrap, splitStatements } from "./sql";
+import { explainWrap, splitRedisCommands, splitStatements } from "./sql";
 
 describe("splitStatements", () => {
   it("splits simple semicolon-separated statements", () => {
@@ -97,5 +97,36 @@ describe("explainWrap", () => {
     expect(explainWrap("EXPLAIN SELECT 1", "postgres")).toBe(
       "EXPLAIN (ANALYZE false, VERBOSE true) SELECT 1"
     );
+  });
+});
+
+describe("splitRedisCommands", () => {
+  it("gives every line its own command", () => {
+    expect(splitRedisCommands("PING\nPING")).toEqual(["PING", "PING"]);
+  });
+
+  it("drops blank lines and trims", () => {
+    expect(splitRedisCommands("  GET a \n\n  GET b  \n")).toEqual([
+      "GET a",
+      "GET b",
+    ]);
+  });
+
+  it("keeps a newline inside a quoted argument", () => {
+    expect(splitRedisCommands('SET k "line1\nline2"\nGET k')).toEqual([
+      'SET k "line1\nline2"',
+      "GET k",
+    ]);
+  });
+
+  it("does not treat an escaped quote as the end of a value", () => {
+    expect(splitRedisCommands('SET k "a\\"b"\nGET k')).toEqual([
+      'SET k "a\\"b"',
+      "GET k",
+    ]);
+  });
+
+  it("never splits on semicolons", () => {
+    expect(splitRedisCommands("SET k a;b")).toEqual(["SET k a;b"]);
   });
 });

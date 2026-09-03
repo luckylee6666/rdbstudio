@@ -158,6 +158,38 @@ function tryDollarQuote(
   return null;
 }
 
+// Split Redis editor input into one command per line. Newlines inside a
+// double-quoted argument stay put — the backend's argument parser treats every
+// unquoted whitespace run (newlines included) as a separator, so a buffer sent
+// whole would collapse into a single command with the later lines as its
+// arguments: `PING\nPING` answers "PING", not two PONGs.
+export function splitRedisCommands(input: string): string[] {
+  const out: string[] = [];
+  let buf = "";
+  let quoted = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quoted && ch === "\\" && i + 1 < input.length) {
+      buf += ch + input[i + 1];
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      quoted = !quoted;
+      buf += ch;
+      continue;
+    }
+    if (!quoted && (ch === "\n" || ch === "\r")) {
+      if (buf.trim()) out.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  if (buf.trim()) out.push(buf.trim());
+  return out;
+}
+
 // Wrap a SELECT/WITH statement in EXPLAIN syntax appropriate for the driver.
 // Strips a leading EXPLAIN if the user already typed one, to avoid double-wrap.
 export function explainWrap(sql: string, driver: string): string {

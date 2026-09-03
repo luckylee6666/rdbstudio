@@ -49,6 +49,13 @@ export type ScriptOutcome =
       failed_index: number;
       statements: number;
       error: string;
+      /**
+       * What survived the failure. `partial`: MySQL commits DDL implicitly, so
+       * an `ALTER TABLE` earlier in the script (including one run through
+       * `PREPARE` / `EXECUTE`) is already applied. `self_managed`: the script
+       * drives its own BEGIN/COMMIT, so rdbstudio rolled back nothing.
+       */
+      rollback: "complete" | "partial" | "self_managed";
     };
 
 export interface DumpReport {
@@ -114,11 +121,21 @@ export const api = {
 
   executeQuery: (id: string, sql: string, queryId?: string) =>
     invoke<QueryResult>("execute_query", { id, sql, queryId: queryId ?? null }),
-  executeScript: (id: string, sqls: string[], queryId?: string) =>
+  /**
+   * Runs every statement on one connection. `atomic` wraps them in a
+   * transaction; pass false when the script has its own BEGIN/COMMIT.
+   */
+  executeScript: (
+    id: string,
+    sqls: string[],
+    queryId?: string,
+    atomic = true
+  ) =>
     invoke<ScriptOutcome>("execute_script", {
       id,
       sqls,
       queryId: queryId ?? null,
+      atomic,
     }),
   redisRenameMember: (
     id: string,
