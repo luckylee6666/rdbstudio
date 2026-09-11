@@ -9,6 +9,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - SQLite 整库恢复：可将 `VACUUM INTO` 导出的数据库文件替换回连接文件（校验 SQLite 文件头、连接使用中拒绝恢复、同目录临时文件原子替换）；PostgreSQL / MySQL 的 dump 与 restore 现在可取消。
 - 可视化 EXPLAIN 支持 MySQL（`EXPLAIN FORMAT=JSON`，含 nested_loop / ordering / grouping / union 等结构）；PostgreSQL 新增 EXPLAIN ANALYZE（展示实际耗时 / 行数 / 循环数；写语句需二次确认）。
 - Redis key 管理：右键数据库节点新建 key（string / hash / list / set / zset，可带 TTL）、重命名 key（目标已存在时拒绝）、点击 TTL 修改或持久化、在 hash / set / zset 视图中删除单个成员。
+- Redis 的 Keys 文件夹也可右键新建 key；删除 key 改走专用命令，与其它 Redis 写操作共用只读连接限制。
 - 删除连接增加二次确认，并提示系统钥匙串中的密码会一并移除。
 
 ### Fixed
@@ -28,6 +29,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - dump / restore 错误摘要截断不再因多字节字符 panic；查询取消句柄在任务启动前注册，消除取消 / 重复 id 的竞态。
 - PostgreSQL Show DDL 进一步补全：`GENERATED … AS IDENTITY` 列、命名 CHECK 约束、表与列注释、search_path 之外的枚举类型 schema 限定。
 - 虚拟化数据网格 / Redis 表格滚动导致正在编辑的单元格被卸载时，草稿改为自动提交，不再静默丢失。
+- ER 图在大 schema（超过 80 张表）下显示「仅显示前 N 张，共 M 张」的截断提示，不再静默丢表。
 
 ## [0.1.5] — 2026-09-03
 

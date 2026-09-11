@@ -301,3 +301,32 @@ async fn create_rejects_bad_arguments() {
 
     assert_eq!(int(&handle, "EXISTS", &[&key]).await, 0, "bad create left a key");
 }
+
+#[tokio::test]
+async fn delete_key_removes_existing_and_reports_missing() {
+    let Some(handle) = redis_handle().await else {
+        eprintln!("skipped: RDBSTUDIO_TEST_REDIS_URL is not set");
+        return;
+    };
+    let p = prefix();
+    let key = format!("{p}del");
+    cleanup(&handle, std::slice::from_ref(&key)).await;
+
+    redis_ops::create_key(&handle, &key, "string", "v", None, None, None)
+        .await
+        .expect("create");
+    assert_eq!(
+        redis_ops::delete_key(&handle, &key).await.expect("delete"),
+        1
+    );
+    assert_eq!(
+        redis_ops::delete_key(&handle, &key)
+            .await
+            .expect("second delete"),
+        0
+    );
+    assert!(
+        redis_ops::delete_key(&handle, "").await.is_err(),
+        "empty key must be rejected"
+    );
+}

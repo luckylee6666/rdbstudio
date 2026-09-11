@@ -288,6 +288,16 @@ pub async fn rename_key(handle: &RedisHandle, key: &str, new_key: &str) -> AppRe
 
 /// Set or clear a key's expiry. `Some(n)` runs EXPIRE (n must be positive);
 /// `None` runs PERSIST. Returns whether the key existed when we looked.
+/// Delete a key outright (`DEL`); returns how many keys were removed (0/1).
+pub async fn delete_key(handle: &RedisHandle, key: &str) -> AppResult<i64> {
+    if key.is_empty() {
+        return Err(AppError::msg("key name is empty"));
+    }
+    let mut conn = handle.conn();
+    let deleted: i64 = redis::cmd("DEL").arg(key).query_async(&mut conn).await?;
+    Ok(deleted)
+}
+
 pub async fn set_ttl(handle: &RedisHandle, key: &str, ttl_secs: Option<i64>) -> AppResult<bool> {
     let mut conn = handle.conn();
     match ttl_secs {

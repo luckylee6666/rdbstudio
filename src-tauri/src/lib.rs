@@ -88,6 +88,7 @@ pub fn run() {
             commands::query::redis_rename_key,
             commands::query::redis_set_ttl,
             commands::query::redis_delete_member,
+            commands::query::redis_delete_key,
             commands::query::cancel_query,
             commands::query::list_history,
             commands::query::clear_history,

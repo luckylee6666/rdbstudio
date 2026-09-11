@@ -171,6 +171,8 @@ export const api = {
     kind: "hash" | "set" | "zset",
     member: string
   ) => invoke<number>("redis_delete_member", { id, key, kind, member }),
+  redisDeleteKey: (id: string, key: string) =>
+    invoke<number>("redis_delete_key", { id, key }),
   cancelQuery: (queryId: string) => invoke<boolean>("cancel_query", { queryId }),
   tableOp: (
     id: string,

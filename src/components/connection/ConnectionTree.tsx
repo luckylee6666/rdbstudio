@@ -1507,6 +1507,7 @@ function DatabaseNode({
               schema={passSchema}
               entries={tables}
               cacheKey={schemaKey}
+              onCreateKey={() => setRedisCreateOpen(true)}
             />
           )}
         </div>
@@ -1543,11 +1544,13 @@ function TableGroup({
   schema,
   entries,
   cacheKey,
+  onCreateKey,
 }: {
   connectionId: string;
   schema?: string;
   entries: TreeEntry[];
   cacheKey: string;
+  onCreateKey?: () => void;
 }) {
   const tables = entries.filter((e) => e.kind === "table");
   const views = entries.filter((e) => e.kind === "view");
@@ -1565,6 +1568,7 @@ function TableGroup({
           schema={schema}
           cacheKey={cacheKey}
           defaultOpen
+          onCreateKey={onCreateKey}
         />
       )}
       {tables.length > 0 && (
@@ -1599,6 +1603,7 @@ function Folder({
   schema,
   cacheKey,
   defaultOpen = true,
+  onCreateKey,
 }: {
   label: string;
   count: number;
@@ -1607,6 +1612,7 @@ function Folder({
   schema?: string;
   cacheKey: string;
   defaultOpen?: boolean;
+  onCreateKey?: () => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [ctx, setCtx] = useState<{ x: number; y: number; entry: TreeEntry } | null>(null);
@@ -1739,9 +1745,7 @@ function Folder({
     setOpBusy(e.name);
     try {
       if (isRedisKeyKind(e.kind)) {
-        // DEL via the command path; quote to match redis_ops::parse_args.
-        const q = `"${e.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-        await api.executeQuery(connectionId, `DEL ${q}`);
+        await api.redisDeleteKey(connectionId, e.name);
         closeTab(`redis:${connectionId}:${e.name}`);
       } else {
         await api.dropObject(connectionId, e.name, schema, e.kind === "view");
@@ -1760,6 +1764,16 @@ function Folder({
 
   const buildMenu = (e: TreeEntry): MenuEntry[] => {
     const items: MenuEntry[] = [
+    ...(isKeysFolder && onCreateKey
+      ? [
+          {
+            id: "new-key",
+            label: t("redis.create.title"),
+            icon: Plus,
+            onClick: onCreateKey,
+          } satisfies MenuEntry,
+        ]
+      : []),
     {
       id: "open",
       label: t("tree.open_data"),

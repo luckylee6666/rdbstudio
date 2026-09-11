@@ -600,6 +600,8 @@ const en: Dict = {
   // ER
   "er.tables": "{{n}} tables",
   "er.relationships": "{{n}} relationships",
+  "er.truncated": "{{shown}}/{{total}} shown",
+  "er.truncated.title": "Large schema: only the first {{shown}} of {{total}} tables are diagrammed.",
   "er.loading": "describing schema…",
   "er.empty": "No tables in this schema.",
   "er.err": "Failed to load schema",
@@ -1267,6 +1269,8 @@ const zh: Dict = {
   // ER
   "er.tables": "{{n}} 张表",
   "er.relationships": "{{n}} 条关系",
+  "er.truncated": "仅显示 {{shown}}/{{total}} 张",
+  "er.truncated.title": "表较多：图中仅包含前 {{shown}} 张，共 {{total}} 张。",
   "er.loading": "正在解析结构…",
   "er.empty": "此模式下没有表。",
   "er.err": "加载结构失败",

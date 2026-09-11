@@ -9,16 +9,24 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
   const connectionId = tab.connectionId!;
   const schema = tab.schema;
   const [tables, setTables] = useState<TableDescription[]>([]);
+  // Total tables in the schema, so a capped diagram can say what it left out.
+  const [totalTables, setTotalTables] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const t = useT();
+
+  const ER_LIMIT = 80;
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const t = await api.describeSchema(connectionId, schema, 80);
-      setTables(t);
+      const [entries, described] = await Promise.all([
+        api.listTables(connectionId, schema),
+        api.describeSchema(connectionId, schema, ER_LIMIT),
+      ]);
+      setTotalTables(entries.filter((e) => e.kind === "table").length);
+      setTables(described);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -43,6 +51,17 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
         {loading && <Loader2 className="h-3 w-3 animate-spin" />}
         <span>·</span>
         <span>{t("er.tables", { n: tables.length })}</span>
+        {totalTables != null && totalTables > tables.length && (
+          <span
+            className="rounded bg-warning/20 px-1.5 py-0.5 text-[10.5px] text-warning"
+            title={t("er.truncated.title", {
+              shown: tables.length,
+              total: totalTables,
+            })}
+          >
+            {t("er.truncated", { shown: tables.length, total: totalTables })}
+          </span>
+        )}
         <span>·</span>
         <span>{t("er.relationships", { n: fkCount })}</span>
         <div className="flex-1" />

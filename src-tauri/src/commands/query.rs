@@ -332,6 +332,18 @@ pub async fn redis_delete_member(
     crate::db::redis_ops::delete_member(&handle, &key, &kind, &member).await
 }
 
+/// Delete a key outright (`DEL`); returns 1 when it existed, 0 otherwise.
+#[tauri::command]
+pub async fn redis_delete_key(
+    state: State<'_, AppState>,
+    id: String,
+    key: String,
+) -> AppResult<i64> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let handle = redis_handle(&state, &id)?;
+    crate::db::redis_ops::delete_key(&handle, &key).await
+}
+
 #[tauri::command]
 pub fn cancel_query(state: State<'_, AppState>, query_id: String) -> bool {
     state.cancel_query(&query_id)
