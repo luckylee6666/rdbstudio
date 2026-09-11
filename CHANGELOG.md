@@ -5,6 +5,12 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- SQLite 整库恢复：可将 `VACUUM INTO` 导出的数据库文件替换回连接文件（校验 SQLite 文件头、连接使用中拒绝恢复、同目录临时文件原子替换）；PostgreSQL / MySQL 的 dump 与 restore 现在可取消。
+- 可视化 EXPLAIN 支持 MySQL（`EXPLAIN FORMAT=JSON`，含 nested_loop / ordering / grouping / union 等结构）；PostgreSQL 新增 EXPLAIN ANALYZE（展示实际耗时 / 行数 / 循环数；写语句需二次确认）。
+- Redis key 管理：右键数据库节点新建 key（string / hash / list / set / zset，可带 TTL）、重命名 key（目标已存在时拒绝）、点击 TTL 修改或持久化、在 hash / set / zset 视图中删除单个成员。
+- 删除连接增加二次确认，并提示系统钥匙串中的密码会一并移除。
+
 ### Fixed
 - PostgreSQL 的 DATE / TIME / NUMERIC / 数组列、MySQL 的 DATE / TIME / TIMESTAMP / DECIMAL 列不再显示为 NULL：各类型改用自己的解码器，`numeric` / `decimal` 以精确字符串传输。
 - PostgreSQL 网格编辑与 CSV 导入按目标列类型显式 `CAST` 绑定，修复所有非文本列报 `42804 … is of type … but expression is of type text` 的问题。
@@ -20,6 +26,8 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - 行悬停的撤销 / 删除按钮恢复可见；已打开的标签页再次请求时合并新的预置过滤条件（FK 跳转不会失效）。
 - 导出复合主键表时按全部主键列排序，避免 LIMIT/OFFSET 分页在并列值上丢行 / 重行。
 - dump / restore 错误摘要截断不再因多字节字符 panic；查询取消句柄在任务启动前注册，消除取消 / 重复 id 的竞态。
+- PostgreSQL Show DDL 进一步补全：`GENERATED … AS IDENTITY` 列、命名 CHECK 约束、表与列注释、search_path 之外的枚举类型 schema 限定。
+- 虚拟化数据网格 / Redis 表格滚动导致正在编辑的单元格被卸载时，草稿改为自动提交，不再静默丢失。
 
 ## [0.1.5] — 2026-09-03
 

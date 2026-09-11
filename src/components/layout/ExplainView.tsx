@@ -17,12 +17,14 @@ import type { WorkspaceTab } from "@/types";
 import { api } from "@/lib/api";
 import {
   flattenPlan,
+  parseMysqlPlan,
   parsePgPlan,
   parseSqliteQueryPlan,
   selfCost,
   stripLeadingExplain,
   type PlanNode,
 } from "@/lib/explain";
+import { explainWrap } from "@/lib/sql";
 import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
@@ -37,7 +39,10 @@ const NODE_W = 260;
 function nodeHeight(n: PlanNode): number {
   // padding (py-2 = 16) + label line + optional detail/meta lines + border.
   const lines =
-    17 + (n.detail ? 15 : 0) + (n.cost || n.rows != null ? 14 : 0);
+    17 +
+    (n.detail ? 15 : 0) +
+    (n.cost || n.rows != null ? 14 : 0) +
+    (n.actual ? 14 : 0);
   return 16 + lines + 2;
 }
 
@@ -54,6 +59,9 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
   const driver = cfg?.driver;
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const t = useT();
+  // Analyze plans are opened with an `explain-analyze:` tab id; only
+  // PostgreSQL re-runs the statement for real, other drivers ignore the flag.
+  const analyze = tab.id.startsWith("explain-analyze:");
 
   const load = useCallback(async () => {
     if (!connectionId || !sql.trim()) {
@@ -64,7 +72,7 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
       setState({ kind: "error", message: t("explain.err.no_connection") });
       return;
     }
-    if (driver !== "postgres" && driver !== "sqlite") {
+    if (driver !== "postgres" && driver !== "sqlite" && driver !== "mysql") {
       setState({ kind: "error", message: t("explain.unsupported") });
       return;
     }
@@ -76,15 +84,25 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
       if (driver === "postgres") {
         const res = await api.executeQuery(
           connectionId,
-          `EXPLAIN (FORMAT JSON, VERBOSE true) ${body}`
+          explainWrap(body, "postgres", { analyze, format: "json" })
         );
         const cell = res.rows[0]?.[0];
         if (cell == null) throw new Error(t("explain.empty"));
         setState({ kind: "ok", roots: [parsePgPlan(cell)] });
+      } else if (driver === "mysql") {
+        const res = await api.executeQuery(
+          connectionId,
+          explainWrap(body, "mysql", { format: "json" })
+        );
+        const cell = res.rows[0]?.[0];
+        if (cell == null) throw new Error(t("explain.empty"));
+        // FORMAT=JSON is MySQL 5.6.5+; older servers (or MariaDB variants)
+        // reject it and the error panel explains what happened.
+        setState({ kind: "ok", roots: [parseMysqlPlan(cell)] });
       } else {
         const res = await api.executeQuery(
           connectionId,
-          `EXPLAIN QUERY PLAN ${body}`
+          explainWrap(body, "sqlite")
         );
         setState({ kind: "ok", roots: parseSqliteQueryPlan(res.rows) });
       }
@@ -93,7 +111,7 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
     }
     // t changes identity every render; the effect below keys on real inputs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionId, sql, driver, cfg]);
+  }, [connectionId, sql, driver, cfg, analyze]);
 
   useEffect(() => {
     void load();
@@ -144,9 +162,11 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
   }, []);
 
   const rootCost =
-    state.kind === "ok" && driver === "postgres"
+    state.kind === "ok" && (driver === "postgres" || driver === "mysql")
       ? state.roots[0]?.cost?.total
       : undefined;
+  const rootActualTime =
+    state.kind === "ok" && analyze ? state.roots[0]?.actual?.time : undefined;
   const nodeCount = state.kind === "ok" ? flattenPlan(state.roots).length : 0;
 
   return (
@@ -156,6 +176,11 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
         {driver && (
           <span className="rounded bg-surface-muted/70 px-1.5 py-0.5 text-[9.5px] uppercase tracking-wider">
             {driver}
+          </span>
+        )}
+        {analyze && (
+          <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9.5px] font-medium uppercase tracking-wider text-warning">
+            {t("explain.analyze.badge")}
           </span>
         )}
         {state.kind === "loading" && (
@@ -168,6 +193,17 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
               {t("explain.total_cost")}{" "}
               <span className="font-mono text-foreground/80">
                 {fmt(rootCost)}
+              </span>
+            </span>
+          </>
+        )}
+        {rootActualTime != null && (
+          <>
+            <span>·</span>
+            <span>
+              {t("explain.actual")}{" "}
+              <span className="font-mono text-foreground/80">
+                {fmt(rootActualTime)} ms
               </span>
             </span>
           </>
@@ -271,13 +307,25 @@ const nodeTypes = {
 };
 
 function PlanNodeCard({ data }: NodeProps<Node<PlanNodeData>>) {
+  const t = useT();
   const { plan, hot } = data;
-  const title = [
-    plan.label,
-    plan.detail,
-    plan.cost ? `cost=${fmt(plan.cost.startup)}..${fmt(plan.cost.total)}` : null,
-    plan.rows != null ? `rows=${fmt(plan.rows)}` : null,
-  ]
+  const meta: string[] = [];
+  if (plan.cost) {
+    meta.push(`cost ${fmt(plan.cost.startup)}..${fmt(plan.cost.total)}`);
+  }
+  if (plan.rows != null) meta.push(`rows ${fmt(plan.rows)}`);
+  if (plan.actual) {
+    const actual: string[] = [];
+    if (plan.actual.time != null) actual.push(`${fmt(plan.actual.time)} ms`);
+    if (plan.actual.rows != null) actual.push(`${fmt(plan.actual.rows)} rows`);
+    if (plan.actual.loops != null && plan.actual.loops > 1) {
+      actual.push(`${fmt(plan.actual.loops)} ${t("explain.loops")}`);
+    }
+    if (actual.length > 0) {
+      meta.push(`${t("explain.actual")} ${actual.join(" · ")}`);
+    }
+  }
+  const title = [plan.label, plan.detail, ...meta]
     .filter(Boolean)
     .join("\n");
   return (
@@ -307,11 +355,9 @@ function PlanNodeCard({ data }: NodeProps<Node<PlanNodeData>>) {
           {plan.detail}
         </div>
       )}
-      {(plan.cost || plan.rows != null) && (
+      {meta.length > 0 && (
         <div className="truncate font-mono text-[10px] leading-[14px] text-muted-foreground">
-          {plan.cost && `cost ${fmt(plan.cost.startup)}..${fmt(plan.cost.total)}`}
-          {plan.cost && plan.rows != null && " · "}
-          {plan.rows != null && `rows ${fmt(plan.rows)}`}
+          {meta.join(" · ")}
         </div>
       )}
       <Handle

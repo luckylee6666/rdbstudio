@@ -249,6 +249,89 @@ pub async fn redis_rename_member(
     }
 }
 
+/// Resolve the connection to a Redis handle, rejecting non-Redis pools with a
+/// clear error. Pairs with `ensure_writable` for every Redis write command.
+fn redis_handle(state: &AppState, id: &str) -> AppResult<crate::db::pool::RedisHandle> {
+    let pool = state
+        .get_pool(id)
+        .ok_or_else(|| AppError::msg("not connected"))?;
+    match &pool {
+        crate::db::pool::DbPool::Redis(h) => Ok(h.clone()),
+        _ => Err(AppError::msg("not a Redis connection")),
+    }
+}
+
+/// Create a new string/hash/list/set/zset key. Fails when the key already
+/// exists; optional TTL is applied atomically with the creation.
+// Tauri flattens each parameter into its own IPC argument; the shape is the
+// frontend contract, so grouping them into a struct isn't worth the churn.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn redis_create_key(
+    state: State<'_, AppState>,
+    id: String,
+    key: String,
+    kind: String,
+    value: String,
+    field: Option<String>,
+    score: Option<f64>,
+    ttl_secs: Option<i64>,
+) -> AppResult<()> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let handle = redis_handle(&state, &id)?;
+    crate::db::redis_ops::create_key(
+        &handle,
+        &key,
+        &kind,
+        &value,
+        field.as_deref(),
+        score,
+        ttl_secs,
+    )
+    .await
+}
+
+/// Rename a key atomically, refusing to overwrite an existing destination.
+#[tauri::command]
+pub async fn redis_rename_key(
+    state: State<'_, AppState>,
+    id: String,
+    key: String,
+    new_key: String,
+) -> AppResult<()> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let handle = redis_handle(&state, &id)?;
+    crate::db::redis_ops::rename_key(&handle, &key, &new_key).await
+}
+
+/// Set (`Some(seconds)`) or clear (`None`) a key's expiry. Returns whether the
+/// key existed.
+#[tauri::command]
+pub async fn redis_set_ttl(
+    state: State<'_, AppState>,
+    id: String,
+    key: String,
+    ttl_secs: Option<i64>,
+) -> AppResult<bool> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let handle = redis_handle(&state, &id)?;
+    crate::db::redis_ops::set_ttl(&handle, &key, ttl_secs).await
+}
+
+/// Delete one hash field / set member / zset member; returns the deleted count.
+#[tauri::command]
+pub async fn redis_delete_member(
+    state: State<'_, AppState>,
+    id: String,
+    key: String,
+    kind: String,
+    member: String,
+) -> AppResult<i64> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let handle = redis_handle(&state, &id)?;
+    crate::db::redis_ops::delete_member(&handle, &key, &kind, &member).await
+}
+
 #[tauri::command]
 pub fn cancel_query(state: State<'_, AppState>, query_id: String) -> bool {
     state.cancel_query(&query_id)

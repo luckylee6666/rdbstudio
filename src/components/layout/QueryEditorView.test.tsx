@@ -164,3 +164,76 @@ describe("QueryEditorView script failure reporting", () => {
     ]);
   });
 });
+
+describe("QueryEditorView explain analyze guard", () => {
+  const tab: WorkspaceTab = {
+    id: "query:analyze",
+    kind: "query",
+    title: "Query",
+  };
+  const pg: ConnectionConfig = {
+    id: "pg",
+    name: "pg-test",
+    driver: "postgres",
+    host: "localhost",
+    port: 5432,
+    username: "postgres",
+    group: null,
+    ssl_mode: "disable",
+  };
+
+  function pickExplainAnalyze(sql: string) {
+    mockIPC(() => undefined);
+    render(<QueryEditorView tab={tab} />);
+    fireEvent.change(screen.getByLabelText("SQL editor"), {
+      target: { value: sql },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Explain options" }));
+    fireEvent.click(screen.getByRole("button", { name: "Explain Analyze" }));
+  }
+
+  const openedAnalyzeTab = () =>
+    useWorkspace.getState().tabs.find((t) => t.id.startsWith("explain-analyze:"));
+
+  beforeEach(() => {
+    clearMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    useI18n.setState({ lang: "en" });
+    useConnections.setState({
+      list: [pg],
+      loaded: true,
+      status: { pg: "connected" },
+      versions: {},
+      branches: {},
+      errors: {},
+      treeFilter: "",
+    });
+    useWorkspace.setState({ tabs: [tab], activeTabId: tab.id });
+  });
+
+  afterEach(() => clearMocks());
+
+  it("opens an analyze tab directly for read-only statements", () => {
+    pickExplainAnalyze("SELECT * FROM users");
+
+    expect(screen.queryByText("Run this statement for real?")).toBeNull();
+    expect(openedAnalyzeTab()?.sql).toBe("SELECT * FROM users");
+  });
+
+  it("asks for confirmation before analyzing a write", () => {
+    pickExplainAnalyze("DELETE FROM users");
+
+    expect(
+      screen.getByText("Run this statement for real?")
+    ).toBeInTheDocument();
+    expect(openedAnalyzeTab()).toBeUndefined();
+  });
+
+  it("opens the analyze tab once the write confirmation is accepted", () => {
+    pickExplainAnalyze("DELETE FROM users");
+    fireEvent.click(screen.getByRole("button", { name: "Run anyway" }));
+
+    expect(openedAnalyzeTab()?.sql).toBe("DELETE FROM users");
+  });
+});

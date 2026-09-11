@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   flattenPlan,
+  parseMysqlPlan,
   parsePgPlan,
   parseSqliteQueryPlan,
   selfCost,
@@ -109,6 +110,144 @@ describe("parsePgPlan", () => {
     expect(() => parsePgPlan([{}])).toThrow(/missing the root "Plan"/);
     expect(() => parsePgPlan(42)).toThrow(/missing the root "Plan"/);
     expect(() => parsePgPlan(null)).toThrow(/missing the root "Plan"/);
+  });
+
+  it("captures EXPLAIN ANALYZE actual timing when present", () => {
+    const root = parsePgPlan([
+      {
+        Plan: {
+          "Node Type": "Seq Scan",
+          "Startup Cost": 0,
+          "Total Cost": 10,
+          "Plan Rows": 100,
+          "Actual Total Time": 1.234,
+          "Actual Rows": 42,
+          "Actual Loops": 3,
+        },
+      },
+    ]);
+    expect(root.actual).toEqual({ time: 1.234, rows: 42, loops: 3 });
+  });
+
+  it("leaves actual undefined for plain EXPLAIN plans", () => {
+    expect(parsePgPlan(PG_SAMPLE).actual).toBeUndefined();
+  });
+});
+
+// Shape of a real MySQL `EXPLAIN FORMAT=JSON` result: an ordering_operation
+// wrapping a two-table nested_loop.
+const MYSQL_SAMPLE = {
+  query_block: {
+    select_id: 1,
+    cost_info: { query_cost: "4.55" },
+    ordering_operation: {
+      using_filesort: true,
+      nested_loop: [
+        {
+          table: {
+            table_name: "customers",
+            access_type: "ALL",
+            possible_keys: ["PRIMARY"],
+            rows_examined_per_scan: 10,
+            rows_produced_per_join: 10,
+            filtered: "100.00",
+            cost_info: {
+              read_cost: "0.25",
+              eval_cost: "1.00",
+              prefix_cost: "1.25",
+              data_read_per_join: "160",
+            },
+          },
+        },
+        {
+          table: {
+            table_name: "orders",
+            access_type: "ref",
+            possible_keys: ["idx_customer"],
+            key: "idx_customer",
+            rows_examined_per_scan: 3,
+            rows_produced_per_join: 30,
+            filtered: "100.00",
+            cost_info: {
+              read_cost: "0.50",
+              eval_cost: "3.00",
+              prefix_cost: "4.75",
+              data_read_per_join: "480",
+            },
+          },
+        },
+      ],
+    },
+  },
+};
+
+describe("parseMysqlPlan", () => {
+  it("parses a nested_loop under an ordering_operation", () => {
+    const root = parseMysqlPlan(MYSQL_SAMPLE);
+    expect(root.label).toBe("Query Block");
+    expect(root.detail).toBe("select_id 1");
+    expect(root.cost).toEqual({ startup: 0, total: 4.55 });
+    expect(root.children).toHaveLength(1);
+
+    const ordering = root.children[0];
+    expect(ordering.label).toBe("Ordering");
+    expect(ordering.detail).toBe("using filesort");
+    expect(ordering.children).toHaveLength(1);
+
+    const loop = ordering.children[0];
+    expect(loop.label).toBe("Nested Loop");
+    expect(loop.children.map((n) => n.label)).toEqual([
+      "customers (ALL)",
+      "orders (ref)",
+    ]);
+
+    const [customers, orders] = loop.children;
+    expect(customers.detail).toBe("possible PRIMARY · filtered 100.00%");
+    expect(customers.cost).toEqual({ startup: 0.25, total: 1.25 });
+    expect(customers.rows).toBe(10);
+    expect(customers.children).toHaveLength(0);
+
+    expect(orders.detail).toBe("key idx_customer · filtered 100.00%");
+    expect(orders.cost).toEqual({ startup: 0.5, total: 4.75 });
+    expect(orders.rows).toBe(3);
+  });
+
+  it("accepts the rows[0][0]-as-JSON-string form", () => {
+    const root = parseMysqlPlan(JSON.stringify(MYSQL_SAMPLE));
+    expect(root.label).toBe("Query Block");
+    expect(root.children[0].children[0].children).toHaveLength(2);
+  });
+
+  it("assigns unique node ids across wrappers and tables", () => {
+    const ids = flattenPlan([parseMysqlPlan(MYSQL_SAMPLE)]).map((n) => n.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(5);
+  });
+
+  it("falls back to generic nodes for unknown operation keys", () => {
+    const root = parseMysqlPlan({
+      query_block: {
+        select_id: 1,
+        mystery_operation: {
+          table: { table_name: "t", access_type: "ALL" },
+        },
+      },
+    });
+    expect(root.label).toBe("Query Block");
+    const mystery = root.children[0];
+    expect(mystery.label).toBe("Mystery Operation");
+    expect(mystery.children).toHaveLength(1);
+    expect(mystery.children[0].label).toBe("t (ALL)");
+  });
+
+  it("renders a generic root for an unrecognized object shape", () => {
+    const root = parseMysqlPlan({ something: "else" });
+    expect(root.label).toBe("Query Block");
+    expect(root.children).toHaveLength(0);
+  });
+
+  it("throws on invalid JSON strings", () => {
+    expect(() => parseMysqlPlan("not json at all")).toThrow(/not valid JSON/);
   });
 });
 

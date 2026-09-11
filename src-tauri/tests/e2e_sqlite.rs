@@ -547,3 +547,113 @@ async fn export_pages_composite_primary_keys_without_gaps() {
     let unique: std::collections::HashSet<&&str> = lines[1..].iter().collect();
     assert_eq!(unique.len(), 100, "no duplicated or skipped rows");
 }
+
+#[tokio::test]
+async fn sqlite_dump_then_restore_reverts_later_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("app.sqlite");
+    let backup_path = dir.path().join("app-backup.db");
+    let cfg = cfg_for(&db_path);
+    let url = db::build_url(&cfg).expect("build url");
+
+    // Seed, then take a binary snapshot with the same statement the dump
+    // command issues for SQLite.
+    {
+        let pool = DbPool::connect(DriverKind::Sqlite, &url)
+            .await
+            .expect("open sqlite");
+        exec::execute(
+            &pool,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        )
+        .await
+        .expect("create users");
+        exec::execute(
+            &pool,
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+        )
+        .await
+        .expect("seed users");
+        exec::execute(
+            &pool,
+            &format!("VACUUM INTO '{}'", backup_path.to_string_lossy()),
+        )
+        .await
+        .expect("vacuum into backup");
+        pool.close().await;
+    }
+
+    // Mutate after the snapshot, then close the pool: the restore path refuses
+    // to replace a database that is still open.
+    {
+        let pool = DbPool::connect(DriverKind::Sqlite, &url)
+            .await
+            .expect("reopen sqlite");
+        exec::execute(&pool, "INSERT INTO users (id, name) VALUES (3, 'Carol')")
+            .await
+            .expect("post-backup insert");
+        pool.close().await;
+    }
+
+    rdbstudio_lib::restore_sqlite_file(&db_path, &backup_path).expect("restore backup");
+
+    let pool = DbPool::connect(DriverKind::Sqlite, &url)
+        .await
+        .expect("reopen restored sqlite");
+    let r = exec::execute(&pool, "SELECT id, name FROM users ORDER BY id")
+        .await
+        .expect("select restored rows");
+    assert_eq!(r.rows.len(), 2, "the post-backup row must be gone");
+    assert_eq!(r.rows[0][1].as_str(), Some("Alice"));
+    assert_eq!(r.rows[1][1].as_str(), Some("Bob"));
+    drop(pool);
+
+    let bytes = std::fs::read(&db_path).expect("read restored file");
+    assert_eq!(&bytes[..16], b"SQLite format 3\0");
+}
+
+#[test]
+fn sqlite_restore_rejects_non_database_source_and_keeps_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("app.sqlite");
+    std::fs::write(&target, b"original-database-bytes").expect("seed target");
+    let src = dir.path().join("dump.sql");
+    std::fs::write(&src, b"CREATE TABLE nope (id INTEGER);").expect("seed source");
+
+    let err = rdbstudio_lib::restore_sqlite_file(&target, &src).expect_err("must reject");
+    assert!(
+        err.to_string().contains("SQLite format 3"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("read target"),
+        b"original-database-bytes",
+        "an invalid source must not touch the existing database"
+    );
+}
+
+#[test]
+fn sqlite_restore_rejects_truncated_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("app.sqlite");
+    let src = dir.path().join("short.db");
+    std::fs::write(&src, b"SQLite").expect("seed source");
+
+    let err = rdbstudio_lib::restore_sqlite_file(&target, &src).expect_err("must reject");
+    assert!(err.to_string().contains("too short"), "unexpected: {err}");
+    assert!(!target.exists());
+}
+
+#[test]
+fn sqlite_restore_creates_missing_parent_and_replaces_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("backup.db");
+    let payload = b"SQLite format 3\0not-a-real-page-but-valid-header";
+    std::fs::write(&src, payload).expect("seed source");
+
+    let target = dir.path().join("nested/deeper/app.sqlite");
+    rdbstudio_lib::restore_sqlite_file(&target, &src).expect("restore into missing dir");
+
+    assert!(target.is_file(), "target should have been created");
+    assert_eq!(std::fs::read(&target).expect("read target"), payload);
+}

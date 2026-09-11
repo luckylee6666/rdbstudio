@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Download,
   Loader2,
   Play,
@@ -17,15 +18,21 @@ import { useConnections } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
 import { CodeMirrorEditor } from "@/components/editor/CodeMirror";
 import { DataGrid, type GridColumn } from "@/components/grid/DataGrid";
-import { ContextMenu } from "@/components/ui/ContextMenu";
+import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { saveTextFile, toCSV } from "@/lib/csv";
 import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
-import { explainWrap, splitRedisCommands, splitStatements } from "@/lib/sql";
+import {
+  explainWrap,
+  isReadOnlyStatement,
+  splitRedisCommands,
+  splitStatements,
+} from "@/lib/sql";
 import { getSchemaColumns, setSchemaColumns } from "@/lib/schemaCache";
 import { cn } from "@/lib/cn";
 import { useT } from "@/store/i18n";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 type RunState =
   | { kind: "idle" }
@@ -118,6 +125,11 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(
     null
   );
+  const [explainMenu, setExplainMenu] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  // Non-read statement awaiting explicit confirmation before EXPLAIN ANALYZE.
+  const [analyzeConfirm, setAnalyzeConfirm] = useState<string | null>(null);
   const [saveSnippetOpen, setSaveSnippetOpen] = useState(false);
   const [snippetName, setSnippetName] = useState("");
   const [snippetDesc, setSnippetDesc] = useState("");
@@ -411,30 +423,58 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     [sql, targetId, targetCfg, t]
   );
 
-  // Visual EXPLAIN: PG and SQLite plans open as a graph tab; MySQL keeps the
-  // legacy text EXPLAIN in the result grid (Redis: the button is disabled).
-  const onExplain = useCallback(() => {
-    const driver = targetCfg?.driver;
-    if (driver === "postgres" || driver === "sqlite") {
+  // Visual EXPLAIN: PG, MySQL (FORMAT=JSON) and SQLite plans open as a graph
+  // tab; ExplainView parses per driver and surfaces server errors. Redis keeps
+  // the button disabled and any other driver falls back to text EXPLAIN.
+  const openExplainTab = useCallback(
+    (source: string, analyze: boolean) => {
       if (!targetId) {
         setState({ kind: "error", message: t("query.placeholder") });
         return;
       }
-      // Same source rule as run(): editor selection wins over the buffer.
-      const source = (selectionGetter.current?.() ?? sql).trim();
-      if (!source) return;
       useWorkspace.getState().openTab({
-        id: `explain:${crypto.randomUUID()}`,
+        id: `${analyze ? "explain-analyze" : "explain"}:${crypto.randomUUID()}`,
         kind: "explain",
-        title: t("explain.title"),
+        title: analyze ? t("explain.analyze.title") : t("explain.title"),
         subtitle: targetCfg?.name,
         connectionId: targetId,
         sql: source,
       });
+    },
+    [targetId, targetCfg, t]
+  );
+
+  // Same source rule as run(): editor selection wins over the buffer.
+  const explainSource = useCallback(
+    () => (selectionGetter.current?.() ?? sql).trim(),
+    [sql]
+  );
+
+  const onExplain = useCallback(() => {
+    const driver = targetCfg?.driver;
+    if (driver === "postgres" || driver === "sqlite" || driver === "mysql") {
+      const source = explainSource();
+      if (!source) return;
+      openExplainTab(source, false);
       return;
     }
     void run({ explain: true });
-  }, [targetCfg, targetId, sql, run, t]);
+  }, [targetCfg, explainSource, openExplainTab, run]);
+
+  // EXPLAIN ANALYZE runs the statement for real: only PostgreSQL offers it
+  // (SQLite has no query-plan ANALYZE; MySQL's text tree is out of scope).
+  // The read-only classifier fails closed, so anything that is not a plain
+  // SELECT / WITH / VALUES / TABLE asks for explicit confirmation first.
+  const onExplainAnalyze = useCallback(() => {
+    if (targetCfg?.driver !== "postgres") return;
+    const source = explainSource();
+    if (!source) return;
+    if (!isReadOnlyStatement(source)) {
+      setAnalyzeConfirm(source);
+      return;
+    }
+    openExplainTab(source, true);
+  }, [targetCfg, explainSource, openExplainTab]);
 
   const onStop = useCallback(() => {
     const session = runSessionRef.current;
@@ -536,23 +576,60 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             <span className="ml-1 rounded bg-black/20 px-1 text-[10px]">⌘↵</span>
           </button>
         )}
-        <button
-          onClick={onExplain}
-          disabled={
-            state.kind === "running" ||
-            !targetId ||
-            targetCfg?.driver === "redis"
-          }
-          title={
-            targetCfg?.driver === "redis"
-              ? "EXPLAIN is not applicable to Redis"
-              : t("query.toolbar.explain")
-          }
-          className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
-        >
-          <TableProperties className="h-3.5 w-3.5" />
-          {t("query.toolbar.explain")}
-        </button>
+        <div className="flex items-center">
+          <button
+            onClick={onExplain}
+            disabled={
+              state.kind === "running" ||
+              !targetId ||
+              targetCfg?.driver === "redis"
+            }
+            title={
+              targetCfg?.driver === "redis"
+                ? "EXPLAIN is not applicable to Redis"
+                : t("query.toolbar.explain")
+            }
+            className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+          >
+            <TableProperties className="h-3.5 w-3.5" />
+            {t("query.toolbar.explain")}
+          </button>
+          {targetCfg?.driver === "postgres" && (
+            <button
+              onClick={(e) => setExplainMenu({ x: e.clientX, y: e.clientY })}
+              disabled={state.kind === "running" || !targetId}
+              title={t("query.toolbar.explain_options")}
+              aria-label={t("query.toolbar.explain_options")}
+              className="flex h-7 items-center rounded-md px-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+            >
+              <ChevronDown className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+        {explainMenu && (
+          <ContextMenu
+            x={explainMenu.x}
+            y={explainMenu.y}
+            items={
+              [
+                {
+                  id: "explain",
+                  label: t("query.toolbar.explain"),
+                  icon: TableProperties,
+                  onClick: onExplain,
+                },
+                {
+                  id: "explain-analyze",
+                  label: t("query.toolbar.explain_analyze"),
+                  icon: Play,
+                  danger: true,
+                  onClick: onExplainAnalyze,
+                },
+              ] satisfies MenuEntry[]
+            }
+            onClose={() => setExplainMenu(null)}
+          />
+        )}
         <button
           onClick={onFormat}
           disabled={!sql.trim() || targetCfg?.driver === "redis"}
@@ -740,6 +817,19 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           </div>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={analyzeConfirm != null}
+        title={t("explain.analyze.warning_title")}
+        message={t("explain.analyze.warning")}
+        confirmLabel={t("explain.analyze.proceed")}
+        cancelLabel={t("common.cancel")}
+        danger
+        onConfirm={() => {
+          if (analyzeConfirm != null) openExplainTab(analyzeConfirm, true);
+        }}
+        onClose={() => setAnalyzeConfirm(null)}
+      />
     </div>
   );
 }

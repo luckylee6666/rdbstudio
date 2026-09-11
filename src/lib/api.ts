@@ -145,6 +145,32 @@ export const api = {
     newName: string
   ) =>
     invoke<void>("redis_rename_member", { id, key, kind, oldName, newName }),
+  redisCreateKey: (
+    id: string,
+    key: string,
+    kind: "string" | "hash" | "list" | "set" | "zset",
+    value: string,
+    options?: { field?: string; score?: number; ttlSecs?: number }
+  ) =>
+    invoke<void>("redis_create_key", {
+      id,
+      key,
+      kind,
+      value,
+      field: options?.field ?? null,
+      score: options?.score ?? null,
+      ttlSecs: options?.ttlSecs ?? null,
+    }),
+  redisRenameKey: (id: string, key: string, newKey: string) =>
+    invoke<void>("redis_rename_key", { id, key, newKey }),
+  redisSetTtl: (id: string, key: string, ttlSecs: number | null) =>
+    invoke<boolean>("redis_set_ttl", { id, key, ttlSecs }),
+  redisDeleteMember: (
+    id: string,
+    key: string,
+    kind: "hash" | "set" | "zset",
+    member: string
+  ) => invoke<number>("redis_delete_member", { id, key, kind, member }),
   cancelQuery: (queryId: string) => invoke<boolean>("cancel_query", { queryId }),
   tableOp: (
     id: string,

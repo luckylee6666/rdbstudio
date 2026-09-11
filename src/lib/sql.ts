@@ -1,4 +1,5 @@
 import type { DriverKind } from "@/types";
+import { stripLeadingExplain } from "./explain";
 
 // Split a SQL script into individual statements, respecting string literals
 // (single, double, backtick) and comments (-- line, /* block */). Returns
@@ -190,24 +191,78 @@ export function splitRedisCommands(input: string): string[] {
   return out;
 }
 
+export interface ExplainWrapOptions {
+  // Run the statement for real (PostgreSQL only; SQLite/MySQL ignore it).
+  analyze?: boolean;
+  // Emit the machine-readable plan format where the driver supports it.
+  format?: "text" | "json";
+}
+
 // Wrap a SELECT/WITH statement in EXPLAIN syntax appropriate for the driver.
 // Strips a leading EXPLAIN if the user already typed one, to avoid double-wrap.
-export function explainWrap(sql: string, driver: string): string {
-  const trimmed = sql.trim().replace(/;$/, "");
-  const lead = trimmed
-    .toUpperCase()
-    .match(/^EXPLAIN(\s+ANALYZE|\s+QUERY\s+PLAN|\s+FORMAT[^\s]*)?\s+/);
-  const body = lead ? trimmed.slice(lead[0].length) : trimmed;
+export function explainWrap(
+  sql: string,
+  driver: string,
+  opts: ExplainWrapOptions = {}
+): string {
+  const body = stripLeadingExplain(sql.trim().replace(/;\s*$/, ""));
+  const analyze = opts.analyze === true;
   switch (driver) {
-    case "postgres":
-      return `EXPLAIN (ANALYZE false, VERBOSE true) ${body}`;
+    case "postgres": {
+      const options = [`ANALYZE ${analyze ? "true" : "false"}`, "VERBOSE true"];
+      if (opts.format === "json") options.push("FORMAT JSON");
+      return `EXPLAIN (${options.join(", ")}) ${body}`;
+    }
     case "mysql":
-      return `EXPLAIN ${body}`;
+      return opts.format === "json"
+        ? `EXPLAIN FORMAT=JSON ${body}`
+        : `EXPLAIN ${body}`;
     case "sqlite":
       return `EXPLAIN QUERY PLAN ${body}`;
     default:
       return `EXPLAIN ${body}`;
   }
+}
+
+// Strip leading whitespace plus `--` / `#` line comments and `/* … */` block
+// comments, so statement classification sees the first real keyword.
+export function stripLeadingComments(sql: string): string {
+  let s = sql;
+  for (;;) {
+    const t = s.replace(/^\s+/, "");
+    if (t.startsWith("--") || t.startsWith("#")) {
+      const nl = t.indexOf("\n");
+      s = nl === -1 ? "" : t.slice(nl + 1);
+      continue;
+    }
+    if (t.startsWith("/*")) {
+      const end = t.indexOf("*/", 2);
+      s = end === -1 ? "" : t.slice(end + 2);
+      continue;
+    }
+    return t;
+  }
+}
+
+// Conservative read-only classifier used to gate EXPLAIN ANALYZE, which runs
+// the target statement for real. Only plain SELECT / VALUES / TABLE and WITH
+// qualify; WITH is rejected when it mentions DML as a bare word (a data-
+// modifying CTE). Anything unknown, malformed, or multi-statement fails closed
+// — the caller warns instead of silently executing a write.
+export function isReadOnlyStatement(sql: string): boolean {
+  const statements = splitStatements(sql);
+  if (statements.length !== 1) return false;
+  const cleaned = stripLeadingComments(
+    stripLeadingExplain(stripLeadingComments(statements[0]))
+  );
+  const keyword = /^[A-Za-z]+/.exec(cleaned)?.[0]?.toUpperCase();
+  if (keyword === "SELECT" || keyword === "VALUES" || keyword === "TABLE") {
+    return true;
+  }
+  if (keyword === "WITH") {
+    return !/\b(INSERT|UPDATE|DELETE|MERGE|INTO)\b/i.test(cleaned);
+  }
+  return false;
 }
 
 // Mirrors `quote_ident` in src-tauri/src/db/data.rs.

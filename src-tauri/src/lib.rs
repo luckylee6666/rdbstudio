@@ -13,6 +13,10 @@ use state::AppState;
 use store::ConnectionStore;
 use tauri::Manager;
 
+/// Exposed for the on-disk SQLite round-trip test; the Tauri command wraps it
+/// with the pool/connection checks.
+pub use commands::dump::restore_sqlite_file;
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -80,6 +84,10 @@ pub fn run() {
             commands::query::execute_query,
             commands::query::execute_script,
             commands::query::redis_rename_member,
+            commands::query::redis_create_key,
+            commands::query::redis_rename_key,
+            commands::query::redis_set_ttl,
+            commands::query::redis_delete_member,
             commands::query::cancel_query,
             commands::query::list_history,
             commands::query::clear_history,
@@ -95,6 +103,7 @@ pub fn run() {
             commands::design::table_op,
             commands::dump::dump_database,
             commands::dump::restore_database,
+            commands::dump::cancel_db_io,
             commands::io::export_table,
             commands::io::import_csv,
             commands::io::preview_csv,

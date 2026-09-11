@@ -151,6 +151,11 @@ pub struct AppState {
     /// second click stacking a duplicate tunnel/pool while the first (possibly
     /// slow, SSH) attempt is still running.
     pub connecting: Arc<RwLock<HashSet<String>>>,
+    /// In-flight dump/restore client processes keyed by the frontend-issued
+    /// operation id. Cancelling the token makes the command runner kill the
+    /// spawned child instead of waiting for it. SQLite operations have no
+    /// child process and are never registered here.
+    pub io_ops: Arc<RwLock<HashMap<String, CancellationToken>>>,
     /// Local, in-memory MCP server and short-lived per-connection grants.
     /// Tokens and authorization state are never persisted to disk.
     pub(crate) mcp: McpRuntime,
@@ -166,6 +171,7 @@ impl AppState {
             tunnels: Arc::new(RwLock::new(HashMap::new())),
             queries: Arc::new(RwLock::new(HashMap::new())),
             connecting: Arc::new(RwLock::new(HashSet::new())),
+            io_ops: Arc::new(RwLock::new(HashMap::new())),
             mcp: McpRuntime::default(),
         }
     }
@@ -227,6 +233,35 @@ impl AppState {
 
     pub fn end_connect(&self, id: &str) {
         self.connecting.write().remove(id);
+    }
+
+    /// Register a cancellable dump/restore operation. Returns false if the id
+    /// is already in use, so a cancel cannot land on the wrong child process.
+    pub fn begin_io_op(&self, op_id: &str, token: CancellationToken) -> bool {
+        let mut ops = self.io_ops.write();
+        if ops.contains_key(op_id) {
+            return false;
+        }
+        ops.insert(op_id.to_string(), token);
+        true
+    }
+
+    pub fn finish_io_op(&self, op_id: &str) {
+        self.io_ops.write().remove(op_id);
+    }
+
+    /// Cancel a running dump/restore by its frontend-issued id. The runner
+    /// kills the child process on its next poll. Returns false when no such
+    /// operation is registered — notably SQLite dumps/restores, which have no
+    /// external process and therefore cannot be cancelled this way.
+    pub fn cancel_io_op(&self, op_id: &str) -> bool {
+        match self.io_ops.write().remove(op_id) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
     }
 }
 

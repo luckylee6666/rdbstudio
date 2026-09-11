@@ -9,6 +9,9 @@ export interface PlanNode {
   detail?: string;
   cost?: { startup: number; total: number };
   rows?: number;
+  // PostgreSQL `EXPLAIN ANALYZE` runtime measurements (per-loop averages, as
+  // reported by the server). Absent for non-ANALYZE plans.
+  actual?: { time?: number; rows?: number; loops?: number };
   children: PlanNode[];
 }
 
@@ -72,6 +75,17 @@ export function parsePgPlan(json: unknown): PlanNode {
     const startup = asFiniteNumber(node["Startup Cost"]);
     const total = asFiniteNumber(node["Total Cost"]);
     const rows = asFiniteNumber(node["Plan Rows"]);
+    const actualTime = asFiniteNumber(node["Actual Total Time"]);
+    const actualRows = asFiniteNumber(node["Actual Rows"]);
+    const actualLoops = asFiniteNumber(node["Actual Loops"]);
+    const actual =
+      actualTime != null || actualRows != null || actualLoops != null
+        ? {
+            time: actualTime ?? undefined,
+            rows: actualRows ?? undefined,
+            loops: actualLoops ?? undefined,
+          }
+        : undefined;
     const rawKids = Array.isArray(node["Plans"]) ? node["Plans"] : [];
     return {
       id,
@@ -79,10 +93,190 @@ export function parsePgPlan(json: unknown): PlanNode {
       detail,
       cost: startup != null && total != null ? { startup, total } : undefined,
       rows: rows ?? undefined,
+      actual,
       children: rawKids.filter(isRecord).map(walk),
     };
   };
   return walk(plan);
+}
+
+// MySQL: `EXPLAIN FORMAT=JSON …` yields one row/column holding a JSON string
+// with a `query_block` root. MySQL wraps operations in loosely-typed objects
+// (`nested_loop`, `ordering_operation`, `materialized_from_subquery`, …) and
+// the exact set varies across 5.7/8.x, so everything unknown falls back to a
+// generic node labeled from its key — the graph must render even for a shape
+// this parser has never seen.
+const MYSQL_OPERATION_LABELS: Record<string, string> = {
+  query_block: "Query Block",
+  nested_loop: "Nested Loop",
+  ordering_operation: "Ordering",
+  grouping_operation: "Grouping",
+  duplicates_removal: "Distinct",
+  materialized_from_subquery: "Materialized Subquery",
+  union_result: "Union Result",
+  query_specifications: "Query Specifications",
+};
+
+// Scalar fields that describe an operation/table rather than nesting another
+// one; they must not become generic child nodes.
+const MYSQL_LEAF_KEYS = new Set([
+  "select_id",
+  "cost_info",
+  "table_name",
+  "access_type",
+  "possible_keys",
+  "key",
+  "used_key_parts",
+  "key_length",
+  "ref",
+  "rows_examined_per_scan",
+  "rows_produced_per_join",
+  "filtered",
+  "data_read_per_join",
+  "used_columns",
+  "used_index",
+  "partitions",
+  "attached_condition",
+  "index_condition",
+  "using_filesort",
+  "using_temporary_table",
+  "dependent",
+  "cacheable",
+  "message",
+  "read_cost",
+  "eval_cost",
+  "prefix_cost",
+  "query_cost",
+]);
+
+function prettyKey(key: string): string {
+  return key
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+export function parseMysqlPlan(json: unknown): PlanNode {
+  let data: unknown = json;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      throw new Error("EXPLAIN returned a string that is not valid JSON");
+    }
+  }
+  const entry = Array.isArray(data) ? data[0] : data;
+  if (!isRecord(entry)) {
+    throw new Error("Unexpected EXPLAIN JSON shape: expected an object");
+  }
+  let seq = 0;
+  const nextId = () => `mysql-${seq++}`;
+
+  const tableNode = (t: Record<string, unknown>): PlanNode => {
+    const name = asString(t["table_name"]) ?? "Table";
+    const access = asString(t["access_type"]);
+    const key = asString(t["key"]);
+    const possible = Array.isArray(t["possible_keys"])
+      ? t["possible_keys"].filter(
+          (k): k is string => typeof k === "string" && k.length > 0
+        )
+      : [];
+    const examined = asFiniteNumber(t["rows_examined_per_scan"]);
+    const produced = asFiniteNumber(t["rows_produced_per_join"]);
+    const filteredRaw = t["filtered"];
+    const filtered = asFiniteNumber(filteredRaw);
+    const costInfo = isRecord(t["cost_info"]) ? t["cost_info"] : null;
+    const read = costInfo ? asFiniteNumber(costInfo["read_cost"]) : null;
+    const prefix = costInfo ? asFiniteNumber(costInfo["prefix_cost"]) : null;
+    const detail: string[] = [];
+    if (key) detail.push(`key ${key}`);
+    else if (possible.length > 0) detail.push(`possible ${possible.join(", ")}`);
+    if (filtered != null) {
+      detail.push(
+        `filtered ${
+          typeof filteredRaw === "string" ? filteredRaw : String(filtered)
+        }%`
+      );
+    }
+    return {
+      id: nextId(),
+      label: access ? `${name} (${access})` : name,
+      detail: detail.length > 0 ? detail.join(" · ") : undefined,
+      cost: prefix != null ? { startup: read ?? 0, total: prefix } : undefined,
+      rows: examined ?? produced ?? undefined,
+      children: opChildren(t),
+    };
+  };
+
+  const wrapperNode = (
+    label: string,
+    obj: Record<string, unknown>
+  ): PlanNode => {
+    const costInfo = isRecord(obj["cost_info"]) ? obj["cost_info"] : null;
+    const total = costInfo
+      ? asFiniteNumber(costInfo["query_cost"]) ??
+        asFiniteNumber(costInfo["prefix_cost"])
+      : null;
+    const detail: string[] = [];
+    const selectId = asFiniteNumber(obj["select_id"]);
+    if (selectId != null) detail.push(`select_id ${selectId}`);
+    if (obj["using_filesort"] === true) detail.push("using filesort");
+    if (obj["using_temporary_table"] === true) {
+      detail.push("using temporary table");
+    }
+    return {
+      id: nextId(),
+      label,
+      detail: detail.length > 0 ? detail.join(" · ") : undefined,
+      cost: total != null ? { startup: 0, total } : undefined,
+      children: opChildren(obj),
+    };
+  };
+
+  const listChildren = (items: unknown[]): PlanNode[] => {
+    const out: PlanNode[] = [];
+    for (const item of items) {
+      if (Array.isArray(item)) {
+        // Some servers nest join arrays one level deeper.
+        out.push(...listChildren(item));
+      } else if (isRecord(item) && isRecord(item["table"])) {
+        out.push(tableNode(item["table"]));
+      } else if (isRecord(item)) {
+        out.push(...opChildren(item));
+      }
+    }
+    return out;
+  };
+
+  const operationNode = (key: string, value: unknown): PlanNode | null => {
+    if (isRecord(value)) return wrapperNode(MYSQL_OPERATION_LABELS[key] ?? prettyKey(key), value);
+    if (Array.isArray(value)) {
+      return {
+        id: nextId(),
+        label: MYSQL_OPERATION_LABELS[key] ?? prettyKey(key),
+        children: listChildren(value),
+      };
+    }
+    return null;
+  };
+
+  function opChildren(obj: Record<string, unknown>): PlanNode[] {
+    const out: PlanNode[] = [];
+    for (const [key, value] of Object.entries(obj)) {
+      if (MYSQL_LEAF_KEYS.has(key)) continue;
+      if (key === "table" && isRecord(value)) {
+        out.push(tableNode(value));
+        continue;
+      }
+      const op = operationNode(key, value);
+      if (op) out.push(op);
+    }
+    return out;
+  }
+
+  const qb = isRecord(entry["query_block"]) ? entry["query_block"] : entry;
+  return wrapperNode("Query Block", qb);
 }
 
 // SQLite: `EXPLAIN QUERY PLAN …` yields rows of [id, parent, notused, detail].

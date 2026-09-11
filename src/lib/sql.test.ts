@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { explainWrap, splitRedisCommands, splitStatements } from "./sql";
+import {
+  explainWrap,
+  isReadOnlyStatement,
+  splitRedisCommands,
+  splitStatements,
+} from "./sql";
 
 describe("splitStatements", () => {
   it("splits simple semicolon-separated statements", () => {
@@ -97,6 +102,79 @@ describe("explainWrap", () => {
     expect(explainWrap("EXPLAIN SELECT 1", "postgres")).toBe(
       "EXPLAIN (ANALYZE false, VERBOSE true) SELECT 1"
     );
+  });
+
+  it("strips a parenthesized EXPLAIN before re-wrapping", () => {
+    expect(
+      explainWrap("EXPLAIN (FORMAT JSON, ANALYZE true) SELECT 1", "postgres")
+    ).toBe("EXPLAIN (ANALYZE false, VERBOSE true) SELECT 1");
+  });
+
+  it("wraps with FORMAT JSON where the driver supports it", () => {
+    expect(explainWrap("SELECT 1", "postgres", { format: "json" })).toBe(
+      "EXPLAIN (ANALYZE false, VERBOSE true, FORMAT JSON) SELECT 1"
+    );
+    expect(explainWrap("SELECT 1", "mysql", { format: "json" })).toBe(
+      "EXPLAIN FORMAT=JSON SELECT 1"
+    );
+  });
+
+  it("wraps EXPLAIN ANALYZE for postgres", () => {
+    expect(
+      explainWrap("SELECT * FROM t", "postgres", {
+        analyze: true,
+        format: "json",
+      })
+    ).toBe("EXPLAIN (ANALYZE true, VERBOSE true, FORMAT JSON) SELECT * FROM t");
+    expect(explainWrap("SELECT 1", "postgres", { analyze: true })).toBe(
+      "EXPLAIN (ANALYZE true, VERBOSE true) SELECT 1"
+    );
+  });
+});
+
+describe("isReadOnlyStatement", () => {
+  it("accepts plain reads", () => {
+    expect(isReadOnlyStatement("SELECT 1")).toBe(true);
+    expect(isReadOnlyStatement("  select * from t;  ")).toBe(true);
+    expect(isReadOnlyStatement("VALUES (1), (2)")).toBe(true);
+    expect(isReadOnlyStatement("TABLE users")).toBe(true);
+    expect(isReadOnlyStatement("WITH x AS (SELECT 1) SELECT * FROM x")).toBe(
+      true
+    );
+  });
+
+  it("skips leading comments and EXPLAIN wrappers", () => {
+    expect(isReadOnlyStatement("-- comment\n/* block */ SELECT 1")).toBe(true);
+    expect(isReadOnlyStatement("EXPLAIN ANALYZE SELECT 1")).toBe(true);
+    expect(
+      isReadOnlyStatement("EXPLAIN (ANALYZE true, FORMAT JSON) SELECT 1")
+    ).toBe(true);
+  });
+
+  it("rejects writes and unknown statements", () => {
+    expect(isReadOnlyStatement("DELETE FROM t")).toBe(false);
+    expect(isReadOnlyStatement("UPDATE t SET a = 1")).toBe(false);
+    expect(isReadOnlyStatement("INSERT INTO t VALUES (1)")).toBe(false);
+    expect(isReadOnlyStatement("DROP TABLE t")).toBe(false);
+    expect(isReadOnlyStatement("SET search_path = public")).toBe(false);
+    expect(isReadOnlyStatement("")).toBe(false);
+  });
+
+  it("rejects data-modifying CTEs", () => {
+    expect(
+      isReadOnlyStatement(
+        "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects multi-statement scripts", () => {
+    expect(isReadOnlyStatement("SELECT 1; DELETE FROM t")).toBe(false);
+    expect(isReadOnlyStatement("SELECT 1; SELECT 2")).toBe(false);
+  });
+
+  it("sees through an EXPLAIN prefix on a write", () => {
+    expect(isReadOnlyStatement("EXPLAIN ANALYZE DELETE FROM t")).toBe(false);
   });
 });
 

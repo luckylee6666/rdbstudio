@@ -48,6 +48,7 @@ import {
   save as saveDialog,
   open as openDialog,
 } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import type {
   ConnectionConfig,
   DriverKind,
@@ -55,7 +56,7 @@ import type {
   TreeEntry,
 } from "@/types";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
-import { api } from "@/lib/api";
+import { api, type DumpReport, type RestoreReport } from "@/lib/api";
 import { toast } from "@/store/toasts";
 import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
@@ -67,6 +68,7 @@ import { connColorValue } from "@/lib/connColors";
 import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { CreateTableDialog } from "./CreateTableDialog";
+import { RedisKeyDialog } from "./RedisKeyDialog";
 import { NavicatImportDialog } from "./NavicatImportDialog";
 import { McpAccessDialog } from "./McpAccessDialog";
 import { PromptDialog } from "@/components/ui/PromptDialog";
@@ -138,6 +140,7 @@ export function ConnectionTree() {
     useState<NavicatImportPreview | null>(null);
   const [navicatFileName, setNavicatFileName] = useState("");
   const [navicatOpen, setNavicatOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ConnectionConfig | null>(null);
   const t = useT();
 
   useEffect(() => {
@@ -247,7 +250,7 @@ export function ConnectionTree() {
               setEditing(c);
               setDlgOpen(true);
             }}
-            onDelete={(c) => void remove(c.id)}
+            onDelete={(c) => setDeleteTarget(c)}
           />
         )}
       </div>
@@ -264,6 +267,24 @@ export function ConnectionTree() {
         fileName={navicatFileName}
         onClose={() => setNavicatOpen(false)}
       />
+
+      {deleteTarget && (
+        <ConfirmDialog
+          open={!!deleteTarget}
+          title={t("conn.delete.title")}
+          message={t("conn.delete.confirm", { name: deleteTarget.name })}
+          confirmLabel={t("common.delete")}
+          cancelLabel={t("common.cancel")}
+          danger
+          onConfirm={() => {
+            const target = deleteTarget;
+            void remove(target.id).catch((e: unknown) =>
+              toast.error(t("conn.delete.failed"), String(e))
+            );
+          }}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
 
       <PromptDialog
         open={promptOpen}
@@ -685,6 +706,9 @@ function ConnectionBranch({
   // Dump/restore in flight — shows the row spinner and disables the menu
   // entries so a second run can't stack on the first.
   const [ioBusy, setIoBusy] = useState<"dump" | "restore" | null>(null);
+  // Cancel handle for the running PG/MySQL dump or restore (SQLite operations
+  // run in-process and are not cancellable).
+  const [ioOpId, setIoOpId] = useState<string | null>(null);
   const [restoreConfirm, setRestoreConfirm] = useState<string | null>(null);
   const t = useT();
   const drag = useConnDrag();
@@ -707,12 +731,21 @@ function ConnectionBranch({
         : [{ name: "SQL", extensions: ["sql"] }],
     });
     if (!dest) return;
+    // Client tools can be killed from the UI; SQLite VACUUM runs in-process.
+    const opId = isSqlite ? null : crypto.randomUUID();
+    setIoOpId(opId);
     setIoBusy("dump");
     try {
       // SQLite dumps through the live pool; SSH-tunneled servers need the
       // tunnel up. Connecting first covers both.
       if (status !== "connected") await connect(cfg.id);
-      const rep = await api.dumpDatabase(cfg.id, dest);
+      const rep = await invoke<DumpReport>("dump_database", {
+        id: cfg.id,
+        destPath: dest,
+        database: null,
+        schemaOnly: false,
+        operationId: opId,
+      });
       toast.success(
         t("conn.dump.done"),
         `${formatBytes(rep.bytes)} · ${rep.path}`
@@ -721,29 +754,55 @@ function ConnectionBranch({
       toast.error(t("conn.dump.failed"), String(e));
     } finally {
       setIoBusy(null);
+      setIoOpId(null);
     }
   };
 
   const pickRestore = async () => {
+    const isSqlite = cfg.driver === "sqlite";
     const src = await openDialog({
       multiple: false,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
+      filters: isSqlite
+        ? [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }]
+        : [{ name: "SQL", extensions: ["sql"] }],
     });
     if (typeof src === "string" && src) setRestoreConfirm(src);
   };
 
   const doRestore = async (src: string) => {
+    const isSqlite = cfg.driver === "sqlite";
+    const opId = isSqlite ? null : crypto.randomUUID();
+    setIoOpId(opId);
     setIoBusy("restore");
     try {
-      if (status !== "connected") await connect(cfg.id);
-      await api.restoreDatabase(cfg.id, src);
+      // SQLite restore replaces the database file, so the backend refuses
+      // while the pool is open; don't auto-connect in that case.
+      if (!isSqlite && status !== "connected") await connect(cfg.id);
+      await invoke<RestoreReport>("restore_database", {
+        id: cfg.id,
+        srcPath: src,
+        operationId: opId,
+      });
       toast.success(t("conn.restore.done"));
-      await refreshBranch(cfg.id);
+      if (status === "connected") await refreshBranch(cfg.id);
     } catch (e) {
       toast.error(t("conn.restore.failed"), String(e));
     } finally {
       setIoBusy(null);
+      setIoOpId(null);
     }
+  };
+
+  const cancelIo = () => {
+    if (!ioOpId) return;
+    // The in-flight dump/restore rejects once the child is killed; its catch
+    // surfaces the cancellation toast.
+    void invoke<boolean>("cancel_db_io", { operationId: ioOpId }).catch((e) => {
+      toast.error(
+        t(ioBusy === "restore" ? "conn.restore.failed" : "conn.dump.failed"),
+        String(e)
+      );
+    });
   };
 
   const supportsCreateDb =
@@ -1009,8 +1068,24 @@ function ConnectionBranch({
         </button>
         <div
           data-conn-drag-ignore
-          className="relative pr-1 opacity-0 group-hover:opacity-100"
+          className={cn(
+            "relative pr-1 opacity-0 group-hover:opacity-100",
+            ioBusy && ioOpId && "opacity-100"
+          )}
         >
+          {ioBusy && ioOpId && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                cancelIo();
+              }}
+              title={t("common.cancel")}
+              aria-label={t("common.cancel")}
+              className="grid h-6 w-6 place-items-center rounded text-danger hover:bg-danger/10"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
           {status === "connected" && (
             <>
               <button
@@ -1198,9 +1273,7 @@ function ConnectionBranch({
               id: "restore",
               label: t("conn.restore"),
               icon: HardDriveUpload,
-              disabled:
-                (cfg.driver !== "postgres" && cfg.driver !== "mysql") ||
-                ioBusy != null,
+              disabled: cfg.driver === "redis" || ioBusy != null,
               onClick: () => void pickRestore(),
             },
             {
@@ -1304,7 +1377,9 @@ function DatabaseNode({
   const tablesError = branch?.tablesError?.[schemaKey];
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [redisCreateOpen, setRedisCreateOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const refreshBranch = useConnections((s) => s.refreshBranch);
   const t = useT();
 
   const openEr = () =>
@@ -1355,6 +1430,19 @@ function DatabaseNode({
               icon: Workflow,
               onClick: openEr,
             },
+            ...(driver === "redis"
+              ? [
+                  {
+                    id: "redis_new_key",
+                    label: t("redis.create.title"),
+                    icon: Plus,
+                    onClick: () => {
+                      if (!open) setOpen(true);
+                      setRedisCreateOpen(true);
+                    },
+                  } satisfies MenuEntry,
+                ]
+              : []),
             {
               id: "new_table",
               label: t("tree.new_table"),
@@ -1432,6 +1520,12 @@ function DatabaseNode({
         onCreated={() => {
           void loadTables(connectionId, schemaKey, passSchema);
         }}
+      />
+      <RedisKeyDialog
+        open={redisCreateOpen}
+        connectionId={connectionId}
+        onClose={() => setRedisCreateOpen(false)}
+        onCreated={() => void refreshBranch(connectionId)}
       />
       <DatabaseExportDialog
         open={exportOpen}

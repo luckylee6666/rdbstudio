@@ -540,10 +540,27 @@ function CellInput({
 }) {
   const [val, setVal] = useState(initial);
   const ref = useRef<HTMLInputElement>(null);
+  // Virtualized rows unmount when scrolled out of view, and a removed focused
+  // input fires no blur — flush the draft on unmount instead of losing it.
+  const focusedRef = useRef(false);
+  const committedRef = useRef(false);
+  const valRef = useRef(val);
+  valRef.current = val;
+  const commitRef = useRef(onCommit);
+  commitRef.current = onCommit;
   useEffect(() => {
     ref.current?.focus();
     ref.current?.select();
   }, []);
+  useEffect(
+    () => () => {
+      if (focusedRef.current && !committedRef.current) {
+        committedRef.current = true;
+        commitRef.current(valRef.current);
+      }
+    },
+    []
+  );
   return (
     <div
       className="flex items-stretch border-r border-border/60 bg-surface-elevated"
@@ -553,14 +570,27 @@ function CellInput({
         ref={ref}
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        onBlur={() => onCommit(val)}
+        onFocus={() => {
+          focusedRef.current = true;
+        }}
+        onBlur={() => {
+          focusedRef.current = false;
+          if (!committedRef.current) {
+            committedRef.current = true;
+            commitRef.current(val);
+          }
+        }}
         onKeyDown={(e) => {
           if (e.nativeEvent.isComposing) return;
           if (e.key === "Enter") {
             e.preventDefault();
-            onCommit(val);
+            if (!committedRef.current) {
+              committedRef.current = true;
+              commitRef.current(val);
+            }
           } else if (e.key === "Escape") {
             e.preventDefault();
+            committedRef.current = true;
             onCancel();
           }
         }}

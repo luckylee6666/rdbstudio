@@ -7,6 +7,7 @@ import {
   Loader2,
   Pencil,
   RefreshCw,
+  Trash2,
   X,
 } from "lucide-react";
 import type { WorkspaceTab } from "@/types";
@@ -14,6 +15,11 @@ import { api, type QueryResult } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/store/i18n";
+import { useConnections } from "@/store/connections";
+import { useWorkspace } from "@/store/workspace";
+import { toast } from "@/store/toasts";
+import { PromptDialog } from "@/components/ui/PromptDialog";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 type LoadState =
   | { kind: "idle" }
@@ -112,8 +118,13 @@ function cellToString(v: unknown): string {
 export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
   const { connectionId, redisKey, redisType } = tab;
   const [state, setState] = useState<LoadState>({ kind: "idle" });
+  const [ttlOpen, setTtlOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const inflightRef = useRef<number>(0);
   const t = useT();
+  const refreshBranch = useConnections((s) => s.refreshBranch);
+  const closeTab = useWorkspace((s) => s.closeTab);
+  const openTab = useWorkspace((s) => s.openTab);
 
   const load = useCallback(async () => {
     if (!connectionId || !redisKey || !redisType) return;
@@ -149,6 +160,53 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
     if (redisKey) void copyText(redisKey);
   };
 
+  // Seconds shown in the TTL prompt — empty when the key is missing, persistent
+  // or expired, so opening the dialog just means "type a number to expire".
+  const ttlSeconds =
+    state.kind === "ok" && state.ttlMs != null && state.ttlMs > 0
+      ? String(Math.ceil(state.ttlMs / 1000))
+      : "";
+
+  const onSetTtl = async (raw: string) => {
+    if (!connectionId || !redisKey) return;
+    const trimmed = raw.trim();
+    let ttl: number | null = null;
+    if (trimmed !== "") {
+      if (!/^\d+$/.test(trimmed) || Number(trimmed) <= 0) {
+        throw new Error(t("redis.ttl.invalid"));
+      }
+      ttl = Number(trimmed);
+    }
+    const existed = await api.redisSetTtl(connectionId, redisKey, ttl);
+    if (!existed) throw new Error(t("redis.ttl.missing"));
+    toast.success(ttl == null ? t("redis.ttl.done_persist") : t("redis.ttl.done"));
+    await refreshBranch(connectionId);
+    await load();
+  };
+
+  const onRenameKey = async (next: string) => {
+    if (!connectionId || !redisKey) return;
+    if (!next) throw new Error(t("redis.create.err.key_required"));
+    if (next === redisKey) throw new Error(t("redis.rename_key.unchanged"));
+    await api.redisRenameKey(connectionId, redisKey, next);
+    toast.success(t("redis.rename_key.done", { name: next }));
+    // The tab id embeds the key name; move the viewer to a tab for the new
+    // name instead of leaving a stale title behind.
+    if (redisType) {
+      closeTab(tab.id);
+      openTab({
+        id: `redis:${connectionId}:${next}`,
+        kind: "redis-key",
+        title: next,
+        subtitle: redisType,
+        connectionId,
+        redisKey: next,
+        redisType,
+      });
+    }
+    await refreshBranch(connectionId);
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/70 bg-surface/30 px-3">
@@ -168,12 +226,24 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
         >
           <Copy className="h-3.5 w-3.5" />
         </button>
-        <span className="ml-2 text-[11px] text-muted-foreground">
+        <button
+          onClick={() => setRenameOpen(true)}
+          title={t("redis.rename_key")}
+          className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+        <button
+          onClick={() => setTtlOpen(true)}
+          title={t("redis.ttl.edit")}
+          className="ml-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
           TTL{" "}
           <span className="font-mono text-foreground/80">
             {state.kind === "ok" ? formatTtl(state.ttlMs) : "—"}
           </span>
-        </span>
+          <Pencil className="h-3 w-3" />
+        </button>
         <div className="flex-1" />
         <button
           onClick={() => void load()}
@@ -212,6 +282,28 @@ export function RedisKeyView({ tab }: { tab: WorkspaceTab }) {
           />
         )}
       </div>
+
+      <PromptDialog
+        open={renameOpen}
+        title={t("redis.rename_key")}
+        label={t("redis.rename_key.prompt")}
+        initialValue={redisKey ?? ""}
+        submitLabel={t("common.save")}
+        cancelLabel={t("common.cancel")}
+        onSubmit={(v) => onRenameKey(v)}
+        onClose={() => setRenameOpen(false)}
+      />
+      <PromptDialog
+        open={ttlOpen}
+        title={t("redis.ttl.edit")}
+        label={t("redis.ttl.prompt")}
+        initialValue={ttlSeconds}
+        placeholder={t("redis.ttl.persist")}
+        submitLabel={t("common.save")}
+        cancelLabel={t("common.cancel")}
+        onSubmit={(v) => onSetTtl(v)}
+        onClose={() => setTtlOpen(false)}
+      />
     </div>
   );
 }
@@ -397,6 +489,22 @@ function CellEditor({
   // Enter triggers commit() then blurs the textarea; without this guard, the
   // follow-up onBlur fires a second commit() and double-issues the IPC.
   const committedRef = useRef(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
+  // Scrolling a virtualized row out of view unmounts the editor without a
+  // blur; flush the draft so the edit isn't silently lost.
+  useEffect(
+    () => () => {
+      if (!committedRef.current && draftRef.current !== initial) {
+        committedRef.current = true;
+        void onCommitRef.current(draftRef.current);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   const commit = async () => {
     if (committedRef.current) return;
@@ -487,6 +595,24 @@ function RedisTable({
   );
   const showIndex = type === "list";
   const [editing, setEditing] = useState<CellLocation | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const canDeleteMember = type === "hash" || type === "set" || type === "zset";
+
+  const deleteMember = async (member: string) => {
+    try {
+      const deleted = await api.redisDeleteMember(
+        connectionId,
+        redisKey,
+        type as "hash" | "set" | "zset",
+        member
+      );
+      if (deleted > 0) toast.success(t("redis.member.delete_done"));
+      setEditing(null);
+      await onReload();
+    } catch (e) {
+      toast.error(t("redis.member.delete_failed"), String(e));
+    }
+  };
 
   // Which (type, columnIndex) cells are editable. stream is read-only.
   const isEditable = (col: number): boolean => {
@@ -596,6 +722,7 @@ function RedisTable({
             {c}
           </div>
         ))}
+        {canDeleteMember && <div className="w-8 shrink-0" />}
       </div>
       {rows.length === 0 ? (
         <div className="px-3 py-6 text-center text-[12px] text-muted-foreground">
@@ -609,8 +736,24 @@ function RedisTable({
           editing={editing}
           setEditing={setEditing}
           saveCell={saveCell}
+          onDeleteMember={canDeleteMember ? setDeleteTarget : undefined}
         />
       )}
+      <ConfirmDialog
+        open={deleteTarget != null}
+        title={t("redis.member.delete")}
+        message={t("redis.member.delete_confirm", {
+          member: deleteTarget ?? "",
+        })}
+        confirmLabel={t("common.delete")}
+        cancelLabel={t("common.cancel")}
+        danger
+        onConfirm={() => {
+          const member = deleteTarget;
+          if (member != null) void deleteMember(member);
+        }}
+        onClose={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }
@@ -624,6 +767,7 @@ function VirtualRows({
   editing,
   setEditing,
   saveCell,
+  onDeleteMember,
 }: {
   rows: unknown[][];
   showIndex: boolean;
@@ -631,6 +775,7 @@ function VirtualRows({
   editing: CellLocation | null;
   setEditing: (c: CellLocation | null) => void;
   saveCell: (row: number, col: number, next: string) => Promise<void>;
+  onDeleteMember?: (member: string) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const t = useT();
@@ -658,7 +803,7 @@ function VirtualRows({
               data-index={vr.index}
               ref={virtualizer.measureElement}
               className={cn(
-                "absolute left-0 flex w-full items-stretch border-b border-border/40 text-[12px] hover:bg-accent/30",
+                "group/row absolute left-0 flex w-full items-stretch border-b border-border/40 text-[12px] hover:bg-accent/30",
                 vr.index % 2 === 1 && "bg-surface/20"
               )}
               style={{ transform: `translateY(${vr.start}px)` }}
@@ -697,6 +842,18 @@ function VirtualRows({
                   </div>
                 );
               })}
+              {onDeleteMember && (
+                <div className="flex w-8 shrink-0 items-center justify-center">
+                  <button
+                    onClick={() => onDeleteMember(cellToString(row[0]))}
+                    title={t("redis.member.delete")}
+                    aria-label={t("redis.member.delete")}
+                    className="grid h-5 w-5 place-items-center rounded text-muted-foreground opacity-0 hover:bg-danger/10 hover:text-danger group-hover/row:opacity-100"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}

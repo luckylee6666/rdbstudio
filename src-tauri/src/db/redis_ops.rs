@@ -171,6 +171,191 @@ return 1"#
     Ok(())
 }
 
+/// Create one typed key. String goes through `SET … NX` (atomic). The four
+/// collection kinds use a single Lua script that checks EXISTS and creates the
+/// value in one server-side step, so two clients racing the same name cannot
+/// both succeed. `field` is required for hash, `score` for zset.
+pub async fn create_key(
+    handle: &RedisHandle,
+    key: &str,
+    kind: &str,
+    value: &str,
+    field: Option<&str>,
+    score: Option<f64>,
+    ttl_secs: Option<i64>,
+) -> AppResult<()> {
+    if key.is_empty() {
+        return Err(AppError::msg("key name is empty"));
+    }
+    if let Some(n) = ttl_secs {
+        if n <= 0 {
+            return Err(AppError::msg("TTL must be greater than 0 seconds"));
+        }
+    }
+    let mut conn = handle.conn();
+    match kind {
+        "string" => {
+            let mut cmd = redis::cmd("SET");
+            cmd.arg(key).arg(value).arg("NX");
+            if let Some(n) = ttl_secs {
+                cmd.arg("EX").arg(n);
+            }
+            let reply: Option<String> = cmd.query_async(&mut conn).await?;
+            if reply.is_none() {
+                return Err(AppError::msg(format!("key \"{key}\" already exists")));
+            }
+            Ok(())
+        }
+        "hash" | "list" | "set" | "zset" => {
+            let ttl = ttl_secs.map(|n| n.to_string()).unwrap_or_default();
+            let (a, b) = match kind {
+                "hash" => {
+                    let field = field
+                        .ok_or_else(|| AppError::msg("hash keys require a field name"))?;
+                    (field.to_string(), value.to_string())
+                }
+                "zset" => {
+                    let score = score
+                        .ok_or_else(|| AppError::msg("zset keys require a score"))?;
+                    (score.to_string(), value.to_string())
+                }
+                // list / set: only the value matters; the second slot is unused.
+                _ => (value.to_string(), String::new()),
+            };
+            let lua = r#"if redis.call('EXISTS', KEYS[1]) == 1 then
+  return redis.error_reply('key already exists')
+end
+local kind = ARGV[1]
+if kind == 'hash' then
+  redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
+elseif kind == 'list' then
+  redis.call('RPUSH', KEYS[1], ARGV[2])
+elseif kind == 'set' then
+  redis.call('SADD', KEYS[1], ARGV[2])
+else
+  redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+end
+if ARGV[4] ~= '' then
+  redis.call('EXPIRE', KEYS[1], ARGV[4])
+end
+return 1"#;
+            let _: i64 = redis::Script::new(lua)
+                .key(key)
+                .arg(kind)
+                .arg(a)
+                .arg(b)
+                .arg(ttl)
+                .invoke_async(&mut conn)
+                .await?;
+            Ok(())
+        }
+        other => Err(AppError::msg(format!(
+            "unsupported Redis key type {other}"
+        ))),
+    }
+}
+
+/// Rename a key without clobbering an existing destination. RENAMENX is
+/// atomic; a zero reply is disambiguated into "destination exists" vs "source
+/// vanished" so the UI can say which one happened.
+pub async fn rename_key(handle: &RedisHandle, key: &str, new_key: &str) -> AppResult<()> {
+    if key == new_key {
+        return Ok(());
+    }
+    if key.is_empty() || new_key.is_empty() {
+        return Err(AppError::msg("key name is empty"));
+    }
+    let mut conn = handle.conn();
+    let renamed: i64 = redis::cmd("RENAMENX")
+        .arg(key)
+        .arg(new_key)
+        .query_async(&mut conn)
+        .await?;
+    if renamed == 0 {
+        let dest_exists: i64 = redis::cmd("EXISTS")
+            .arg(new_key)
+            .query_async(&mut conn)
+            .await?;
+        if dest_exists == 1 {
+            return Err(AppError::msg(format!(
+                "destination key \"{new_key}\" already exists"
+            )));
+        }
+        return Err(AppError::msg("source key no longer exists"));
+    }
+    Ok(())
+}
+
+/// Set or clear a key's expiry. `Some(n)` runs EXPIRE (n must be positive);
+/// `None` runs PERSIST. Returns whether the key existed when we looked.
+pub async fn set_ttl(handle: &RedisHandle, key: &str, ttl_secs: Option<i64>) -> AppResult<bool> {
+    let mut conn = handle.conn();
+    match ttl_secs {
+        Some(n) => {
+            if n <= 0 {
+                return Err(AppError::msg("TTL must be greater than 0 seconds"));
+            }
+            let set: i64 = redis::cmd("EXPIRE")
+                .arg(key)
+                .arg(n)
+                .query_async(&mut conn)
+                .await?;
+            Ok(set == 1)
+        }
+        None => {
+            let existed: i64 = redis::cmd("EXISTS")
+                .arg(key)
+                .query_async(&mut conn)
+                .await?;
+            let _: i64 = redis::cmd("PERSIST")
+                .arg(key)
+                .query_async(&mut conn)
+                .await?;
+            Ok(existed == 1)
+        }
+    }
+}
+
+/// Delete one field/member from a hash, set or zset. Returns the deleted count
+/// (0 when it was already gone). Other key types are refused up front.
+pub async fn delete_member(
+    handle: &RedisHandle,
+    key: &str,
+    kind: &str,
+    member: &str,
+) -> AppResult<i64> {
+    let mut conn = handle.conn();
+    let deleted: i64 = match kind {
+        "hash" => {
+            redis::cmd("HDEL")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut conn)
+                .await?
+        }
+        "set" => {
+            redis::cmd("SREM")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut conn)
+                .await?
+        }
+        "zset" => {
+            redis::cmd("ZREM")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut conn)
+                .await?
+        }
+        other => {
+            return Err(AppError::msg(format!(
+                "member deletion is not supported for Redis type {other}"
+            )))
+        }
+    };
+    Ok(deleted)
+}
+
 pub async fn execute(handle: &RedisHandle, command_line: &str) -> AppResult<QueryResult> {
     let start = Instant::now();
     // One command per call. `parse_args` treats a newline like any other

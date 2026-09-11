@@ -16,6 +16,7 @@ use crate::state::AppState;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DumpReport {
@@ -216,16 +217,198 @@ async fn dump_sqlite_schema(pool: &sqlx::SqlitePool, dest_path: &str) -> AppResu
     Ok(())
 }
 
-async fn run_tool(mut cmd: tokio::process::Command, tool: &str) -> AppResult<()> {
-    let out = cmd
-        .output()
-        .await
+/// Every SQLite database file starts with these 16 bytes.
+const SQLITE_HEADER: [u8; 16] = *b"SQLite format 3\0";
+
+/// Restore a SQLite database by replacing `target` with the file at `src`.
+///
+/// The source is validated first (SQLite header) and the copy lands in a
+/// sibling temp file before being renamed over the target, so a failed or
+/// interrupted copy never leaves a truncated database behind.
+pub fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut source = std::fs::File::open(src)
+        .map_err(|e| AppError::msg(format!("cannot open backup file {}: {e}", src.display())))?;
+    let mut header = [0u8; 16];
+    if source.read_exact(&mut header).is_err() {
+        return Err(AppError::msg(format!(
+            "{} is not a SQLite database (file is too short)",
+            src.display()
+        )));
+    }
+    if header != SQLITE_HEADER {
+        return Err(AppError::msg(format!(
+            "{} is not a SQLite database (missing \"SQLite format 3\" header)",
+            src.display()
+        )));
+    }
+    source.seek(SeekFrom::Start(0))?;
+
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)?;
+
+    // Same directory as the target: the temp file stays on one filesystem so
+    // the final rename is a single atomic operation.
+    let tmp = parent.join(format!(".rdbstudio-restore-{}.tmp", uuid::Uuid::new_v4()));
+    let copied = (|| -> std::io::Result<()> {
+        let mut out = std::fs::File::create(&tmp)?;
+        std::io::copy(&mut source, &mut out)?;
+        out.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(AppError::msg(format!(
+            "failed to stage the restore in {}: {e}",
+            tmp.display()
+        )));
+    }
+
+    if let Err(e) = replace_file(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(AppError::msg(format!(
+            "failed to replace {}: {e}",
+            target.display()
+        )));
+    }
+
+    // Pooled SQLite connections run in WAL mode. A stale write-ahead log next
+    // to the freshly restored main file could replay pre-restore frames, so
+    // drop the sidecars once the main file has been swapped.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = target.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        match std::fs::remove_file(Path::new(&sidecar)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(AppError::msg(format!(
+                    "restored {}, but could not remove {}: {e}",
+                    target.display(),
+                    Path::new(&sidecar).display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rename `tmp` over `target`. Unix replaces atomically; Windows refuses to
+/// rename onto an existing file, so remove the old database and retry (the
+/// staged copy is already complete at this point).
+fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    match std::fs::rename(tmp, target) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            #[cfg(target_os = "windows")]
+            if target.exists() {
+                std::fs::remove_file(target)?;
+                return std::fs::rename(tmp, target);
+            }
+            Err(first)
+        }
+    }
+}
+
+/// Registers a cancellable IO operation for as long as the guard lives and
+/// clears it on drop, so early returns cannot leak the entry (and a leaked id
+/// would block a retry).
+struct IoOpGuard<'a> {
+    state: &'a AppState,
+    op_id: Option<String>,
+}
+
+impl<'a> IoOpGuard<'a> {
+    fn begin(
+        state: &'a AppState,
+        operation_id: Option<String>,
+    ) -> AppResult<(Self, Option<CancellationToken>)> {
+        match operation_id {
+            Some(op_id) => {
+                let token = CancellationToken::new();
+                if !state.begin_io_op(&op_id, token.clone()) {
+                    return Err(AppError::msg("operation id is already in use"));
+                }
+                Ok((
+                    Self {
+                        state,
+                        op_id: Some(op_id),
+                    },
+                    Some(token),
+                ))
+            }
+            None => Ok((Self { state, op_id: None }, None)),
+        }
+    }
+}
+
+impl Drop for IoOpGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(op_id) = self.op_id.take() {
+            self.state.finish_io_op(&op_id);
+        }
+    }
+}
+
+async fn run_tool(
+    mut cmd: tokio::process::Command,
+    tool: &str,
+    cancel: Option<CancellationToken>,
+) -> AppResult<()> {
+    use tokio::io::AsyncReadExt;
+
+    // Capture output while the process runs: waiting without draining a full
+    // pipe would deadlock, and a cancel needs to distinguish "killed by the
+    // button" from "tool failed".
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
         .map_err(|e| AppError::msg(format!("failed to launch {tool}: {e}")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut child_stdout = child.stdout.take().expect("stdout is piped");
+    let mut child_stderr = child.stderr.take().expect("stderr is piped");
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = child_stdout.read_to_end(&mut buf).await;
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let status = match &cancel {
+        Some(token) => tokio::select! {
+            status = child.wait() => Some(status),
+            _ = token.cancelled() => None,
+        },
+        None => Some(child.wait().await),
+    };
+
+    let Some(status) = status else {
+        // Killing closes the pipes and lets the drain tasks finish; reap the
+        // child so no zombie is left behind.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        return Err(AppError::msg(format!("{tool} cancelled")));
+    };
+
+    let status = status.map_err(|e| AppError::msg(format!("failed to wait for {tool}: {e}")))?;
+    let stderr = stderr_task.await.unwrap_or_default();
+    let _ = stdout_task.await;
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(AppError::msg(format!(
             "{tool} exited with {}: {}",
-            out.status,
+            status,
             tail_of(&stderr, 800)
         )));
     }
@@ -239,6 +422,7 @@ pub async fn dump_database(
     dest_path: String,
     database: Option<String>,
     schema_only: bool,
+    operation_id: Option<String>,
 ) -> AppResult<DumpReport> {
     let cfg = state
         .store
@@ -276,6 +460,7 @@ pub async fn dump_database(
             }
         }
         DriverKind::Postgres => {
+            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["pg_dump"]).ok_or_else(|| {
                 AppError::msg(
                     "pg_dump not found — install it (e.g. `brew install libpq`) and retry",
@@ -307,9 +492,10 @@ pub async fn dump_database(
                 cmd.env("PGPASSWORD", pw);
             }
             apply_pg_ssl(&mut cmd, &cfg, via_tunnel)?;
-            run_tool(cmd, "pg_dump").await?;
+            run_tool(cmd, "pg_dump", cancel).await?;
         }
         DriverKind::Mysql => {
+            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["mysqldump", "mariadb-dump"]).ok_or_else(|| {
                 AppError::msg(
                     "mysqldump not found — install it (e.g. `brew install mysql-client`) and retry",
@@ -340,7 +526,7 @@ pub async fn dump_database(
                 cmd.env("MYSQL_PWD", pw);
             }
             apply_mysql_ssl(&mut cmd, &cfg, via_tunnel)?;
-            run_tool(cmd, "mysqldump").await?;
+            run_tool(cmd, "mysqldump", cancel).await?;
         }
     }
 
@@ -357,6 +543,7 @@ pub async fn restore_database(
     state: State<'_, AppState>,
     id: String,
     src_path: String,
+    operation_id: Option<String>,
 ) -> AppResult<RestoreReport> {
     crate::commands::ensure_writable(&state, &id)?;
     let cfg = state
@@ -364,18 +551,32 @@ pub async fn restore_database(
         .get(&id)
         .ok_or_else(|| AppError::msg("unknown connection"))?;
     if !Path::new(&src_path).is_file() {
-        return Err(AppError::msg("SQL file not found"));
+        return Err(AppError::msg("backup file not found"));
     }
     let start = std::time::Instant::now();
 
     match cfg.driver {
         DriverKind::Sqlite => {
-            return Err(AppError::msg(
-                "SQLite restore = open the dumped .db file as a new connection",
-            ))
+            // A binary dump replaces the database file itself, so the pool
+            // must be closed first: SQLite would keep serving (and writing)
+            // the old inode after the rename.
+            if state.get_pool(&id).is_some() {
+                return Err(AppError::msg(
+                    "disconnect the connection before restoring over its file: \
+                     use Disconnect in the connection menu, then run Restore again",
+                ));
+            }
+            let target = cfg
+                .file_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| AppError::msg("this SQLite connection has no database file"))?;
+            restore_sqlite_file(Path::new(target), Path::new(&src_path))?;
         }
         DriverKind::Redis => return Err(AppError::msg("restore is not supported for Redis")),
         DriverKind::Postgres => {
+            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["psql"]).ok_or_else(|| {
                 AppError::msg("psql not found — install it (e.g. `brew install libpq`) and retry")
             })?;
@@ -405,9 +606,10 @@ pub async fn restore_database(
                 cmd.env("PGPASSWORD", pw);
             }
             apply_pg_ssl(&mut cmd, &cfg, via_tunnel)?;
-            run_tool(cmd, "psql").await?;
+            run_tool(cmd, "psql", cancel).await?;
         }
         DriverKind::Mysql => {
+            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["mysql", "mariadb"]).ok_or_else(|| {
                 AppError::msg(
                     "mysql client not found — install it (e.g. `brew install mysql-client`) and retry",
@@ -432,13 +634,22 @@ pub async fn restore_database(
                 cmd.env("MYSQL_PWD", pw);
             }
             apply_mysql_ssl(&mut cmd, &cfg, via_tunnel)?;
-            run_tool(cmd, "mysql").await?;
+            run_tool(cmd, "mysql", cancel).await?;
         }
     }
 
     Ok(RestoreReport {
         elapsed_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// Cancel an in-flight dump/restore by the operation id the frontend passed
+/// to `dump_database` / `restore_database`. Returns whether a live operation
+/// was found; SQLite snapshots have no child process, so they always report
+/// `false` here.
+#[tauri::command]
+pub fn cancel_db_io(state: State<'_, AppState>, operation_id: String) -> bool {
+    state.cancel_io_op(&operation_id)
 }
 
 #[cfg(test)]

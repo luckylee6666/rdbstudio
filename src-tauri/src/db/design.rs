@@ -18,6 +18,20 @@ pub struct ColumnDetail {
     pub numeric_scale: Option<i64>,
     pub is_primary_key: bool,
     pub is_auto_increment: bool,
+    /// PostgreSQL identity column (`GENERATED ... AS IDENTITY`). Never true
+    /// for `serial`, whose default is a `nextval(...)`.
+    #[serde(default)]
+    pub is_identity: bool,
+    /// `ALWAYS` or `BY DEFAULT` for identity columns.
+    #[serde(default)]
+    pub identity_generation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckConstraint {
+    pub name: String,
+    /// Exact text from `pg_get_constraintdef`, e.g. `CHECK ((qty > 0))`.
+    pub definition: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +65,8 @@ pub struct TableDescription {
     pub indexes: Vec<IndexInfo>,
     pub row_estimate: Option<i64>,
     pub size_bytes: Option<i64>,
+    #[serde(default)]
+    pub check_constraints: Vec<CheckConstraint>,
 }
 
 pub async fn describe(
@@ -131,6 +147,8 @@ async fn describe_sqlite(
                 numeric_scale: None,
                 is_primary_key: pk > 0,
                 is_auto_increment: false, // SQLite uses ROWID alias; not easily detectable
+                is_identity: false,
+                identity_generation: None,
             }
         })
         .collect();
@@ -206,6 +224,7 @@ async fn describe_sqlite(
         indexes,
         row_estimate: None,
         size_bytes: None,
+        check_constraints: Vec::new(),
     })
 }
 
@@ -218,9 +237,10 @@ async fn describe_postgres(
     let schema = schema.unwrap_or("public").to_string();
 
     let col_rows = sqlx::query(
-        "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, \
+        "SELECT c.column_name, c.data_type, c.udt_name, c.udt_schema, c.is_nullable, \
                 c.column_default, c.character_maximum_length, \
                 c.numeric_precision, c.numeric_scale, c.ordinal_position, \
+                c.is_identity, c.identity_generation, \
                 pgd.description AS comment, \
                 EXISTS ( \
                     SELECT 1 FROM information_schema.table_constraints tc \
@@ -250,13 +270,23 @@ async fn describe_postgres(
         .map(|r| {
             let default: Option<String> = r.try_get("column_default").ok().flatten();
             let udt: String = r.try_get("udt_name").unwrap_or_default();
+            let udt_schema: String = r.try_get("udt_schema").unwrap_or_default();
             let data_type: String = r.try_get("data_type").unwrap_or_default();
+            let is_identity = r
+                .try_get::<String, _>("is_identity")
+                .map(|s| s == "YES")
+                .unwrap_or(false);
+            let identity_generation: Option<String> =
+                r.try_get("identity_generation").ok().flatten();
             let type_label = if data_type.eq_ignore_ascii_case("ARRAY") {
                 // information_schema reports arrays as udt_name `_text`; the
                 // creatable spelling is `text[]`.
-                format!("{}[]", udt.strip_prefix('_').unwrap_or(&udt))
+                format!(
+                    "{}[]",
+                    pg_qualified_udt(udt.strip_prefix('_').unwrap_or(&udt), &udt_schema)
+                )
             } else if data_type.eq_ignore_ascii_case("USER-DEFINED") {
-                udt
+                pg_qualified_udt(&udt, &udt_schema)
             } else {
                 data_type
             };
@@ -286,10 +316,13 @@ async fn describe_postgres(
                     .flatten()
                     .map(|v| v as i64),
                 is_primary_key: r.try_get::<bool, _>("is_pk").unwrap_or(false),
-                is_auto_increment: default
-                    .as_deref()
-                    .map(|d| d.starts_with("nextval(") || d.contains("GENERATED"))
-                    .unwrap_or(false),
+                is_auto_increment: is_identity
+                    || default
+                        .as_deref()
+                        .map(|d| d.starts_with("nextval("))
+                        .unwrap_or(false),
+                is_identity,
+                identity_generation,
             }
         })
         .collect();
@@ -338,6 +371,29 @@ async fn describe_postgres(
                 .unwrap_or_default(),
             on_update: r.try_get("update_rule").ok(),
             on_delete: r.try_get("delete_rule").ok(),
+        })
+        .collect();
+
+    // Check constraints. contype='c' only holds real CHECK constraints, so the
+    // synthetic NOT NULL entries (PG 18+) never show up here; pg_get_constraintdef
+    // gives the exact expression text, including `NOT VALID` when applicable.
+    let check_rows = sqlx::query(
+        "SELECT con.conname AS name, pg_get_constraintdef(con.oid) AS definition \
+         FROM pg_constraint con \
+         JOIN pg_class c ON c.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'c' \
+         ORDER BY con.conname",
+    )
+    .bind(&schema)
+    .bind(table)
+    .fetch_all(p)
+    .await?;
+    let check_constraints: Vec<CheckConstraint> = check_rows
+        .iter()
+        .map(|r| CheckConstraint {
+            name: r.try_get("name").unwrap_or_default(),
+            definition: r.try_get("definition").unwrap_or_default(),
         })
         .collect();
 
@@ -412,6 +468,7 @@ async fn describe_postgres(
         indexes,
         row_estimate,
         size_bytes,
+        check_constraints,
     })
 }
 
@@ -471,6 +528,11 @@ async fn synth_pg_ddl(
     // `relation "…_seq" does not exist`.
     let mut out = String::new();
     for c in &desc.columns {
+        if c.is_identity {
+            // Identity columns carry an implicit sequence that CREATE TABLE
+            // creates itself; the nextval prelude must not touch them.
+            continue;
+        }
         if let Some(seq) = c.default.as_deref().and_then(pg_sequence_ref) {
             out.push_str(&format!("CREATE SEQUENCE IF NOT EXISTS {};\n", seq));
         }
@@ -488,7 +550,13 @@ async fn synth_pg_ddl(
             if !c.nullable {
                 parts.push_str(" NOT NULL");
             }
-            if let Some(d) = &c.default {
+            if c.is_identity {
+                let generation = match c.identity_generation.as_deref() {
+                    Some(g) if g.eq_ignore_ascii_case("BY DEFAULT") => "BY DEFAULT",
+                    _ => "ALWAYS",
+                };
+                parts.push_str(&format!(" GENERATED {} AS IDENTITY", generation));
+            } else if let Some(d) = &c.default {
                 parts.push_str(&format!(" DEFAULT {}", d));
             }
             parts
@@ -539,6 +607,13 @@ async fn synth_pg_ddl(
             out.push_str(&format!(" ON DELETE {}", d));
         }
     }
+    for check in &desc.check_constraints {
+        out.push_str(&format!(
+            ",\n  CONSTRAINT {} {}",
+            quote_ident(DriverKind::Postgres, &check.name),
+            check.definition
+        ));
+    }
     out.push_str("\n);");
 
     // Indexes (excluding primary key)
@@ -558,7 +633,46 @@ async fn synth_pg_ddl(
             cols
         ));
     }
+
+    // Object comments trail the CREATE statements; they can only be attached
+    // once the relation and columns exist.
+    if let Some(comment) = &desc.comment {
+        out.push_str(&format!(
+            "\nCOMMENT ON TABLE {} IS {};",
+            qualified,
+            pg_string_literal(comment)
+        ));
+    }
+    for c in &desc.columns {
+        if let Some(comment) = &c.comment {
+            out.push_str(&format!(
+                "\nCOMMENT ON COLUMN {}.{} IS {};",
+                qualified,
+                quote_ident(DriverKind::Postgres, &c.name),
+                pg_string_literal(comment)
+            ));
+        }
+    }
     Ok(out)
+}
+
+/// A PostgreSQL string literal with embedded quotes doubled.
+fn pg_string_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Schema-qualify a user-defined type unless it lives in `pg_catalog`: an
+/// unqualified name only resolves when its schema is on the restoring
+/// session's `search_path`, which a dump cannot rely on.
+fn pg_qualified_udt(name: &str, schema: &str) -> String {
+    if schema.is_empty() || schema == "pg_catalog" {
+        return name.to_string();
+    }
+    format!(
+        "{}.{}",
+        quote_ident(DriverKind::Postgres, schema),
+        quote_ident(DriverKind::Postgres, name)
+    )
 }
 
 /// Extract the quoted sequence name from a `nextval('…'::regclass)` default.
@@ -575,6 +689,11 @@ fn pg_sequence_ref(default: &str) -> Option<String> {
 }
 
 fn fmt_pg_type(c: &ColumnDetail) -> String {
+    if c.data_type.starts_with('"') {
+        // Already schema-qualified by `pg_qualified_udt`; lowercasing here
+        // would corrupt mixed-case type/schema names.
+        return c.data_type.clone();
+    }
     let t = c.data_type.to_lowercase();
     if let Some(len) = c.char_max_length {
         if t == "character varying" || t == "varchar" || t == "character" || t == "char" {
@@ -642,6 +761,8 @@ async fn describe_mysql_in(
                 numeric_scale: num_scale,
                 is_primary_key: key == "PRI",
                 is_auto_increment: extra.to_lowercase().contains("auto_increment"),
+                is_identity: false,
+                identity_generation: None,
             }
         })
         .collect();
@@ -799,6 +920,7 @@ async fn describe_mysql_in(
         indexes: idx_map,
         row_estimate,
         size_bytes,
+        check_constraints: Vec::new(),
     })
 }
 
