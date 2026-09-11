@@ -5,6 +5,10 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.6] — 2026-09-11
+
 ### Added
 - SQLite 整库恢复：可将 `VACUUM INTO` 导出的数据库文件替换回连接文件（校验 SQLite 文件头、连接使用中拒绝恢复、同目录临时文件原子替换）；PostgreSQL / MySQL 的 dump 与 restore 现在可取消。
 - 可视化 EXPLAIN 支持 MySQL（`EXPLAIN FORMAT=JSON`，含 nested_loop / ordering / grouping / union 等结构）；PostgreSQL 新增 EXPLAIN ANALYZE（展示实际耗时 / 行数 / 循环数；写语句需二次确认）。
