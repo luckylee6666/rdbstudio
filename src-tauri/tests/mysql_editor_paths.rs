@@ -314,6 +314,7 @@ async fn temporal_and_decimal_columns_decode_and_like_filters_run() {
         limit: 50,
         offset: 0,
         order_by: None,
+        order_by_multi: vec![],
         filters: vec![],
         where_raw: None,
     };

@@ -139,6 +139,7 @@ async fn fetch_with_filter_and_order_returns_subset() {
             column: "id".into(),
             direction: data::SortDir::Desc,
         }),
+        order_by_multi: vec![],
         filters: vec![data::Filter {
             column: "age".into(),
             op: FilterOp::Gte,
@@ -501,4 +502,48 @@ async fn bigint_beyond_js_safe_integer_survives_as_string() {
         .await
         .expect("query");
     assert_eq!(r.rows[0][0], json!(9007199254740991i64));
+}
+
+#[tokio::test]
+async fn export_pages_composite_primary_keys_without_gaps() {
+    let (dir, pool) = setup().await;
+    exec::execute(
+        &pool,
+        "CREATE TABLE ck (tenant INTEGER, id INTEGER, payload TEXT, PRIMARY KEY (tenant, id))",
+    )
+    .await
+    .expect("create ck");
+    let mut values = Vec::new();
+    for tenant in 1..=5 {
+        for id in 1..=20 {
+            values.push(format!("({tenant},{id},'row-{tenant}-{id}')"));
+        }
+    }
+    exec::execute(&pool, &format!("INSERT INTO ck VALUES {}", values.join(",")))
+        .await
+        .expect("seed ck");
+
+    let path = dir.path().join("ck.csv");
+    let opts = ExportOptions {
+        format: ExportFormat::Csv,
+        path: path.to_string_lossy().into_owned(),
+        delimiter: ',',
+        include_header: true,
+        quote_all: false,
+        // Small batches force many LIMIT/OFFSET pages with ties on the first
+        // PK column; ordering by the full key is what keeps them stable.
+        batch_size: 7,
+        include_ddl: false,
+        include_data: true,
+    };
+    let report = io::export_table(&pool, None, "ck", &opts)
+        .await
+        .expect("export ck");
+    assert_eq!(report.rows_written, 100);
+
+    let content = std::fs::read_to_string(&path).expect("read csv");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 101, "header + 100 rows");
+    let unique: std::collections::HashSet<&&str> = lines[1..].iter().collect();
+    assert_eq!(unique.len(), 100, "no duplicated or skipped rows");
 }

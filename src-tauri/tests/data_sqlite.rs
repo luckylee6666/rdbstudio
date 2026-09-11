@@ -13,6 +13,7 @@ fn tq(table: &str) -> TableQuery {
         limit: 100,
         offset: 0,
         order_by: None,
+        order_by_multi: vec![],
         filters: vec![],
         where_raw: None,
     }

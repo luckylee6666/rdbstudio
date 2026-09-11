@@ -15,6 +15,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { anyModalOpen } from "@/components/ui/Modal";
 import { useLayout } from "@/store/layout";
 import { useConnections } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
@@ -195,6 +196,9 @@ export function CommandPalette() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
+        // A dialog owns the keyboard; opening the palette on top would let one
+        // Escape close both.
+        if (!useLayout.getState().paletteOpen && anyModalOpen()) return;
         useLayout.getState().togglePalette();
       }
     };
@@ -214,6 +218,7 @@ export function CommandPalette() {
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
       closePalette();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();

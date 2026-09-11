@@ -41,7 +41,13 @@ export const useWorkspace = create<WorkspaceState>()(
       openTab: (tab) => {
         const existing = get().tabs.find((t) => t.id === tab.id);
         if (existing) {
-          set({ activeTabId: tab.id });
+          // Merge the incoming fields so a re-request (eg. an FK jump that
+          // carries new initialFilters) reaches the mounted view; plain
+          // "focus this tab" calls keep the stored tab as it was.
+          set({
+            tabs: get().tabs.map((t) => (t.id === tab.id ? { ...t, ...tab } : t)),
+            activeTabId: tab.id,
+          });
           return;
         }
         set({ tabs: [...get().tabs, tab], activeTabId: tab.id });

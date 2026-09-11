@@ -53,6 +53,7 @@ fn table_query(table: &str) -> TableQuery {
         limit: 50,
         offset: 0,
         order_by: None,
+        order_by_multi: vec![],
         filters: vec![],
         where_raw: None,
     }

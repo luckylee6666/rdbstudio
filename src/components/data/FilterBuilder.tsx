@@ -214,6 +214,7 @@ export function FilterBuilder({
                     placeholder={hideValue ? "" : t("filter.value_placeholder")}
                     onChange={(e) => updateCond(c.id, { value: e.target.value })}
                     onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing) return;
                       if (e.key === "Enter") apply();
                     }}
                     className="h-7 flex-1 rounded-md border border-border/70 bg-surface px-2 font-mono text-[12px] placeholder:text-muted-foreground/50 focus:border-brand/60 focus:outline-none disabled:bg-surface-muted disabled:text-muted-foreground/50"

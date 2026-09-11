@@ -29,6 +29,7 @@ export function Inspector() {
   useEffect(() => {
     if (!inspectable || !activeTab) {
       setDesc(null);
+      setLoading(false);
       return;
     }
     let cancelled = false;

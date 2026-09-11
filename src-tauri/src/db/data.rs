@@ -55,6 +55,11 @@ pub struct TableQuery {
     pub offset: u32,
     #[serde(default)]
     pub order_by: Option<OrderBy>,
+    /// Additional ORDER BY keys after `order_by`. Export uses it to order by
+    /// every primary-key column, which keeps LIMIT/OFFSET paging stable for
+    /// composite keys.
+    #[serde(default)]
+    pub order_by_multi: Vec<OrderBy>,
     #[serde(default)]
     pub filters: Vec<Filter>,
     /// Raw WHERE clause (without the WHERE keyword). If present, filters are ignored.
@@ -294,16 +299,29 @@ pub async fn fetch(pool: &DbPool, q: &TableQuery) -> AppResult<QueryResult> {
         },
         _ => build_where(driver, &q.filters)?,
     };
-    let order = match &q.order_by {
-        Some(o) => format!(
-            " ORDER BY {} {}",
-            quote_ident(driver, &o.column),
-            match o.direction {
-                SortDir::Asc => "ASC",
-                SortDir::Desc => "DESC",
-            }
-        ),
-        None => String::new(),
+    let mut order_keys: Vec<&OrderBy> = Vec::new();
+    if let Some(o) = &q.order_by {
+        order_keys.push(o);
+    }
+    order_keys.extend(q.order_by_multi.iter());
+    let order = if order_keys.is_empty() {
+        String::new()
+    } else {
+        let cols = order_keys
+            .iter()
+            .map(|o| {
+                format!(
+                    "{} {}",
+                    quote_ident(driver, &o.column),
+                    match o.direction {
+                        SortDir::Asc => "ASC",
+                        SortDir::Desc => "DESC",
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" ORDER BY {}", cols)
     };
     let limit = bounded_table_limit(q.limit);
     let sql = format!(

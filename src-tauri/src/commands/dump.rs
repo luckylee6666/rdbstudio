@@ -153,7 +153,13 @@ fn tail_of(s: &str, max: usize) -> String {
     if t.len() <= max {
         t.to_string()
     } else {
-        format!("…{}", &t[t.len() - max..])
+        // Byte slicing can land inside a multi-byte character (localized
+        // stderr, for example) and panic; step forward to a char boundary.
+        let mut start = t.len() - max;
+        while start < t.len() && !t.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("…{}", &t[start..])
     }
 }
 
@@ -528,6 +534,16 @@ mod tests {
         let long = "x".repeat(50);
         let t = tail_of(&long, 10);
         assert!(t.starts_with('…') && t.len() < 20);
+    }
+
+    #[test]
+    fn tail_of_cuts_on_a_char_boundary() {
+        // Localized tool output is multi-byte; slicing at a byte offset used
+        // to panic when it landed mid-character.
+        let msg = "错误信息重复出现".repeat(20);
+        let t = tail_of(&msg, 10);
+        assert!(t.starts_with('…'));
+        assert!(t.ends_with("出现"));
     }
 
     #[test]

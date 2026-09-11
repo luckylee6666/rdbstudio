@@ -452,6 +452,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
   };
 
   const apply = async () => {
+    if (applying) return;
     const batch = buildBatch();
     if (batch.edits.length === 0) return;
     setApplying(true);
@@ -492,7 +493,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
           onClick={onAddRow}
           icon={Plus}
           label={t("table.toolbar.add_row")}
-          disabled={!editable}
+          disabled={!editable || applying}
         />
         {!hasPk && columns.length > 0 && (
           <span
@@ -538,7 +539,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
             columns={columns}
             rows={gridRows}
             order={order}
-            editable={editable}
+            editable={editable && !applying}
             tableName={table}
             driver={driver}
             fkColumns={fkByCol}
@@ -577,14 +578,16 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
             </span>
             <button
               onClick={() => setPending(new Map())}
-              className="flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              disabled={applying}
+              className="flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
             >
               <Undo2 className="h-3 w-3" />
               {t("common.revert")}
             </button>
             <button
               onClick={openPreview}
-              className="flex h-6 shrink-0 items-center gap-1 rounded border border-border px-2 hover:bg-accent"
+              disabled={applying}
+              className="flex h-6 shrink-0 items-center gap-1 rounded border border-border px-2 hover:bg-accent disabled:opacity-50"
             >
               {t("common.preview")}
             </button>

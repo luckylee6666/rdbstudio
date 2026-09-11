@@ -255,7 +255,7 @@ export function TableDataGrid({
                 <div
                   key={vr.key}
                   className={cn(
-                    "absolute left-0 flex items-stretch border-b border-border/60",
+                    "group absolute left-0 flex items-stretch border-b border-border/60",
                     row.kind === "insert" && "bg-emerald-500/5",
                     row.deleted && "bg-rose-500/10 opacity-60"
                   )}
@@ -555,6 +555,7 @@ function CellInput({
         onChange={(e) => setVal(e.target.value)}
         onBlur={() => onCommit(val)}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing) return;
           if (e.key === "Enter") {
             e.preventDefault();
             onCommit(val);

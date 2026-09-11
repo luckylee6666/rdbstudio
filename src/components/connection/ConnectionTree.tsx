@@ -127,7 +127,7 @@ function formatTtl(ms?: number | null): string {
 }
 
 export function ConnectionTree() {
-  const { list, loaded, refresh, remove } = useConnections();
+  const { list, loaded, listError, refresh, remove } = useConnections();
   const [dlgOpen, setDlgOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectionConfig | null>(null);
   const [emptyGroups, setEmptyGroupsState] = useState<string[]>(() =>
@@ -224,7 +224,17 @@ export function ConnectionTree() {
       <TreeFilterInput />
 
       <div className="flex-1 overflow-auto px-2 pb-3">
-        {!loaded ? (
+        {listError && list.length === 0 ? (
+          <div className="px-3 py-6 text-center text-[12px]">
+            <p className="text-danger">{t("tree.load_failed")}</p>
+            <button
+              onClick={() => void refresh()}
+              className="mt-2 rounded border border-border px-2 py-1 text-[11.5px] text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              {t("tree.retry")}
+            </button>
+          </div>
+        ) : !loaded ? (
           <Skeleton />
         ) : list.length === 0 ? (
           <EmptyState onNew={newConn} />

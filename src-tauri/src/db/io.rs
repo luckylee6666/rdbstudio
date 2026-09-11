@@ -107,16 +107,23 @@ pub async fn export_table(
     }
 
     // Deterministic paging: without a stable ORDER BY, LIMIT/OFFSET batches
-    // can overlap or skip rows mid-export. Order by the first PK column when
-    // the table has one; a table without a PK keeps the old best-effort scan.
+    // can overlap or skip rows mid-export. Order by every PK column (a
+    // composite key ordered by its first column alone still has ties that
+    // can shuffle between pages); a table without a PK keeps the old
+    // best-effort scan.
     let order_by = crate::db::meta::list_columns(pool, schema, table)
         .await
         .ok()
-        .and_then(|cols| cols.into_iter().find(|c| c.is_primary_key))
-        .map(|c| data::OrderBy {
-            column: c.name,
-            direction: data::SortDir::Asc,
-        });
+        .map(|cols| {
+            cols.into_iter()
+                .filter(|c| c.is_primary_key)
+                .map(|c| data::OrderBy {
+                    column: c.name,
+                    direction: data::SortDir::Asc,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     if let ExportFormat::Json = opts.format { w.write_all(b"[\n")? }
 
@@ -126,7 +133,8 @@ pub async fn export_table(
             table: table.to_string(),
             limit: batch_size,
             offset,
-            order_by: order_by.clone(),
+            order_by: None,
+            order_by_multi: order_by.clone(),
             filters: vec![],
             where_raw: None,
         };

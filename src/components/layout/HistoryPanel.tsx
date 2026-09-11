@@ -4,6 +4,7 @@ import { api, type HistoryEntry } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useWorkspace } from "@/store/workspace";
 import { useConnections } from "@/store/connections";
+import { toast } from "@/store/toasts";
 import { useT } from "@/store/i18n";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
@@ -21,6 +22,8 @@ export function HistoryPanel() {
     try {
       const es = await api.listHistory(200);
       setEntries(es);
+    } catch (e: unknown) {
+      toast.error(t("history.load_failed"), String(e));
     } finally {
       setLoading(false);
     }
@@ -57,8 +60,12 @@ export function HistoryPanel() {
   };
 
   const doClear = async () => {
-    await api.clearHistory();
-    setEntries([]);
+    try {
+      await api.clearHistory();
+      setEntries([]);
+    } catch (e: unknown) {
+      toast.error(t("settings.history.failed"), String(e));
+    }
   };
 
   return (

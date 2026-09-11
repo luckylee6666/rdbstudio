@@ -310,6 +310,7 @@ function RedisScalarEditor({
           spellCheck={false}
           className="min-h-[200px] w-full resize-y rounded-md border border-border/60 bg-surface/40 p-3 font-mono text-[12px] text-foreground/90 outline-none focus:border-primary"
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Escape") {
               e.preventDefault();
               cancel();
@@ -426,6 +427,7 @@ function CellEditor({
         rows={Math.min(6, Math.max(1, draft.split("\n").length))}
         disabled={saving}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing) return;
           if (e.key === "Escape") {
             e.preventDefault();
             onCancel();

@@ -41,8 +41,16 @@ pub async fn execute_query(
     // Run the query on its own task so `cancel_query` can abort it mid-flight.
     // Aborting drops the sqlx future; the underlying connection is closed
     // rather than returned to the pool, which is the safe teardown.
+    //
+    // The task waits on a one-shot gate so it cannot touch the database before
+    // its id is registered: a duplicate id is rejected (and aborted) before it
+    // starts, and a cancel arriving right after the spawn still lands.
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
     let task_sql = sql.clone();
     let task = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return Err(AppError::msg("query cancelled"));
+        }
         if read_only {
             execute_readonly(&pool, &task_sql).await
         } else {
@@ -55,6 +63,7 @@ pub async fn execute_query(
             return Err(AppError::msg("query id is already in use"));
         }
     }
+    let _ = start_tx.send(());
     let result = match task.await {
         Ok(r) => r,
         Err(e) if e.is_cancelled() => Err(AppError::msg("query cancelled")),
@@ -129,8 +138,12 @@ pub async fn execute_script(
     let at = chrono::Utc::now().to_rfc3339();
     let joined = sqls.join(";\n");
 
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
     let task_sqls = sqls.clone();
     let task = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return Err(AppError::msg("query cancelled"));
+        }
         if read_only {
             // Nothing writes, so each statement runs behind the database's own
             // read-only mode instead of inside a transaction of ours.
@@ -145,6 +158,7 @@ pub async fn execute_script(
             return Err(AppError::msg("query id is already in use"));
         }
     }
+    let _ = start_tx.send(());
     let result = match task.await {
         Ok(r) => r,
         Err(e) if e.is_cancelled() => Err(AppError::msg("query cancelled")),

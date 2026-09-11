@@ -91,6 +91,8 @@ export function PromptDialog({
           onChange={(e) => setValue(e.target.value)}
           placeholder={placeholder}
           onKeyDown={(e) => {
+            // Never submit mid-IME-composition (Enter picks a candidate).
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Enter") {
               e.preventDefault();
               void submit();

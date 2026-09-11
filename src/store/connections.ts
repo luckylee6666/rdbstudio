@@ -23,6 +23,8 @@ interface Branch {
 interface ConnectionsState {
   list: ConnectionConfig[];
   loaded: boolean;
+  /** Set when `list_connections` itself fails, so the tree can offer a retry. */
+  listError: string | null;
   status: Record<string, ConnStatus>;
   versions: Record<string, string | undefined>;
   branches: Record<string, Branch>;
@@ -52,6 +54,7 @@ interface ConnectionsState {
 export const useConnections = create<ConnectionsState>((set, get) => ({
   list: [],
   loaded: false,
+  listError: null,
   status: {},
   versions: {},
   branches: {},
@@ -60,13 +63,19 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   setTreeFilter: (v) => set({ treeFilter: v }),
 
   refresh: async () => {
-    const list = await api.listConnections();
-    set({ list, loaded: true });
-    // re-fetch trees for currently-connected pools so stale cache clears
-    for (const c of list) {
-      if (get().status[c.id] === "connected") {
-        await get().refreshBranch(c.id);
+    try {
+      const list = await api.listConnections();
+      set({ list, loaded: true, listError: null });
+      // re-fetch trees for currently-connected pools so stale cache clears
+      for (const c of list) {
+        if (get().status[c.id] === "connected") {
+          await get().refreshBranch(c.id);
+        }
       }
+    } catch (e: unknown) {
+      // Keep the tree out of its skeleton state; ConnectionTree surfaces the
+      // error with a retry button instead of spinning forever.
+      set({ loaded: true, listError: String(e) });
     }
   },
 
