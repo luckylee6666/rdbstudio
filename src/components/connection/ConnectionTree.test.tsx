@@ -227,6 +227,31 @@ describe("ConnectionTree table operations", () => {
     expect(useToasts.getState().items.at(-1)?.title).toBe("已重命名为 customers");
   });
 
+  it("keeps the CSV import entry reachable for tables", async () => {
+    mockIPC((command) => {
+      if (command === "list_connections") return [connections[0]];
+      if (command === "list_databases") return ["app"];
+      if (command === "list_tables") {
+        return [{ name: "users", kind: "table" }];
+      }
+      if (command === "list_columns") return [];
+      return undefined;
+    });
+
+    render(<ConnectionTree />);
+    await waitFor(() =>
+      expect(useConnections.getState().branches.local?.loading).toBe(false)
+    );
+    fireEvent.click(screen.getByText("local-9.0"));
+    fireEvent.click(await screen.findByText("app"));
+    fireEvent.contextMenu(await screen.findByText("users"));
+    fireEvent.click(screen.getByRole("button", { name: "导入 CSV" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "导入 CSV · app.users" })
+    ).toBeInTheDocument();
+  });
+
   it("opens table data even when the pointer moves while clicking the portal menu", async () => {
     mockIPC((command) => {
       if (command === "list_connections") return [connections[0]];

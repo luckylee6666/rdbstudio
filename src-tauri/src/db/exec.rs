@@ -954,6 +954,18 @@ fn close_after_batch<DB: sqlx::Database>(mut conn: sqlx::pool::PoolConnection<DB
 /// and closing would destroy an in-memory database outright.
 fn reuse_after_batch<DB: sqlx::Database>(_conn: sqlx::pool::PoolConnection<DB>) {}
 
+/// A self-managed batch can end with the script's transaction still open (the
+/// script failed mid-way, or simply never committed). For the drivers that
+/// close the connection this is moot, but SQLite hands the connection back —
+/// and a pooled connection with an open transaction poisons every statement
+/// that picks it up next (including a later `BEGIN`, which then errors with
+/// "cannot start a transaction within a transaction").
+async fn sqlite_end_transaction(conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>) {
+    let _ = sqlx::query("ROLLBACK").execute(&mut **conn).await;
+}
+
+async fn noop_cleanup<DB: sqlx::Database>(_conn: &mut sqlx::pool::PoolConnection<DB>) {}
+
 /// Run statements sequentially on **one** connection. `atomic` wraps them in a
 /// transaction so any failure rolls the whole script back; a script that
 /// drives its own `BEGIN` / `COMMIT` passes `atomic = false` and gets the bare
@@ -1072,7 +1084,7 @@ macro_rules! script_execute {
 }
 
 macro_rules! script_impl {
-    ($fn_name:ident, $pool_ty:ty, $decode:ident, $proto:ident, $rollback:path, $release:path) => {
+    ($fn_name:ident, $pool_ty:ty, $decode:ident, $proto:ident, $rollback:path, $release:path, $cleanup:path) => {
         async fn $fn_name(
             pool: &$pool_ty,
             stmts: &[String],
@@ -1098,6 +1110,7 @@ macro_rules! script_impl {
                 // statement lands on the same connection.
                 let mut conn = pool.acquire().await?;
                 let (last, total, failure) = run_statements!(conn, stmts, $decode, $proto);
+                $cleanup(&mut conn).await;
                 $release(conn);
                 if let Some((i, error)) = failure {
                     return Ok(ScriptOutcome::Failed {
@@ -1119,7 +1132,8 @@ script_impl!(
     decode_sqlite,
     prepared,
     rollback_always_complete,
-    reuse_after_batch
+    reuse_after_batch,
+    sqlite_end_transaction
 );
 script_impl!(
     pg_script,
@@ -1127,7 +1141,8 @@ script_impl!(
     decode_postgres,
     prepared,
     rollback_always_complete,
-    close_after_batch
+    close_after_batch,
+    noop_cleanup
 );
 script_impl!(
     mysql_script,
@@ -1135,7 +1150,8 @@ script_impl!(
     decode_mysql,
     text,
     mysql_rollback_state,
-    close_after_batch
+    close_after_batch,
+    noop_cleanup
 );
 
 async fn sqlite_select(
@@ -1291,29 +1307,100 @@ fn pg_val(r: &sqlx::postgres::PgRow, i: usize) -> Json {
             .ok()
             .flatten()
             .unwrap_or(Json::Null),
-        "TIMESTAMP" | "TIMESTAMPTZ" | "DATE" | "TIME" | "TIMETZ" => r
-            .try_get::<Option<chrono::NaiveDateTime>, _>(i)
+        // DATE / TIME are their own binary encodings; decoding them through
+        // `NaiveDateTime` fails silently and the column used to render NULL.
+        "DATE" => try_naive_date(r, i).unwrap_or(Json::Null),
+        "TIME" => try_naive_time(r, i).unwrap_or(Json::Null),
+        "TIMESTAMP" => try_naive_datetime(r, i).unwrap_or(Json::Null),
+        "TIMESTAMPTZ" => try_datetime_utc(r, i).unwrap_or(Json::Null),
+        // TIMETZ has no sqlx decoder; keep the string fallback and accept NULL.
+        "TIMETZ" => try_str(r, i).unwrap_or(Json::Null),
+        "BYTEA" => try_bytes_b64(r, i).unwrap_or(Json::Null),
+        // sqlx only decodes NUMERIC/DECIMAL through `Decimal` (rust_decimal
+        // feature); UUID and text fallbacks above never match binary numerics.
+        "NUMERIC" | "DECIMAL" => try_decimal(r, i).unwrap_or(Json::Null),
+        "MONEY" => r
+            .try_get::<Option<i64>, _>(i)
             .ok()
             .flatten()
-            .map(|v| Json::String(v.to_string()))
-            .or_else(|| {
-                r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(i)
-                    .ok()
-                    .flatten()
-                    .map(|v| Json::String(v.to_rfc3339()))
-            })
-            .or_else(|| try_str(r, i))
+            .map(|cents| Json::String(money_str(cents)))
             .unwrap_or(Json::Null),
-        "BYTEA" => try_bytes_b64(r, i).unwrap_or(Json::Null),
-        "NUMERIC" | "DECIMAL" | "MONEY" => try_str(r, i)
-            .or_else(|| try_f64(r, i))
-            .unwrap_or(Json::Null),
+        arr if arr.ends_with("[]") => pg_array_val(r, i, arr),
         _ => try_str(r, i)
             .or_else(|| try_i64(r, i))
             .or_else(|| try_f64(r, i))
             .unwrap_or(Json::Null),
     }
 }
+
+/// Postgres arrays arrive as `TYPE[]` result columns. Render common element
+/// types as a JSON array; anything else stays NULL rather than mojibake.
+fn pg_array_val(r: &sqlx::postgres::PgRow, i: usize, ty: &str) -> Json {
+    let base = ty.trim_end_matches("[]");
+    let array: Option<Json> = match base {
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "CITEXT" => {
+            r.try_get::<Option<Vec<String>>, _>(i).ok().flatten().map(|v| {
+                Json::Array(v.into_iter().map(Json::String).collect())
+            })
+        }
+        "INT2" => r
+            .try_get::<Option<Vec<i16>>, _>(i)
+            .ok()
+            .flatten()
+            .map(|v| Json::Array(v.into_iter().map(Json::from).collect())),
+        "INT4" => r
+            .try_get::<Option<Vec<i32>>, _>(i)
+            .ok()
+            .flatten()
+            .map(|v| Json::Array(v.into_iter().map(Json::from).collect())),
+        "INT8" => r.try_get::<Option<Vec<i64>>, _>(i).ok().flatten().map(|v| {
+            Json::Array(v.into_iter().map(json_i64).collect())
+        }),
+        "BOOL" => r
+            .try_get::<Option<Vec<bool>>, _>(i)
+            .ok()
+            .flatten()
+            .map(|v| Json::Array(v.into_iter().map(Json::Bool).collect())),
+        "FLOAT4" => r.try_get::<Option<Vec<f32>>, _>(i).ok().flatten().map(|v| {
+            Json::Array(
+                v.into_iter()
+                    .map(|x| json_f64(x as f64))
+                    .collect(),
+            )
+        }),
+        "FLOAT8" => r.try_get::<Option<Vec<f64>>, _>(i).ok().flatten().map(|v| {
+            Json::Array(v.into_iter().map(json_f64).collect())
+        }),
+        "UUID" => r.try_get::<Option<Vec<sqlx::types::Uuid>>, _>(i).ok().flatten().map(
+            |v| Json::Array(v.into_iter().map(|x| Json::String(x.to_string())).collect()),
+        ),
+        "NUMERIC" | "DECIMAL" => r
+            .try_get::<Option<Vec<sqlx::types::Decimal>>, _>(i)
+            .ok()
+            .flatten()
+            .map(|v| {
+                Json::Array(
+                    v.into_iter()
+                        .map(|x| Json::String(x.to_string()))
+                        .collect(),
+                )
+            }),
+        _ => None,
+    };
+    array.unwrap_or(Json::Null)
+}
+
+/// `money` is an int64 of cents (locale-dependent scale is ignored).
+fn money_str(cents: i64) -> String {
+    let abs = cents.unsigned_abs();
+    format!(
+        "{}{}.{:02}",
+        if cents < 0 { "-" } else { "" },
+        abs / 100,
+        abs % 100
+    )
+}
+
 
 /// Editor SQL reaches MySQL over the text protocol (`raw_sql`), not the
 /// prepared-statement protocol `sqlx::query` uses. MySQL refuses a whole class
@@ -1381,17 +1468,22 @@ fn mysql_val(r: &sqlx::mysql::MySqlRow, i: usize) -> Json {
         }
         ty if mysql_uses_u64(ty) => try_u64(r, i).unwrap_or(Json::Null),
         "FLOAT" | "DOUBLE" => try_f64(r, i).unwrap_or(Json::Null),
-        "DECIMAL" | "NUMERIC" => try_str(r, i)
-            .or_else(|| try_f64(r, i))
-            .unwrap_or(Json::Null),
+        "DECIMAL" | "NUMERIC" => {
+            try_decimal(r, i).or_else(|| try_f64(r, i)).unwrap_or(Json::Null)
+        }
         "CHAR" | "VARCHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM"
         | "SET" => try_str(r, i).unwrap_or(Json::Null),
-        "DATE" | "TIME" | "DATETIME" | "TIMESTAMP" => r
-            .try_get::<Option<chrono::NaiveDateTime>, _>(i)
+        // Each temporal type has its own decoder: DATE/TIME through
+        // `NaiveDateTime` silently produced NULL, and TIMESTAMP is not
+        // compatible with it either (sqlx maps `NaiveDateTime` to DATETIME).
+        "DATE" => try_naive_date(r, i).unwrap_or(Json::Null),
+        "TIME" => try_naive_time(r, i).unwrap_or(Json::Null),
+        "DATETIME" => try_naive_datetime(r, i).unwrap_or(Json::Null),
+        "TIMESTAMP" => r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(i)
             .ok()
             .flatten()
-            .map(|v| Json::String(v.to_string()))
-            .or_else(|| try_str(r, i))
+            .map(|v| Json::String(v.naive_utc().to_string()))
             .unwrap_or(Json::Null),
         "JSON" => r
             .try_get::<Option<Json>, _>(i)
@@ -1430,7 +1522,68 @@ where
     r.try_get::<Option<i64>, _>(i)
         .ok()
         .flatten()
-        .map(Json::from)
+        .map(json_i64)
+}
+
+fn json_f64(v: f64) -> Json {
+    serde_json::Number::from_f64(v).map(Json::Number).unwrap_or(Json::Null)
+}
+
+fn try_naive_date<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
+where
+    chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    r.try_get::<Option<chrono::NaiveDate>, _>(i)
+        .ok()
+        .flatten()
+        .map(|v| Json::String(v.to_string()))
+}
+
+fn try_naive_time<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
+where
+    chrono::NaiveTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    r.try_get::<Option<chrono::NaiveTime>, _>(i)
+        .ok()
+        .flatten()
+        .map(|v| Json::String(v.to_string()))
+}
+
+fn try_naive_datetime<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
+where
+    chrono::NaiveDateTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    r.try_get::<Option<chrono::NaiveDateTime>, _>(i)
+        .ok()
+        .flatten()
+        .map(|v| Json::String(v.to_string()))
+}
+
+fn try_datetime_utc<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
+where
+    chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(i)
+        .ok()
+        .flatten()
+        .map(|v| Json::String(v.to_rfc3339()))
+}
+
+/// `numeric` / `decimal` decode through rust_decimal so the exact value
+/// survives; JSON gets it as a string, matching the big-integer convention.
+fn try_decimal<'r, R: Row>(r: &'r R, i: usize) -> Option<Json>
+where
+    sqlx::types::Decimal: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    usize: sqlx::ColumnIndex<R>,
+{
+    r.try_get::<Option<sqlx::types::Decimal>, _>(i)
+        .ok()
+        .flatten()
+        .map(|v| Json::String(v.to_string()))
 }
 
 const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;

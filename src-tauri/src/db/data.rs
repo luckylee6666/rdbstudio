@@ -4,6 +4,7 @@ use crate::error::{AppError, AppResult};
 use crate::model::DriverKind;
 use serde::{Deserialize, Serialize};
 use sqlx::Arguments;
+use std::collections::HashMap;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -226,9 +227,20 @@ fn build_where(driver: DriverKind, filters: &[Filter]) -> AppResult<Where> {
                             _ => unreachable!(),
                         };
                         if looks_numeric(&raw) {
+                            // PG has no `text > double precision` operator, so
+                            // a numeric-looking value needs both sides cast.
+                            // Rows whose text doesn't parse as a number become
+                            // NULL and drop out instead of erroring 22P02.
+                            let lhs = match driver {
+                                DriverKind::Postgres => format!(
+                                    "CASE WHEN CAST({col} AS TEXT) ~ '^-?[0-9]+([.][0-9]+)?$' \
+                                     THEN CAST(CAST({col} AS TEXT) AS DOUBLE PRECISION) END"
+                                ),
+                                _ => col.clone(),
+                            };
                             parts.push(format!(
                                 "{} {} {}",
-                                col,
+                                lhs,
                                 op,
                                 cast_as_float(driver, &ph)
                             ));
@@ -246,10 +258,18 @@ fn build_where(driver: DriverKind, filters: &[Filter]) -> AppResult<Where> {
                             FilterOp::EndsWith => format!("%{escaped}"),
                             _ => unreachable!(),
                         };
+                        // MySQL parses a lone `\` inside a string literal as an
+                        // escape, so `ESCAPE '\'` is a 1064 syntax error there;
+                        // the same character has to be written `'\\'`.
+                        let esc = match driver {
+                            DriverKind::Mysql => "\\\\",
+                            _ => "\\",
+                        };
                         parts.push(format!(
-                            "{} LIKE {} ESCAPE '\\'",
+                            "{} LIKE {} ESCAPE '{}'",
                             cast_as_text(driver, &col),
-                            ph
+                            ph,
+                            esc
                         ));
                         values.push(pat);
                     }
@@ -479,7 +499,7 @@ fn build_edit_sql_impl<F>(
     mut get_ph_and_bind: F,
 ) -> String
 where
-    F: FnMut(usize, &serde_json::Value) -> String,
+    F: FnMut(usize, &str, &serde_json::Value) -> String,
 {
     let target = qualified(driver, schema, table);
     match edit {
@@ -488,7 +508,7 @@ where
             let set_parts: Vec<String> = set
                 .iter()
                 .map(|(c, v)| {
-                    let ph = get_ph_and_bind(ph_n, v);
+                    let ph = get_ph_and_bind(ph_n, c, v);
                     ph_n += 1;
                     format!("{} = {}", quote_ident(driver, c), ph)
                 })
@@ -499,7 +519,7 @@ where
                     if v.is_null() {
                         format!("{} IS NULL", quote_ident(driver, c))
                     } else {
-                        let ph = get_ph_and_bind(ph_n, v);
+                        let ph = get_ph_and_bind(ph_n, c, v);
                         ph_n += 1;
                         format!("{} = {}", quote_ident(driver, c), ph)
                     }
@@ -520,8 +540,8 @@ where
             let mut ph_n = 1usize;
             let phs: Vec<String> = values
                 .iter()
-                .map(|(_, v)| {
-                    let ph = get_ph_and_bind(ph_n, v);
+                .map(|(c, v)| {
+                    let ph = get_ph_and_bind(ph_n, c, v);
                     ph_n += 1;
                     ph
                 })
@@ -541,7 +561,7 @@ where
                     if v.is_null() {
                         format!("{} IS NULL", quote_ident(driver, c))
                     } else {
-                        let ph = get_ph_and_bind(ph_n, v);
+                        let ph = get_ph_and_bind(ph_n, c, v);
                         ph_n += 1;
                         format!("{} = {}", quote_ident(driver, c), ph)
                     }
@@ -557,13 +577,50 @@ fn build_edit_sql(
     schema: Option<&str>,
     table: &str,
     edit: &Edit,
+    pg_types: Option<&HashMap<String, String>>,
 ) -> (String, Vec<BindValue>) {
     let mut binds = Vec::new();
-    let sql = build_edit_sql_impl(driver, schema, table, edit, |ph_n, v| {
+    let sql = build_edit_sql_impl(driver, schema, table, edit, |ph_n, col, v| {
         binds.push(json_to_bind(v));
-        placeholder(driver, ph_n)
+        let ph = placeholder(driver, ph_n);
+        // PostgreSQL refuses an assignment from a text-typed parameter to a
+        // non-text column (42804). sqlx always declares String binds as TEXT,
+        // so every placeholder needs an explicit cast to the column's type.
+        match (driver, pg_types.and_then(|m| m.get(col))) {
+            (DriverKind::Postgres, Some(ty)) => format!("CAST({ph} AS {ty})"),
+            _ => ph,
+        }
     });
     (sql, binds)
+}
+
+/// Column name → `format_type()` for a PostgreSQL table, used to cast text
+/// binds to the target column type. Empty when the lookup fails; callers fall
+/// back to uncast placeholders.
+pub(crate) async fn pg_column_types(
+    pool: &sqlx::PgPool,
+    schema: Option<&str>,
+    table: &str,
+) -> AppResult<HashMap<String, String>> {
+    use sqlx::Row as _;
+    let schema = schema.filter(|s| !s.is_empty());
+    let rows = sqlx::query(
+        "SELECT a.attname, format_type(a.atttypid, a.atttypmod) \
+         FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relname = $1 AND n.nspname = COALESCE($2, current_schema()) \
+           AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .bind(table)
+    .bind(schema)
+    .fetch_all(pool)
+    .await?;
+    let mut map = HashMap::new();
+    for r in rows {
+        map.insert(r.get::<String, _>(0), r.get::<String, _>(1));
+    }
+    Ok(map)
 }
 
 fn bind_sqlite(
@@ -685,7 +742,7 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
             let mut tx = p.begin().await?;
             for (idx, e) in batch.edits.iter().enumerate() {
                 let (sql, binds) =
-                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e);
+                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e, None);
                 let mut args = sqlx::sqlite::SqliteArguments::default();
                 for b in &binds {
                     bind_sqlite(&mut args, b)?;
@@ -712,10 +769,16 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
             tx.commit().await?;
         }
         DbPool::Postgres(p) => {
+            let types = pg_column_types(p, batch.schema.as_deref(), &batch.table).await?;
             let mut tx = p.begin().await?;
             for (idx, e) in batch.edits.iter().enumerate() {
-                let (sql, binds) =
-                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e);
+                let (sql, binds) = build_edit_sql(
+                    driver,
+                    batch.schema.as_deref(),
+                    &batch.table,
+                    e,
+                    Some(&types),
+                );
                 let mut args = sqlx::postgres::PgArguments::default();
                 for b in &binds {
                     bind_pg(&mut args, b)?;
@@ -745,7 +808,7 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
             let mut tx = p.begin().await?;
             for (idx, e) in batch.edits.iter().enumerate() {
                 let (sql, binds) =
-                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e);
+                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e, None);
                 let mut args = sqlx::mysql::MySqlArguments::default();
                 for b in &binds {
                     bind_mysql(&mut args, b)?;
@@ -787,7 +850,7 @@ pub fn preview_edit_sql(
     table: &str,
     edit: &Edit,
 ) -> String {
-    build_edit_sql_impl(driver, schema, table, edit, |_ph_n, v| {
+    build_edit_sql_impl(driver, schema, table, edit, |_ph_n, _col, v| {
         match json_to_bind(v) {
             BindValue::Null => "NULL".into(),
             BindValue::Bool(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
@@ -999,7 +1062,29 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(w.sql, " WHERE \"id\" > CAST($1 AS DOUBLE PRECISION)");
+        assert_eq!(
+            w.sql,
+            " WHERE CASE WHEN CAST(\"id\" AS TEXT) ~ '^-?[0-9]+([.][0-9]+)?$' \
+             THEN CAST(CAST(\"id\" AS TEXT) AS DOUBLE PRECISION) END > \
+             CAST($1 AS DOUBLE PRECISION)"
+        );
+    }
+
+    #[test]
+    fn build_where_mysql_like_escapes_backslash_for_the_parser() {
+        let w = build_where(
+            DriverKind::Mysql,
+            &[Filter {
+                column: "name".into(),
+                op: FilterOp::Contains,
+                value: Some("50%".into()),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            " WHERE CAST(`name` AS CHAR) LIKE ? ESCAPE '\\\\'"
+        );
     }
 
     #[test]

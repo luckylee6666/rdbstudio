@@ -59,6 +59,7 @@ import { api } from "@/lib/api";
 import { toast } from "@/store/toasts";
 import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
+import { ImportDialog } from "@/components/io/ImportDialog";
 import { DatabaseExportDialog } from "@/components/io/DatabaseExportDialog";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
@@ -1506,6 +1507,7 @@ function Folder({
   const [open, setOpen] = useState(defaultOpen);
   const [ctx, setCtx] = useState<{ x: number; y: number; entry: TreeEntry } | null>(null);
   const [exportTarget, setExportTarget] = useState<TreeEntry | null>(null);
+  const [importTarget, setImportTarget] = useState<TreeEntry | null>(null);
   const [dropTarget, setDropTarget] = useState<TreeEntry | null>(null);
   const [dropError, setDropError] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<TreeEntry | null>(null);
@@ -1682,6 +1684,13 @@ function Folder({
       disabled: e.kind !== "table" && e.kind !== "view",
       onClick: () => setExportTarget(e),
     },
+    {
+      id: "import",
+      label: t("tree.import_csv"),
+      icon: FileUp,
+      disabled: e.kind !== "table",
+      onClick: () => setImportTarget(e),
+    },
     { id: "sep2", label: "", separator: true },
     {
       id: "copy",
@@ -1843,6 +1852,13 @@ function Folder({
         table={exportTarget?.name ?? ""}
         schema={schema}
         onClose={() => setExportTarget(null)}
+      />
+      <ImportDialog
+        open={!!importTarget}
+        connectionId={connectionId}
+        table={importTarget?.name ?? ""}
+        schema={schema}
+        onClose={() => setImportTarget(null)}
       />
       {dropTarget && (
         <ConfirmDialog

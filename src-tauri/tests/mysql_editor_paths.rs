@@ -18,8 +18,10 @@
 //!     cargo test --test mysql_editor_paths
 //! ```
 
+use rdbstudio_lib::db::data::{self, Filter, FilterOp, TableQuery};
 use rdbstudio_lib::db::exec::{self, RollbackState, ScriptOutcome};
 use rdbstudio_lib::db::pool::DbPool;
+use serde_json::json;
 use sqlx::Row;
 
 const SCRATCH_DB: &str = "rdbstudio_rollback_test";
@@ -248,4 +250,93 @@ async fn read_only_connections_are_enforced_by_the_server() {
     assert_eq!(rows_after, 0, "nothing may have been written");
     // Reads still work on the same pool afterwards.
     assert!(read_back.expect("read after refused write").rows.len() == 1);
+}
+
+const TYPES_SCRATCH_DB: &str = "rdbstudio_types_test";
+
+/// Temporal and DECIMAL columns used to render as NULL (the decoder tried
+/// `NaiveDateTime` for DATE/TIME/TIMESTAMP and `String` for DECIMAL), and a
+/// `contains` filter died with error 1064 because `ESCAPE '\'` is an
+/// unterminated MySQL string literal.
+#[tokio::test]
+async fn temporal_and_decimal_columns_decode_and_like_filters_run() {
+    let Ok(base) = std::env::var("RDBSTUDIO_TEST_MYSQL_SCRATCH_URL") else {
+        eprintln!("skipped: RDBSTUDIO_TEST_MYSQL_SCRATCH_URL is not set");
+        return;
+    };
+    let admin = sqlx::MySqlPool::connect(&base).await.expect("connect");
+    sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {TYPES_SCRATCH_DB}"))
+        .execute(&admin)
+        .await
+        .expect("drop stale scratch database");
+    sqlx::raw_sql(&format!("CREATE DATABASE {TYPES_SCRATCH_DB}"))
+        .execute(&admin)
+        .await
+        .expect("create scratch database");
+
+    let url = base
+        .rsplit_once('/')
+        .map(|(host, _)| format!("{host}/{TYPES_SCRATCH_DB}"))
+        .expect("connection URL carries a database");
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect to scratch database");
+    sqlx::raw_sql(
+        "CREATE TABLE t (id INT PRIMARY KEY AUTO_INCREMENT, d DATE, tm TIME, \
+         dt DATETIME, ts TIMESTAMP NULL, n DECIMAL(10,2), name VARCHAR(50))",
+    )
+    .execute(&pool)
+    .await
+    .expect("create table");
+    sqlx::raw_sql(
+        "INSERT INTO t (d,tm,dt,ts,n,name) VALUES \
+         ('2024-01-01','13:45:30','2024-01-01 13:45:30','2024-01-01 13:45:30',1234.56,'widget')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed row");
+    let db = DbPool::Mysql(pool.clone());
+
+    let r = exec::execute(&db, "SELECT * FROM t").await.expect("select");
+    let row = &r.rows[0];
+    assert_eq!(row[1], json!("2024-01-01"), "DATE: {:?}", r.rows);
+    assert_eq!(row[2], json!("13:45:30"), "TIME: {:?}", r.rows);
+    assert_eq!(row[3], json!("2024-01-01 13:45:30"), "DATETIME: {:?}", r.rows);
+    assert_eq!(row[4], json!("2024-01-01 13:45:30"), "TIMESTAMP: {:?}", r.rows);
+    assert_eq!(row[5], json!("1234.56"), "DECIMAL: {:?}", r.rows);
+
+    // The grid path decodes through the same helpers.
+    let q = TableQuery {
+        schema: None,
+        table: "t".into(),
+        limit: 50,
+        offset: 0,
+        order_by: None,
+        filters: vec![],
+        where_raw: None,
+    };
+    let grid = data::fetch(&db, &q).await.expect("fetch");
+    assert_eq!(grid.rows[0][1], json!("2024-01-01"));
+
+    let contains = TableQuery {
+        filters: vec![Filter {
+            column: "name".into(),
+            op: FilterOp::Contains,
+            value: Some("wid".into()),
+        }],
+        ..q
+    };
+    let filtered = data::fetch(&db, &contains)
+        .await
+        .expect("contains filter must not be a syntax error");
+    assert_eq!(filtered.rows.len(), 1);
+
+    drop(db);
+    pool.close().await;
+    sqlx::raw_sql(&format!("DROP DATABASE {TYPES_SCRATCH_DB}"))
+        .execute(&admin)
+        .await
+        .expect("drop scratch database");
 }

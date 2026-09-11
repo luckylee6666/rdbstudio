@@ -389,9 +389,32 @@ pub async fn import_csv(
         .map(|c| quote_ident(driver, c))
         .collect::<Vec<_>>()
         .join(", ");
-    let placeholders = (1..=columns.len())
-        .map(|i| match driver {
-            DriverKind::Postgres => format!("${}", i),
+    // PostgreSQL binds are typed: a `String` parameter is declared TEXT, and
+    // assigning TEXT to an integer/date/uuid column raises 42804. Import needs
+    // the same per-column casts the grid editor uses.
+    let pg_types = match pool {
+        DbPool::Postgres(p) => {
+            Some(crate::db::data::pg_column_types(p, opts.schema.as_deref(), &opts.table).await?)
+        }
+        _ => None,
+    };
+    let pg_casts: Option<Vec<String>> = pg_types.as_ref().map(|m| {
+        columns
+            .iter()
+            .map(|c| m.get(c).cloned().unwrap_or_default())
+            .collect()
+    });
+    let placeholders = columns
+        .iter()
+        .enumerate()
+        .map(|(idx, col)| match driver {
+            DriverKind::Postgres => {
+                let ph = format!("${}", idx + 1);
+                match pg_types.as_ref().and_then(|m| m.get(col)) {
+                    Some(ty) => format!("CAST({ph} AS {ty})"),
+                    None => ph,
+                }
+            }
             _ => "?".into(),
         })
         .collect::<Vec<_>>()
@@ -420,7 +443,7 @@ pub async fn import_csv(
                     .await?;
             }
             let full_sql =
-                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver);
+                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver, pg_casts.as_deref());
             let mut batch: Vec<csv::StringRecord> = Vec::with_capacity(rows_per_batch);
             let mut first_row: u64 = 0;
             for result in rdr.records() {
@@ -453,7 +476,7 @@ pub async fn import_csv(
             }
             if !batch.is_empty() {
                 let tail_sql =
-                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver);
+                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver, pg_casts.as_deref());
                 flush_batch_sqlite(
                     &mut tx,
                     &tail_sql,
@@ -476,7 +499,7 @@ pub async fn import_csv(
                     .await?;
             }
             let full_sql =
-                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver);
+                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver, pg_casts.as_deref());
             let mut batch: Vec<csv::StringRecord> = Vec::with_capacity(rows_per_batch);
             let mut first_row: u64 = 0;
             for result in rdr.records() {
@@ -509,7 +532,7 @@ pub async fn import_csv(
             }
             if !batch.is_empty() {
                 let tail_sql =
-                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver);
+                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver, pg_casts.as_deref());
                 flush_batch_pg(
                     &mut tx,
                     &tail_sql,
@@ -534,7 +557,7 @@ pub async fn import_csv(
                     .await?;
             }
             let full_sql =
-                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver);
+                multi_insert_sql(&target, &col_list, columns.len(), rows_per_batch, driver, pg_casts.as_deref());
             let mut batch: Vec<csv::StringRecord> = Vec::with_capacity(rows_per_batch);
             let mut first_row: u64 = 0;
             for result in rdr.records() {
@@ -567,7 +590,7 @@ pub async fn import_csv(
             }
             if !batch.is_empty() {
                 let tail_sql =
-                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver);
+                    multi_insert_sql(&target, &col_list, columns.len(), batch.len(), driver, pg_casts.as_deref());
                 flush_batch_mysql(
                     &mut tx,
                     &tail_sql,
@@ -611,13 +634,16 @@ fn clear_table_sql(driver: DriverKind, target: &str) -> String {
 }
 
 /// Build a multi-row `INSERT INTO t (cols) VALUES (...), (...)` statement with
-/// driver-appropriate placeholders (numbered for PG, `?` elsewhere).
+/// driver-appropriate placeholders (numbered for PG, `?` elsewhere). For PG,
+/// each placeholder can carry an explicit `CAST(... AS type)` so text binds
+/// reach non-text columns.
 fn multi_insert_sql(
     target: &str,
     col_list: &str,
     ncols: usize,
     nrows: usize,
     driver: DriverKind,
+    pg_casts: Option<&[String]>,
 ) -> String {
     let mut s = format!("INSERT INTO {} ({}) VALUES ", target, col_list);
     for r in 0..nrows {
@@ -631,8 +657,14 @@ fn multi_insert_sql(
             }
             match driver {
                 DriverKind::Postgres => {
-                    s.push('$');
-                    s.push_str(&(r * ncols + c + 1).to_string());
+                    let ph = format!("${}", r * ncols + c + 1);
+                    match pg_casts
+                        .and_then(|cs| cs.get(c))
+                        .filter(|t| !t.is_empty())
+                    {
+                        Some(ty) => s.push_str(&format!("CAST({ph} AS {ty})")),
+                        None => s.push_str(&ph),
+                    }
                 }
                 _ => s.push('?'),
             }
@@ -765,12 +797,24 @@ mod tests {
     #[test]
     fn multi_insert_sql_numbers_pg_and_uses_qmarks_elsewhere() {
         assert_eq!(
-            multi_insert_sql("\"t\"", "\"a\", \"b\"", 2, 2, DriverKind::Postgres),
+            multi_insert_sql("\"t\"", "\"a\", \"b\"", 2, 2, DriverKind::Postgres, None),
             "INSERT INTO \"t\" (\"a\", \"b\") VALUES ($1, $2), ($3, $4)"
         );
         assert_eq!(
-            multi_insert_sql("`t`", "`a`", 1, 3, DriverKind::Mysql),
+            multi_insert_sql("`t`", "`a`", 1, 3, DriverKind::Mysql, None),
             "INSERT INTO `t` (`a`) VALUES (?), (?), (?)"
+        );
+        let casts = vec!["integer".to_string(), String::new()];
+        assert_eq!(
+            multi_insert_sql(
+                "\"t\"",
+                "\"a\", \"b\"",
+                2,
+                1,
+                DriverKind::Postgres,
+                Some(&casts)
+            ),
+            "INSERT INTO \"t\" (\"a\", \"b\") VALUES (CAST($1 AS integer), $2)"
         );
     }
 

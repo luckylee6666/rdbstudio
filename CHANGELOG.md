@@ -5,7 +5,14 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- PostgreSQL 的 DATE / TIME / NUMERIC / 数组列、MySQL 的 DATE / TIME / TIMESTAMP / DECIMAL 列不再显示为 NULL：各类型改用自己的解码器，`numeric` / `decimal` 以精确字符串传输。
+- PostgreSQL 网格编辑与 CSV 导入按目标列类型显式 `CAST` 绑定，修复所有非文本列报 `42804 … is of type … but expression is of type text` 的问题。
+- MySQL `contains` / `starts_with` / `ends_with` 过滤不再因 `ESCAPE '\'` 触发 1064 语法错误；PostgreSQL 文本列与数字值比较不再报 `operator does not exist: text > double precision`。
+- SQLite 自管理事务脚本失败后，连接归还连接池前执行 `ROLLBACK`，后续语句不再落入未结束的幽灵事务（曾表现为 `cannot start a transaction within a transaction`、写入被静默回滚）。
+- PostgreSQL / SQLite 超出 JavaScript 安全整数范围的整数改以字符串传输，避免网格显示与回写主键时被舍入。
+- PostgreSQL Show DDL / 导出补齐 `serial` 序列、数组类型输出为 `text[]`（原为不可执行的 `_text`），视图输出 `CREATE VIEW` 而不是合成的 `CREATE TABLE`。
+- 恢复表右键菜单的「导入 CSV」入口（此前 UI 入口被移除但后端、文档和测试仍在），并修复导出 / 导入的「制表符」选项发送字面 `\t` 的问题。
 
 ## [0.1.5] — 2026-09-03
 

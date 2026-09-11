@@ -251,9 +251,11 @@ async fn describe_postgres(
             let default: Option<String> = r.try_get("column_default").ok().flatten();
             let udt: String = r.try_get("udt_name").unwrap_or_default();
             let data_type: String = r.try_get("data_type").unwrap_or_default();
-            let type_label = if data_type.eq_ignore_ascii_case("USER-DEFINED")
-                || data_type.eq_ignore_ascii_case("ARRAY")
-            {
+            let type_label = if data_type.eq_ignore_ascii_case("ARRAY") {
+                // information_schema reports arrays as udt_name `_text`; the
+                // creatable spelling is `text[]`.
+                format!("{}[]", udt.strip_prefix('_').unwrap_or(&udt))
+            } else if data_type.eq_ignore_ascii_case("USER-DEFINED") {
                 udt
             } else {
                 data_type
@@ -418,6 +420,43 @@ async fn synth_pg_ddl(
     schema: Option<&str>,
     table: &str,
 ) -> AppResult<String> {
+    let schema_name = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+    let regclass = format!("{}.{}", schema_name, table);
+    let relkind: Option<String> = sqlx::query_scalar(
+        "SELECT c.relkind::text FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2",
+    )
+    .bind(schema_name)
+    .bind(table)
+    .fetch_optional(p)
+    .await?;
+    match relkind.as_deref() {
+        Some("v") | Some("m") => {
+            let def: String = sqlx::query_scalar("SELECT pg_get_viewdef($1::regclass, true)")
+                .bind(&regclass)
+                .fetch_one(p)
+                .await?;
+            let head = if relkind.as_deref() == Some("m") {
+                "CREATE MATERIALIZED VIEW"
+            } else {
+                "CREATE VIEW"
+            };
+            let qualified = format!(
+                "{}.{}",
+                quote_ident(DriverKind::Postgres, schema_name),
+                quote_ident(DriverKind::Postgres, table)
+            );
+            return Ok(format!(
+                "{} {} AS\n{};",
+                head,
+                qualified,
+                def.trim_end().trim_end_matches(';')
+            ));
+        }
+        _ => {}
+    }
+
     let desc = describe_postgres(p, schema, table).await?;
     let qualified = match &desc.schema {
         Some(s) => format!(
@@ -427,7 +466,16 @@ async fn synth_pg_ddl(
         ),
         None => quote_ident(DriverKind::Postgres, &desc.name),
     };
-    let mut out = format!("CREATE TABLE {} (\n", qualified);
+    // A `serial` column's default references a sequence that has to exist
+    // before the CREATE TABLE, otherwise a restored dump fails with
+    // `relation "…_seq" does not exist`.
+    let mut out = String::new();
+    for c in &desc.columns {
+        if let Some(seq) = c.default.as_deref().and_then(pg_sequence_ref) {
+            out.push_str(&format!("CREATE SEQUENCE IF NOT EXISTS {};\n", seq));
+        }
+    }
+    out.push_str(&format!("CREATE TABLE {} (\n", qualified));
     let col_lines: Vec<String> = desc
         .columns
         .iter()
@@ -511,6 +559,19 @@ async fn synth_pg_ddl(
         ));
     }
     Ok(out)
+}
+
+/// Extract the quoted sequence name from a `nextval('…'::regclass)` default.
+fn pg_sequence_ref(default: &str) -> Option<String> {
+    let rest = default.strip_prefix("nextval('")?;
+    let end = rest.find('\'')?;
+    let name = &rest[..end];
+    let quoted = name
+        .split('.')
+        .map(|part| quote_ident(DriverKind::Postgres, part.trim_matches('"')))
+        .collect::<Vec<_>>()
+        .join(".");
+    Some(quoted)
 }
 
 fn fmt_pg_type(c: &ColumnDetail) -> String {

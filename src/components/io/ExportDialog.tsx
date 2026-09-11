@@ -174,7 +174,7 @@ export function ExportDialog({
                 >
                   <option value=",">{t("export.delim.comma")}</option>
                   <option value=";">{t("export.delim.semi")}</option>
-                  <option value="\t">{t("export.delim.tab")}</option>
+                  <option value={"\t"}>{t("export.delim.tab")}</option>
                   <option value="|">{t("export.delim.pipe")}</option>
                 </Select>
               </div>

@@ -11,7 +11,7 @@ use rdbstudio_lib::db::{
     alter::{self, ColumnEdit, DesignerChange},
     data::{self, Edit, EditBatch, FilterOp, TableQuery},
     design,
-    exec::{self, is_readonly},
+    exec::{self, is_readonly, ScriptOutcome},
     io::{self, ExportFormat, ExportOptions, ImportCsvOptions, ImportMode},
     meta,
     pool::DbPool,
@@ -429,4 +429,76 @@ async fn alter_ddl_adds_column_and_applies_cleanly() {
         "bio column should exist after ALTER, got {:?}",
         cols.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn self_managed_script_failure_leaves_no_open_transaction() {
+    // A single-connection pool makes the recycled connection deterministic.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("txn.sqlite");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("open sqlite");
+    let db = DbPool::Sqlite(pool);
+
+    exec::execute(&db, "CREATE TABLE t (id INTEGER)")
+        .await
+        .expect("create table");
+
+    let outcome = exec::execute_script(
+        &db,
+        &[
+            "BEGIN",
+            "INSERT INTO t VALUES (99)",
+            "SELECT * FROM table_that_does_not_exist",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>(),
+        false,
+    )
+    .await
+    .expect("execute_script returns Failed, not Err");
+    assert!(
+        matches!(outcome, ScriptOutcome::Failed { .. }),
+        "expected Failed, got {outcome:?}"
+    );
+
+    // The borrowed connection must go back to the pool without the script's
+    // transaction still open: a fresh BEGIN has to work, and the aborted
+    // INSERT must not be visible.
+    exec::execute(&db, "BEGIN")
+        .await
+        .expect("pool connection still holds an open transaction");
+    exec::execute(&db, "ROLLBACK").await.expect("rollback");
+
+    let r = exec::execute(&db, "SELECT COUNT(*) FROM t")
+        .await
+        .expect("count");
+    assert_eq!(r.rows[0][0], json!(0), "aborted insert leaked: {:?}", r.rows);
+}
+
+#[tokio::test]
+async fn bigint_beyond_js_safe_integer_survives_as_string() {
+    let (_dir, pool) = setup().await;
+
+    let r = exec::execute(&pool, "SELECT 9223372036854775807 AS big")
+        .await
+        .expect("query");
+    assert_eq!(
+        r.rows[0][0],
+        json!("9223372036854775807"),
+        "JSON numbers round in the webview past 2^53"
+    );
+
+    let r = exec::execute(&pool, "SELECT 9007199254740991 AS safe")
+        .await
+        .expect("query");
+    assert_eq!(r.rows[0][0], json!(9007199254740991i64));
 }

@@ -56,4 +56,39 @@ describe("ExportDialog SQL contents", () => {
     expect(options.include_data).toBe(includeData);
     expect(options.format).toBe("sql");
   });
+
+  it("sends a real tab character when Tab is picked as the delimiter", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    mockIPC((command, payload) => {
+      if (command === "export_table") {
+        calls.push(payload as Record<string, unknown>);
+        return { rows_written: 1, bytes: 1, elapsed_ms: 1 };
+      }
+      return undefined;
+    });
+
+    render(
+      <ExportDialog
+        open
+        connectionId="conn-1"
+        schema="public"
+        table="users"
+        onClose={vi.fn()}
+      />
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "导出 · public.users" });
+    fireEvent.change(within(dialog).getByDisplayValue("逗号 ,"), {
+      target: { value: "\t" },
+    });
+    fireEvent.change(
+      within(dialog).getByPlaceholderText("/path/to/export.csv"),
+      { target: { value: "/tmp/users.csv" } }
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "导出" }));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    const options = calls[0].options as Record<string, unknown>;
+    expect(options.delimiter).toBe("\t");
+  });
 });
