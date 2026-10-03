@@ -595,7 +595,9 @@ async fn sqlite_dump_then_restore_reverts_later_writes() {
         pool.close().await;
     }
 
-    rdbstudio_lib::restore_sqlite_file(&db_path, &backup_path).expect("restore backup");
+    rdbstudio_lib::restore_sqlite_file(&db_path, &backup_path)
+        .await
+        .expect("restore backup");
 
     let pool = DbPool::connect(DriverKind::Sqlite, &url)
         .await
@@ -612,15 +614,17 @@ async fn sqlite_dump_then_restore_reverts_later_writes() {
     assert_eq!(&bytes[..16], b"SQLite format 3\0");
 }
 
-#[test]
-fn sqlite_restore_rejects_non_database_source_and_keeps_target() {
+#[tokio::test]
+async fn sqlite_restore_rejects_non_database_source_and_keeps_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("app.sqlite");
     std::fs::write(&target, b"original-database-bytes").expect("seed target");
     let src = dir.path().join("dump.sql");
     std::fs::write(&src, b"CREATE TABLE nope (id INTEGER);").expect("seed source");
 
-    let err = rdbstudio_lib::restore_sqlite_file(&target, &src).expect_err("must reject");
+    let err = rdbstudio_lib::restore_sqlite_file(&target, &src)
+        .await
+        .expect_err("must reject");
     assert!(
         err.to_string().contains("SQLite format 3"),
         "unexpected error: {err}"
@@ -632,28 +636,111 @@ fn sqlite_restore_rejects_non_database_source_and_keeps_target() {
     );
 }
 
-#[test]
-fn sqlite_restore_rejects_truncated_source() {
+#[tokio::test]
+async fn sqlite_restore_rejects_truncated_source() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("app.sqlite");
     let src = dir.path().join("short.db");
     std::fs::write(&src, b"SQLite").expect("seed source");
 
-    let err = rdbstudio_lib::restore_sqlite_file(&target, &src).expect_err("must reject");
+    let err = rdbstudio_lib::restore_sqlite_file(&target, &src)
+        .await
+        .expect_err("must reject");
     assert!(err.to_string().contains("too short"), "unexpected: {err}");
     assert!(!target.exists());
 }
 
-#[test]
-fn sqlite_restore_creates_missing_parent_and_replaces_target() {
+#[tokio::test]
+async fn sqlite_restore_rejects_corrupt_source_with_valid_magic_and_keeps_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("app.sqlite");
+    let target_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&target)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("create target database");
+    sqlx::query("CREATE TABLE keep_me (value TEXT)")
+        .execute(&target_pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO keep_me VALUES ('original')")
+        .execute(&target_pool)
+        .await
+        .unwrap();
+    target_pool.close().await;
+
+    let src = dir.path().join("corrupt.db");
+    std::fs::write(&src, b"SQLite format 3\0\0\0\0\0\0\0\0\0\0\0\0\0\0")
+        .expect("write corrupt source with valid magic");
+    let err = rdbstudio_lib::restore_sqlite_file(&target, &src)
+        .await
+        .expect_err("corrupt SQLite source must be rejected");
+    assert!(err.to_string().contains("SQLite"), "unexpected: {err}");
+
+    let check_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&target)
+                .read_only(true),
+        )
+        .await
+        .expect("original target remains readable");
+    let value: String = sqlx::query_scalar("SELECT value FROM keep_me")
+        .fetch_one(&check_pool)
+        .await
+        .unwrap();
+    assert_eq!(value, "original");
+    check_pool.close().await;
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn sqlite_restore_creates_missing_parent_and_replaces_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("backup.db");
-    let payload = b"SQLite format 3\0not-a-real-page-but-valid-header";
-    std::fs::write(&src, payload).expect("seed source");
+    let source_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&src)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("create source database");
+    sqlx::query("CREATE TABLE restored (value TEXT)")
+        .execute(&source_pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO restored VALUES ('backup')")
+        .execute(&source_pool)
+        .await
+        .unwrap();
+    source_pool.close().await;
 
     let target = dir.path().join("nested/deeper/app.sqlite");
-    rdbstudio_lib::restore_sqlite_file(&target, &src).expect("restore into missing dir");
+    rdbstudio_lib::restore_sqlite_file(&target, &src)
+        .await
+        .expect("restore into missing dir");
 
     assert!(target.is_file(), "target should have been created");
-    assert_eq!(std::fs::read(&target).expect("read target"), payload);
+    let restored_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&target)
+                .read_only(true),
+        )
+        .await
+        .expect("open restored database");
+    let value: String = sqlx::query_scalar("SELECT value FROM restored")
+        .fetch_one(&restored_pool)
+        .await
+        .unwrap();
+    assert_eq!(value, "backup");
+    restored_pool.close().await;
 }

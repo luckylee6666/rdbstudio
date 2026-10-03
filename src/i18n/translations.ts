@@ -274,6 +274,8 @@ const en: Dict = {
   "redis.cell_hint": "· double-click a cell to edit",
   "redis.truncated":
     "Showing the first {{n}} entries — this key holds more. Editing here is limited to what's loaded.",
+  "redis.reply_truncated": "The Redis reply exceeded the display limit; only part of the value is shown.",
+  "redis.scalar_truncated": "This value exceeded the display limit and cannot be edited safely.",
   "redis.empty": "(empty)",
   "redis.score_number": "score must be a number",
   "redis.create.title": "New key",
@@ -954,6 +956,8 @@ const zh: Dict = {
   "redis.entries": "{{n}} 条",
   "redis.cell_hint": "· 双击单元格可编辑",
   "redis.truncated": "仅显示前 {{n}} 条——该 key 还有更多内容，此处编辑仅限已加载的行。",
+  "redis.reply_truncated": "Redis 返回内容超过显示上限，此处仅展示部分结果。",
+  "redis.scalar_truncated": "该值超过显示上限，无法安全编辑。",
   "redis.empty": "（空）",
   "redis.score_number": "score 必须是数字",
   "redis.create.title": "新建 key",

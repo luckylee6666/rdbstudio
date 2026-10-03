@@ -5,7 +5,7 @@
 //! and we render the reply as a 1- or 2-column "table" so the existing
 //! DataGrid keeps working without a parallel Redis-only viewer.
 
-use crate::db::exec::{ColumnMeta, QueryResult};
+use crate::db::exec::{ColumnMeta, QueryResult, MAX_ROWS};
 use crate::db::pool::RedisHandle;
 use crate::error::{AppError, AppResult};
 use crate::model::TreeEntry;
@@ -18,6 +18,10 @@ const SCAN_PAGE: u32 = 200;
 /// "Load more" to walk further when the cursor is non-zero.
 pub const DEFAULT_SCAN_LIMIT: usize = 500;
 pub const MAX_SCAN_LIMIT: usize = 1_000;
+/// Keep raw Redis command replies within the same row budget as SQL editor
+/// queries, and cap their serialized row payload so a few very large values
+/// cannot overwhelm the IPC bridge.
+pub const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 
 fn bounded_scan_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_SCAN_LIMIT)
@@ -409,23 +413,35 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
             // surface as a key/value table when the command is known to be
             // map-shaped, otherwise as a 1-col positional list.
             if is_map_reply(cmd_name, args) && items.len() % 2 == 0 {
-                let rows: Vec<Vec<Json>> = items
-                    .chunks(2)
-                    .map(|p| vec![rval_to_json(&p[0]), rval_to_json(&p[1])])
-                    .collect();
+                let (rows, truncated) = bounded_rows(
+                    items
+                        .chunks(2)
+                        .map(|p| vec![rval_to_json(&p[0]), rval_to_json(&p[1])]),
+                    MAX_ROWS,
+                    MAX_REPLY_BYTES,
+                );
                 QueryResult {
                     columns: vec![
-                        ColumnMeta { name: "field".into(), data_type: "redis".into() },
-                        ColumnMeta { name: "value".into(), data_type: "redis".into() },
+                        ColumnMeta {
+                            name: "field".into(),
+                            data_type: "redis".into(),
+                        },
+                        ColumnMeta {
+                            name: "value".into(),
+                            data_type: "redis".into(),
+                        },
                     ],
                     rows,
                     rows_affected: None,
                     elapsed_ms: elapsed,
-                    truncated: false,
+                    truncated,
                 }
             } else {
-                let rows: Vec<Vec<Json>> =
-                    items.iter().map(|x| vec![rval_to_json(x)]).collect();
+                let (rows, truncated) = bounded_rows(
+                    items.iter().map(|x| vec![rval_to_json(x)]),
+                    MAX_ROWS,
+                    MAX_REPLY_BYTES,
+                );
                 QueryResult {
                     columns: vec![ColumnMeta {
                         name: "value".into(),
@@ -434,7 +450,7 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
                     rows,
                     rows_affected: None,
                     elapsed_ms: elapsed,
-                    truncated: false,
+                    truncated,
                 }
             }
         }
@@ -444,15 +460,26 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
 }
 
 fn single_cell(col: &str, v: Json, elapsed_ms: u64) -> QueryResult {
+    single_cell_with_limits(col, v, elapsed_ms, MAX_ROWS, MAX_REPLY_BYTES)
+}
+
+fn single_cell_with_limits(
+    col: &str,
+    v: Json,
+    elapsed_ms: u64,
+    max_rows: usize,
+    max_bytes: usize,
+) -> QueryResult {
+    let (rows, truncated) = bounded_rows([vec![v]], max_rows, max_bytes);
     QueryResult {
         columns: vec![ColumnMeta {
             name: col.into(),
             data_type: "redis".into(),
         }],
-        rows: vec![vec![v]],
+        rows,
         rows_affected: None,
         elapsed_ms,
-        truncated: false,
+        truncated,
     }
 }
 
@@ -494,12 +521,58 @@ fn is_stream_reply(cmd: &str) -> bool {
     )
 }
 
-/// XRANGE returns `[[id, [f, v, …]], …]` — not a flat k/v map. Flatten to
-/// `id | fields` so the grid doesn't pair neighbouring entries as field/value.
+/// Keep complete rows within the editor's count and serialized-byte budgets.
+fn bounded_rows<I>(rows: I, max_rows: usize, max_bytes: usize) -> (Vec<Vec<Json>>, bool)
+where
+    I: IntoIterator<Item = Vec<Json>>,
+{
+    let mut out = Vec::new();
+    let mut used_bytes = 0usize;
+    let mut truncated = false;
+    for row in rows {
+        if out.len() >= max_rows {
+            truncated = true;
+            break;
+        }
+        let mut counter = ByteCounter::default();
+        if serde_json::to_writer(&mut counter, &row).is_err() {
+            truncated = true;
+            break;
+        }
+        let row_bytes = counter.0;
+        if row_bytes > max_bytes.saturating_sub(used_bytes) {
+            truncated = true;
+            break;
+        }
+        used_bytes += row_bytes;
+        out.push(row);
+    }
+    (out, truncated)
+}
+
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(buf.len())
+            .ok_or_else(|| {
+                std::io::Error::other("serialized row size overflow")
+            })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// XRANGE returns `[[id, [f, v, …]], …]`; keep each entry as id | fields.
 fn stream_to_table(items: Vec<RVal>, elapsed: u64) -> QueryResult {
-    let mut rows = Vec::new();
-    for item in items {
-        match item {
+    let (rows, truncated) = bounded_rows(
+        items.into_iter().map(|item| match item {
             RVal::Array(pair) if pair.len() >= 2 => {
                 let id = rval_to_json(&pair[0]);
                 let fields = match &pair[1] {
@@ -520,11 +593,13 @@ fn stream_to_table(items: Vec<RVal>, elapsed: u64) -> QueryResult {
                     }
                     other => rval_to_json(other),
                 };
-                rows.push(vec![id, fields]);
+                vec![id, fields]
             }
-            other => rows.push(vec![rval_to_json(&other), Json::Null]),
-        }
-    }
+            other => vec![rval_to_json(&other), Json::Null],
+        }),
+        MAX_ROWS,
+        MAX_REPLY_BYTES,
+    );
     QueryResult {
         columns: vec![
             ColumnMeta {
@@ -539,7 +614,7 @@ fn stream_to_table(items: Vec<RVal>, elapsed: u64) -> QueryResult {
         rows,
         rows_affected: None,
         elapsed_ms: elapsed,
-        truncated: false,
+        truncated,
     }
 }
 
@@ -802,6 +877,56 @@ mod tests {
         assert_eq!(bounded_scan_limit(0), 1);
         assert_eq!(bounded_scan_limit(DEFAULT_SCAN_LIMIT), DEFAULT_SCAN_LIMIT);
         assert_eq!(bounded_scan_limit(usize::MAX), MAX_SCAN_LIMIT);
+    }
+
+    #[test]
+    fn redis_reply_rows_are_bounded_by_count_and_serialized_bytes() {
+        let (rows, truncated) = bounded_rows((0..3).map(|n| vec![json!(n)]), 2, usize::MAX);
+        assert_eq!(rows, vec![vec![json!(0)], vec![json!(1)]]);
+        assert!(truncated);
+
+        let (rows, truncated) =
+            bounded_rows([vec![json!("abc")], vec![json!("def")]], usize::MAX, 10);
+        assert_eq!(rows, vec![vec![json!("abc")]]);
+        assert!(truncated);
+
+        let (rows, truncated) = bounded_rows([vec![json!("abc")]], usize::MAX, 1);
+        assert!(rows.is_empty());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn scalar_reply_obeys_exact_serialized_byte_boundary() {
+        let accepted = single_cell_with_limits("value", json!("abc"), 0, 1, 7);
+        assert_eq!(accepted.rows, vec![vec![json!("abc")]]);
+        assert!(!accepted.truncated);
+
+        let rejected = single_cell_with_limits("value", json!("abc"), 0, 1, 6);
+        assert!(rejected.rows.is_empty());
+        assert!(rejected.truncated);
+    }
+
+    #[test]
+    fn map_reply_budget_counts_utf8_serialized_bytes_at_boundary() {
+        let row = vec![json!("é"), json!("x")];
+        let serialized_bytes = serde_json::to_string(&row).unwrap().len();
+        let (rows, truncated) = bounded_rows([row.clone()], 1, serialized_bytes);
+        assert_eq!(rows, vec![row.clone()]);
+        assert!(!truncated);
+
+        let (rows, truncated) = bounded_rows([row], 1, serialized_bytes - 1);
+        assert!(rows.is_empty());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn redis_array_reply_sets_query_truncated_flag_when_over_row_cap() {
+        let items = (0..=MAX_ROWS)
+            .map(|n| RVal::Int(n as i64))
+            .collect();
+        let result = reply_to_table(&["LRANGE".into()], RVal::Array(items), Instant::now());
+        assert_eq!(result.rows.len(), MAX_ROWS);
+        assert!(result.truncated);
     }
 
     #[test]

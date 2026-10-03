@@ -163,6 +163,15 @@ describe("QueryEditorView script failure reporting", () => {
       "ROLLBACK",
     ]);
   });
+  it("recognizes transaction controls after SQL comments", async () => {
+    runScript({
+      status: "failed", failed_index: 2, statements: 3,
+      error: "boom", rollback: "self_managed",
+    }, "-- start transaction\nBEGIN; UPDATE t SET a = 1; /* discard */ ROLLBACK;");
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.atomic).toBe(false);
+  });
+
 });
 
 describe("QueryEditorView explain analyze guard", () => {

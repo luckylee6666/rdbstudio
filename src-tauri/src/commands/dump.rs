@@ -217,15 +217,96 @@ async fn dump_sqlite_schema(pool: &sqlx::SqlitePool, dest_path: &str) -> AppResu
     Ok(())
 }
 
+/// Resolve symlinks and relative parents even when the output doesn't exist yet.
+fn resolved_output(path: &Path) -> std::io::Result<PathBuf> {
+    if path.exists() {
+        return path.canonicalize();
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(parent.canonicalize()?.join(path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output has no file name")
+    })?))
+}
+
+async fn dump_sqlite(pool: &sqlx::SqlitePool, dest: &Path, schema_only: bool) -> AppResult<()> {
+    // A save-dialog overwrite confirmation must never authorize destroying
+    // the database being exported, including its journal/WAL or path aliases.
+    let destination = resolved_output(dest)?;
+    let databases: Vec<(i64, String, String)> = sqlx::query_as("PRAGMA database_list")
+        .fetch_all(pool)
+        .await?;
+    for (_, _, file) in databases {
+        if file.is_empty() {
+            continue;
+        }
+        let source = Path::new(&file).canonicalize()?;
+        let mut protected = vec![source.clone()];
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = source.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            protected.push(PathBuf::from(sidecar));
+        }
+        if protected.contains(&destination) {
+            return Err(AppError::msg(
+                "backup destination must not overwrite an open SQLite database or its journal",
+            ));
+        }
+        #[cfg(unix)]
+        if let (Ok(src), Ok(dst)) = (std::fs::metadata(&source), std::fs::metadata(dest)) {
+            use std::os::unix::fs::MetadataExt;
+            if src.dev() == dst.dev() && src.ino() == dst.ino() {
+                return Err(AppError::msg(
+                    "backup destination refers to the open SQLite database",
+                ));
+            }
+        }
+    }
+    // Generate the complete replacement before touching an existing backup.
+    // NamedTempFile also cleans up on errors and cancelled futures. SQLite
+    // VACUUM INTO accepts an existing empty file.
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::msg("invalid backup path"))?;
+    let staged = tempfile::Builder::new()
+        .prefix(".rdbstudio-dump-")
+        .tempfile_in(parent)?;
+    let path = staged.path().to_string_lossy();
+    if schema_only {
+        dump_sqlite_schema(pool, &path).await?;
+    } else {
+        let sql = format!("VACUUM INTO '{}'", path.replace('\'', "''"));
+        sqlx::query(&sql).execute(pool).await?;
+        // Some in-memory SQLite connection modes can report VACUUM success
+        // without writing a file. Never replace a usable backup with that.
+        use std::io::Read;
+        let mut header = [0u8; 16];
+        if std::fs::File::open(staged.path())?
+            .read_exact(&mut header)
+            .is_err()
+            || header != SQLITE_HEADER
+        {
+            return Err(AppError::msg("SQLite did not produce a valid backup file"));
+        }
+    }
+    staged.as_file().sync_all()?;
+    staged
+        .persist(&destination)
+        .map_err(|e| AppError::msg(format!("failed to save backup: {}", e.error)))?;
+    Ok(())
+}
+
 /// Every SQLite database file starts with these 16 bytes.
 const SQLITE_HEADER: [u8; 16] = *b"SQLite format 3\0";
 
 /// Restore a SQLite database by replacing `target` with the file at `src`.
 ///
-/// The source is validated first (SQLite header) and the copy lands in a
-/// sibling temp file before being renamed over the target, so a failed or
-/// interrupted copy never leaves a truncated database behind.
-pub fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
+/// The source is validated first (SQLite header and `quick_check`) and the
+/// copy lands in a sibling temp file before being renamed over the target, so
+/// a failed or interrupted copy never leaves a truncated database behind.
+pub async fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut source = std::fs::File::open(src)
@@ -251,30 +332,55 @@ pub fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
     };
     std::fs::create_dir_all(parent)?;
 
-    // Same directory as the target: the temp file stays on one filesystem so
-    // the final rename is a single atomic operation.
-    let tmp = parent.join(format!(".rdbstudio-restore-{}.tmp", uuid::Uuid::new_v4()));
-    let copied = (|| -> std::io::Result<()> {
-        let mut out = std::fs::File::create(&tmp)?;
-        std::io::copy(&mut source, &mut out)?;
-        out.sync_all()?;
-        Ok(())
-    })();
-    if let Err(e) = copied {
-        let _ = std::fs::remove_file(&tmp);
+    // Keep the stage beside the target so persist stays on one filesystem.
+    // NamedTempFile also removes it if this future is cancelled.
+    let mut staged = tempfile::Builder::new()
+        .prefix(".rdbstudio-restore-")
+        .tempfile_in(parent)?;
+    let tmp = staged.path().to_path_buf();
+    if let Err(e) = std::io::copy(&mut source, staged.as_file_mut())
+        .and_then(|_| staged.as_file().sync_all())
+    {
         return Err(AppError::msg(format!(
             "failed to stage the restore in {}: {e}",
             tmp.display()
         )));
     }
 
-    if let Err(e) = replace_file(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(AppError::msg(format!(
-            "failed to replace {}: {e}",
-            target.display()
-        )));
+    // A matching 16-byte header is not enough: truncated/corrupt SQLite files
+    // can have a valid magic prefix. Validate the staged copy before replacing
+    // the user's database. Open read-only so validation cannot repair or alter
+    // the backup as a side effect.
+    let validation = async {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&tmp)
+            .read_only(true)
+            .create_if_missing(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|e| AppError::msg(format!("staged file is not a valid SQLite database: {e}")))?;
+        let check_result: Result<Vec<String>, sqlx::Error> = sqlx::query_scalar("PRAGMA quick_check")
+            .fetch_all(&pool)
+            .await;
+        pool.close().await;
+        let checks = check_result
+            .map_err(|e| AppError::msg(format!("SQLite backup integrity check failed: {e}")))?;
+        if checks.as_slice() != ["ok"] {
+            return Err(AppError::msg(format!(
+                "SQLite backup integrity check failed: {}",
+                checks.join("; ")
+            )));
+        }
+        Ok(())
     }
+    .await;
+    validation?;
+
+    staged.persist(target).map_err(|e| {
+        AppError::msg(format!("failed to replace {}: {}", target.display(), e.error))
+    })?;
 
     // Pooled SQLite connections run in WAL mode. A stale write-ahead log next
     // to the freshly restored main file could replay pre-restore frames, so
@@ -297,20 +403,82 @@ pub fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Rename `tmp` over `target`. Unix replaces atomically; Windows refuses to
-/// rename onto an existing file, so remove the old database and retry (the
-/// staged copy is already complete at this point).
-fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
-    match std::fs::rename(tmp, target) {
-        Ok(()) => Ok(()),
-        Err(first) => {
-            #[cfg(target_os = "windows")]
-            if target.exists() {
-                std::fs::remove_file(target)?;
-                return std::fs::rename(tmp, target);
-            }
-            Err(first)
+fn canonical_target_path(path: &Path) -> AppResult<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    if path.exists() {
+        return Ok(path.canonicalize()?);
+    }
+    Ok(parent.canonicalize()?.join(
+        path.file_name()
+            .ok_or_else(|| AppError::msg("SQLite restore target has no file name"))?,
+    ))
+}
+
+fn same_sqlite_file(target: &Path, candidate: &Path) -> bool {
+    if candidate.as_os_str().is_empty() || candidate == Path::new(":memory:") {
+        return false;
+    }
+    if let (Ok(target), Ok(candidate)) = (target.canonicalize(), candidate.canonicalize()) {
+        if target == candidate {
+            return true;
         }
+    }
+    #[cfg(unix)]
+    if let (Ok(target), Ok(candidate)) = (std::fs::metadata(target), std::fs::metadata(candidate)) {
+        use std::os::unix::fs::MetadataExt;
+        return target.dev() == candidate.dev() && target.ino() == candidate.ino();
+    }
+    false
+}
+
+fn sqlite_file_is_open(state: &AppState, target: &Path) -> bool {
+    let pools: Vec<DbPool> = state.pools.read().values().cloned().collect();
+    pools.into_iter().any(|pool| match pool {
+        DbPool::Sqlite(pool) => {
+            let options = pool.connect_options();
+            same_sqlite_file(target, options.get_filename())
+        }
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod restore_pool_guard_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detects_a_live_sqlite_pool_through_a_symlink_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("live.db");
+        let alias = dir.path().join("alias.db");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&database)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&database, &alias).unwrap();
+
+        let state = AppState::new(
+            crate::store::ConnectionStore::load(dir.path()).unwrap(),
+            crate::history::HistoryStore::load(dir.path()).unwrap(),
+            crate::store::SnippetStore::load(dir.path()).unwrap(),
+        );
+        state.insert_pool("live".into(), DbPool::Sqlite(pool.clone()));
+        let target = canonical_target_path(&alias).unwrap();
+        assert!(sqlite_file_is_open(&state, &target));
+
+        state.remove_pool("live");
+        pool.close().await;
+        assert!(!sqlite_file_is_open(&state, &target));
     }
 }
 
@@ -448,16 +616,7 @@ pub async fn dump_database(
                     return Err(AppError::msg("SQLite only supports the main database"));
                 }
             }
-            if schema_only {
-                dump_sqlite_schema(p, &dest_path).await?;
-            } else {
-                // VACUUM INTO refuses to overwrite; the save dialog already asked.
-                if Path::new(&dest_path).exists() {
-                    std::fs::remove_file(&dest_path)?;
-                }
-                let sql = format!("VACUUM INTO '{}'", dest_path.replace('\'', "''"));
-                sqlx::query(&sql).execute(p).await?;
-            }
+            dump_sqlite(p, Path::new(&dest_path), schema_only).await?;
         }
         DriverKind::Postgres => {
             let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
@@ -557,6 +716,17 @@ pub async fn restore_database(
 
     match cfg.driver {
         DriverKind::Sqlite => {
+            // Serialize with SQLite connection tests, connects (including MCP
+            // reconnects), disconnects, and deletion. The guard stays held
+            // through file validation and replacement, closing the race after
+            // the live-pool scan below.
+            let _sqlite_file_guard = crate::state::sqlite_file_operation_lock().lock().await;
+            crate::commands::ensure_writable(&state, &id)?;
+            let cfg = state
+                .store
+                .get(&id)
+                .filter(|latest| latest.driver == DriverKind::Sqlite)
+                .ok_or_else(|| AppError::msg("connection is no longer a SQLite connection"))?;
             // A binary dump replaces the database file itself, so the pool
             // must be closed first: SQLite would keep serving (and writing)
             // the old inode after the rename.
@@ -572,7 +742,13 @@ pub async fn restore_database(
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
                 .ok_or_else(|| AppError::msg("this SQLite connection has no database file"))?;
-            restore_sqlite_file(Path::new(target), Path::new(&src_path))?;
+            let target_path = canonical_target_path(Path::new(target))?;
+            if sqlite_file_is_open(&state, &target_path) {
+                return Err(AppError::msg(
+                    "disconnect every connection that uses this SQLite database file before restoring",
+                ));
+            }
+            restore_sqlite_file(&target_path, Path::new(&src_path)).await?;
         }
         DriverKind::Redis => return Err(AppError::msg("restore is not supported for Redis")),
         DriverKind::Postgres => {
@@ -730,6 +906,99 @@ mod tests {
         assert!(sql.contains("CREATE TABLE users"));
         assert!(!sql.contains("secret-row"));
         assert!(!sql.contains("INSERT INTO"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_dump_rejects_source_and_sidecars_without_changing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("live.db");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&source)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE keep_me (id INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let original = std::fs::read(&source).unwrap();
+        for schema_only in [true, false] {
+            assert!(dump_sqlite(&pool, &source, schema_only).await.is_err());
+            assert_eq!(std::fs::read(&source).unwrap(), original);
+            let sidecar = dir.path().join("live.db-wal");
+            assert!(dump_sqlite(&pool, &sidecar, schema_only).await.is_err());
+        }
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("alias.db");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            assert!(dump_sqlite(&pool, &alias, false).await.is_err());
+            assert_eq!(std::fs::read(&source).unwrap(), original);
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_failed_dump_preserves_previous_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("backup.db");
+        std::fs::write(&dest, b"previous backup").unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(dir.path().join("source.db"))
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE saved (id INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // VACUUM cannot run inside a transaction. The previous backup must
+        // survive even when generating its replacement fails.
+        sqlx::query("BEGIN").execute(&pool).await.unwrap();
+        assert!(dump_sqlite(&pool, &dest, false).await.is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous backup");
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".rdbstudio-dump-")));
+        sqlx::query("ROLLBACK").execute(&pool).await.unwrap();
+        dump_sqlite(&pool, &dest, false).await.unwrap();
+        assert!(std::fs::read(&dest).unwrap().starts_with(&SQLITE_HEADER));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_memory_dump_never_replaces_backup_with_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("backup.db");
+        std::fs::write(&dest, b"previous backup").unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE saved (id INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = dump_sqlite(&pool, &dest, false).await;
+        let saved = std::fs::read(&dest).unwrap();
+        if outcome.is_ok() {
+            assert!(saved.starts_with(&SQLITE_HEADER));
+        } else {
+            assert_eq!(saved, b"previous backup");
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        pool.close().await;
     }
 
     #[cfg(target_os = "windows")]

@@ -102,9 +102,12 @@ See **Settings → Shortcuts** in-app for the full list.
 ## Roadmap
 
 - Code-signed + notarized builds; auto-update channel
-- `EXPLAIN ANALYZE` mode (real execution timings in the plan graph)
-- Dump/restore progress reporting and cancellation
+- Per-query-tab sessions and multiple result sets
+- Structure comparison and data synchronization
+- Dump/restore progress reporting (PostgreSQL/MySQL cancellation is available)
 - Redis Pub/Sub, Cluster, and Streams tooling
+
+See the [Navicat comparison and review](docs/navicat-gap-audit.md) for scope and validation limits.
 
 ## Tech stack
 

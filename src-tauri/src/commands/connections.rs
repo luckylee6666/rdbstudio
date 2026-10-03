@@ -1,6 +1,6 @@
 use crate::db::{build_url_with, pool::DbPool, ssh, target_addr};
 use crate::error::{AppError, AppResult};
-use crate::model::{ConnectionConfig, ConnectionSummary};
+use crate::model::{ConnectionConfig, ConnectionSummary, DriverKind};
 use crate::secret;
 use crate::state::AppState;
 use crate::store::ConnectionStore;
@@ -108,10 +108,11 @@ pub fn list_connections(state: State<'_, AppState>) -> Vec<ConnectionConfig> {
 }
 
 #[tauri::command]
-pub fn save_connection(
+pub async fn save_connection(
     state: State<'_, AppState>,
     config: ConnectionConfig,
 ) -> AppResult<ConnectionConfig> {
+    let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
     // Persist secrets first and roll them back if a later keychain or config
     // write fails. A failed Save must never leave a changed config on disk.
     let saved = save_connection_inner(&state.store, config, &OsSecretBackend)?;
@@ -123,12 +124,13 @@ pub fn save_connection(
 }
 
 #[tauri::command]
-pub fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<bool> {
+pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<bool> {
+    let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
     state.mcp.revoke_connection(&id);
     let _ = secret::delete_password(&id);
     let _ = secret::delete_password(&ssh_secret_id(&id));
     if let Some(pool) = state.remove_pool(&id) {
-        tauri::async_runtime::spawn(async move { pool.close().await });
+        pool.close().await;
     }
     // Drop any live tunnel for this connection.
     let _ = state.remove_tunnel(&id);
@@ -164,6 +166,11 @@ fn hydrate_secrets_for_test(config: &mut ConnectionConfig) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn test_connection(mut config: ConnectionConfig) -> AppResult<String> {
+    let _sqlite_file_guard = if config.driver == DriverKind::Sqlite {
+        Some(crate::state::sqlite_file_operation_lock().lock().await)
+    } else {
+        None
+    };
     hydrate_secrets_for_test(&mut config)?;
     tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, test_connection_inner(&config))
         .await
@@ -196,21 +203,35 @@ pub async fn connect(state: State<'_, AppState>, id: String) -> AppResult<Connec
     connect_stored(&state, &id).await
 }
 
+struct ConnectAttemptGuard<'a> {
+    state: &'a AppState,
+    id: &'a str,
+}
+
+impl Drop for ConnectAttemptGuard<'_> {
+    fn drop(&mut self) {
+        self.state.end_connect(self.id);
+    }
+}
+
 /// Connect using the persisted configuration and keychain secrets. Shared by
 /// the renderer command and the local MCP bridge so credentials never need to
 /// cross either IPC boundary.
 pub(crate) async fn connect_stored(state: &AppState, id: &str) -> AppResult<ConnectionSummary> {
-    // A second connect for the same id while one is in flight (double-click,
-    // impatient retry during a slow SSH handshake) would stack a duplicate
-    // tunnel/pool and race the state inserts — reject it instead.
+    // Preserve the duplicate-attempt rejection while waiting for the global
+    // lifecycle lock. The guard also clears the marker if this future is
+    // cancelled during the wait or while connecting.
     if !state.begin_connect(id) {
         return Err(AppError::msg("a connection attempt is already in progress"));
     }
-    let result = tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, connect_inner(state, id))
+    let _attempt = ConnectAttemptGuard { state, id };
+    let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
+    // A second connect for the same id while one is in flight (double-click,
+    // impatient retry during a slow SSH handshake) would stack a duplicate
+    // tunnel/pool and race the state inserts — reject it instead.
+    tokio::time::timeout(CONNECTION_ATTEMPT_TIMEOUT, connect_inner(state, id))
         .await
-        .unwrap_or_else(|_| Err(connection_timeout_error()));
-    state.end_connect(id);
-    result
+        .unwrap_or_else(|_| Err(connection_timeout_error()))
 }
 
 fn connection_timeout_error() -> AppError {
@@ -268,6 +289,7 @@ async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummar
 
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
     if let Some(pool) = state.remove_pool(&id) {
         pool.close().await;
     }
@@ -386,5 +408,47 @@ mod tests {
         assert!(!saved.id.is_empty());
         assert!(store.get(&saved.id).is_some());
         assert_eq!(backend.values.lock().get(&saved.id).unwrap(), "db-secret");
+    }
+
+    #[tokio::test]
+    async fn connect_stored_waits_for_sqlite_file_lifecycle_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("connect-after-restore.db");
+        let store = ConnectionStore::load(dir.path()).unwrap();
+        let mut cfg = config("restore-race-test", "SQLite race test");
+        cfg.driver = DriverKind::Sqlite;
+        cfg.file_path = Some(database.to_string_lossy().into_owned());
+        cfg.host = None;
+        cfg.port = None;
+        cfg.database = None;
+        cfg.username = None;
+        store.upsert(cfg).unwrap();
+        let state = Arc::new(AppState::new(
+            store,
+            crate::history::HistoryStore::load(dir.path()).unwrap(),
+            crate::store::SnippetStore::load(dir.path()).unwrap(),
+        ));
+
+        let lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
+        let task_state = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            connect_stored(&task_state, "restore-race-test").await
+        });
+        while !state.connecting.read().contains("restore-race-test") {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished(), "connect must wait for restore's lock");
+        assert!(
+            !database.exists(),
+            "the SQLite file must not be opened before restore releases the lock"
+        );
+
+        drop(lifecycle_guard);
+        task.await.unwrap().unwrap();
+        let pool = state
+            .remove_pool("restore-race-test")
+            .expect("successful connect registers its pool");
+        pool.close().await;
     }
 }

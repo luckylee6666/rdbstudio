@@ -26,6 +26,7 @@ import {
   isReadOnlyStatement,
   splitRedisCommands,
   splitStatements,
+  stripLeadingComments,
 } from "@/lib/sql";
 import { getSchemaColumns, setSchemaColumns } from "@/lib/schemaCache";
 import { cn } from "@/lib/cn";
@@ -321,7 +322,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       // wraps them in its own transaction — a script with its own BEGIN/COMMIT
       // manages that itself.
       const managesOwnTxn = statements.some((s) =>
-        /^\s*(begin|commit|rollback|start\s+transaction|end)\b/i.test(s)
+        /^(begin|commit|rollback|start\s+transaction|end)\b/i.test(stripLeadingComments(s))
       );
       const asScript = statements.length > 1 && !isRedis;
 

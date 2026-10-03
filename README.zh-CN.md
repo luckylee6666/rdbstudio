@@ -102,9 +102,12 @@ pnpm tauri build   # 正式包在 src-tauri/target/release/bundle/
 ## 路线图
 
 - 代码签名 + 公证；自动更新通道
-- `EXPLAIN ANALYZE` 模式（计划图显示真实执行耗时）
-- dump / restore 进度与取消
+- 查询标签页独立会话与多结果集
+- 结构比较与数据同步
+- dump / restore 进度反馈（PostgreSQL / MySQL 已支持取消）
 - Redis Pub/Sub、Cluster、Streams 工具
+
+详细范围与验证边界见 [Navicat 功能对照与审查](docs/navicat-gap-audit.md)。
 
 ## 技术栈
 

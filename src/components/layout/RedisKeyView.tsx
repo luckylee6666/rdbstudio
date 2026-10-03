@@ -357,8 +357,10 @@ function RedisScalarEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const t = useT();
+  const incomplete = result.truncated;
 
   const beginEdit = () => {
+    if (incomplete) return;
     setDraft(raw);
     setError(null);
     setEditing(true);
@@ -376,7 +378,10 @@ function RedisScalarEditor({
     try {
       const k = quoteArg(redisKey);
       const v = quoteArg(draft);
-      const cmd = isJson ? `JSON.SET ${k} $ ${v}` : `SET ${k} ${v}`;
+      // Redis SET clears an existing expiry by default. KEEPTTL preserves it
+      // atomically and does not extend it based on a stale PTTL read.
+      if (incomplete) throw new Error(t("redis.scalar_truncated"));
+      const cmd = isJson ? `JSON.SET ${k} $ ${v}` : `SET ${k} ${v} KEEPTTL`;
       await api.executeQuery(connectionId, cmd);
       await onReload();
       setEditing(false);
@@ -450,6 +455,11 @@ function RedisScalarEditor({
   const display = maybePrettyJson(raw);
   return (
     <div className="p-4">
+      {incomplete && (
+        <div role="status" className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
+          {t("redis.scalar_truncated")}
+        </div>
+      )}
       <div className="mb-2 flex items-center gap-3 text-[11px] text-muted-foreground">
         <span>{t("redis.chars", { n: raw.length })}</span>
         <span>•</span>
@@ -457,6 +467,8 @@ function RedisScalarEditor({
         <div className="flex-1" />
         <button
           onClick={beginEdit}
+          disabled={incomplete}
+          title={incomplete ? t("redis.scalar_truncated") : undefined}
           className="flex h-6 items-center gap-1 rounded px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <Pencil className="h-3 w-3" />
@@ -538,6 +550,7 @@ function CellEditor({
           if (e.nativeEvent.isComposing) return;
           if (e.key === "Escape") {
             e.preventDefault();
+            committedRef.current = true;
             onCancel();
           } else if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -702,6 +715,12 @@ function RedisTable({
           </span>
         )}
       </div>
+      {result.truncated && !(maybeTruncated && cap != null) && (
+        <div className="flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-[11px] text-amber-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{t("redis.reply_truncated")}</span>
+        </div>
+      )}
       {maybeTruncated && cap != null && (
         <div className="flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-[11px] text-amber-300">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

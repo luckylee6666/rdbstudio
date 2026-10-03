@@ -10,6 +10,16 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex, Semaphore};
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
+static SQLITE_FILE_OPERATION_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+/// Serializes SQLite file lifecycle operations across saved connections,
+/// connection tests, and restore. This closes the gap between a restore's
+/// live-pool check and a concurrent connection opening the same file.
+pub fn sqlite_file_operation_lock() -> &'static tokio::sync::Mutex<()> {
+    SQLITE_FILE_OPERATION_LOCK.get_or_init(tokio::sync::Mutex::default)
+}
+
 #[derive(Clone)]
 pub(crate) struct McpGrant {
     pub connection_id: String,
