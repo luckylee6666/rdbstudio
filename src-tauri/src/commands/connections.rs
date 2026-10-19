@@ -38,6 +38,19 @@ impl SecretBackend for OsSecretBackend {
     }
 }
 
+fn read_database_password(
+    config: &ConnectionConfig,
+    backend: &impl SecretBackend,
+) -> AppResult<Option<String>> {
+    // SQLite opens a local file and never consumes a database password.
+    // Do not make local connections depend on an OS credential service.
+    if config.driver == DriverKind::Sqlite {
+        Ok(None)
+    } else {
+        backend.read(&config.id)
+    }
+}
+
 struct SecretChange {
     id: String,
     password: String,
@@ -159,6 +172,13 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppRes
 /// Fill blank password fields from the keychain when the config already has
 /// an id (edit-dialog "test" leaves the boxes empty to mean "keep stored").
 fn hydrate_secrets_for_test(config: &mut ConnectionConfig) -> AppResult<()> {
+    hydrate_secrets_for_test_with_backend(config, &OsSecretBackend)
+}
+
+fn hydrate_secrets_for_test_with_backend(
+    config: &mut ConnectionConfig,
+    backend: &impl SecretBackend,
+) -> AppResult<()> {
     if config.id.is_empty() {
         return Ok(());
     }
@@ -168,14 +188,14 @@ fn hydrate_secrets_for_test(config: &mut ConnectionConfig) -> AppResult<()> {
         .map(str::is_empty)
         .unwrap_or(true);
     if db_blank {
-        if let Some(pw) = secret::read_password(&config.id)? {
+        if let Some(pw) = read_database_password(config, backend)? {
             config.password = Some(pw);
         }
     }
     if let Some(ssh) = config.ssh.as_mut() {
         let ssh_blank = ssh.password.as_deref().map(str::is_empty).unwrap_or(true);
         if ssh_blank {
-            if let Some(pw) = secret::read_password(&ssh_secret_id(&config.id))? {
+            if let Some(pw) = backend.read(&ssh_secret_id(&config.id))? {
                 ssh.password = Some(pw);
             }
         }
@@ -265,7 +285,7 @@ async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummar
         .store
         .get(id)
         .ok_or_else(|| AppError::msg(format!("connection {} not found", id)))?;
-    cfg.password = secret::read_password(id)?;
+    cfg.password = read_database_password(&cfg, &OsSecretBackend)?;
 
     // If this id is already connected (frontend double-click, retry, or a
     // reconnect that didn't go through `disconnect`), tear down the existing
@@ -360,11 +380,17 @@ mod tests {
     #[derive(Default)]
     struct FakeSecrets {
         values: Mutex<HashMap<String, String>>,
+        reads: Mutex<Vec<String>>,
+        fail_read: Mutex<Option<String>>,
         fail_write: Mutex<Option<String>>,
     }
 
     impl SecretBackend for FakeSecrets {
         fn read(&self, id: &str) -> AppResult<Option<String>> {
+            self.reads.lock().push(id.to_owned());
+            if self.fail_read.lock().as_deref() == Some(id) {
+                return Err(AppError::msg("injected keychain read failure"));
+            }
             Ok(self.values.lock().get(id).cloned())
         }
 
@@ -402,6 +428,79 @@ mod tests {
             ssh: None,
             password: None,
         }
+    }
+
+    #[test]
+    fn sqlite_database_password_does_not_access_the_keychain() {
+        let mut cfg = config("sqlite-no-keychain", "SQLite");
+        cfg.driver = DriverKind::Sqlite;
+        let backend = FakeSecrets::default();
+        *backend.fail_read.lock() = Some(cfg.id.clone());
+
+        assert!(read_database_password(&cfg, &backend).unwrap().is_none());
+        hydrate_secrets_for_test_with_backend(&mut cfg, &backend).unwrap();
+        assert!(cfg.password.is_none());
+        assert!(backend.reads.lock().is_empty());
+    }
+
+    #[test]
+    fn network_database_passwords_still_load_and_propagate_keychain_failures() {
+        for driver in [DriverKind::Postgres, DriverKind::Mysql, DriverKind::Redis] {
+            let mut cfg = config("network-db", "Network DB");
+            cfg.driver = driver;
+            let backend = FakeSecrets::default();
+            backend
+                .values
+                .lock()
+                .insert(cfg.id.clone(), "fixture-password".into());
+            assert_eq!(
+                read_database_password(&cfg, &backend).unwrap().as_deref(),
+                Some("fixture-password")
+            );
+            hydrate_secrets_for_test_with_backend(&mut cfg, &backend).unwrap();
+            assert_eq!(cfg.password.as_deref(), Some("fixture-password"));
+
+            *backend.fail_read.lock() = Some(cfg.id.clone());
+            assert!(read_database_password(&cfg, &backend).is_err());
+            // A user-provided password stays usable without consulting a
+            // stored credential; a blank edit still requires the keychain.
+            hydrate_secrets_for_test_with_backend(&mut cfg, &backend).unwrap();
+            cfg.password = Some(String::new());
+            assert!(hydrate_secrets_for_test_with_backend(&mut cfg, &backend).is_err());
+        }
+    }
+
+    #[test]
+    fn sqlite_database_password_skip_does_not_skip_separate_ssh_credentials() {
+        let mut cfg = config("sqlite-with-ssh", "SQLite SSH");
+        cfg.driver = DriverKind::Sqlite;
+        cfg.ssh = Some(SshConfig {
+            host: "bastion.example.invalid".into(),
+            port: 22,
+            username: "fixture-user".into(),
+            auth: Some("password".into()),
+            key_path: None,
+            password: None,
+        });
+        let backend = FakeSecrets::default();
+        *backend.fail_read.lock() = Some(cfg.id.clone());
+        let ssh_id = ssh_secret_id(&cfg.id);
+        backend
+            .values
+            .lock()
+            .insert(ssh_id.clone(), "fixture-ssh-password".into());
+
+        hydrate_secrets_for_test_with_backend(&mut cfg, &backend).unwrap();
+        assert!(cfg.password.is_none());
+        assert_eq!(
+            cfg.ssh.as_ref().unwrap().password.as_deref(),
+            Some("fixture-ssh-password")
+        );
+        assert_eq!(*backend.reads.lock(), vec![ssh_id.clone()]);
+
+        cfg.ssh.as_mut().unwrap().password = None;
+        *backend.fail_read.lock() = Some(ssh_id);
+        assert!(hydrate_secrets_for_test_with_backend(&mut cfg, &backend).is_err());
     }
 
     #[tokio::test]
