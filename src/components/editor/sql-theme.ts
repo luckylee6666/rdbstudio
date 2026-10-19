@@ -8,7 +8,10 @@ export const rdbTheme = EditorView.theme(
       color: "hsl(var(--foreground))",
       backgroundColor: "transparent",
       height: "100%",
-      fontSize: "13px",
+      fontSize: "var(--editor-font-size, 13px)",
+    },
+    "&.cm-focused": {
+      outline: "none",
     },
     ".cm-content": {
       fontFamily:
@@ -75,15 +78,15 @@ export const rdbTheme = EditorView.theme(
 
 export const rdbHighlight = syntaxHighlighting(
   HighlightStyle.define([
-    { tag: t.keyword, color: "#c084fc", fontWeight: "600" },
-    { tag: [t.operator, t.operatorKeyword], color: "#a78bfa" },
-    { tag: [t.string, t.special(t.string)], color: "#86efac" },
-    { tag: t.number, color: "#fbbf24" },
-    { tag: t.bool, color: "#fbbf24" },
-    { tag: t.null, color: "#fbbf24" },
-    { tag: [t.variableName, t.propertyName], color: "#e2e8f0" },
-    { tag: t.typeName, color: "#38bdf8" },
-    { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "#60a5fa" },
+    { tag: t.keyword, color: "hsl(var(--syntax-keyword))", fontWeight: "600" },
+    { tag: [t.operator, t.operatorKeyword], color: "hsl(var(--syntax-operator))" },
+    { tag: [t.string, t.special(t.string)], color: "hsl(var(--syntax-string))" },
+    { tag: t.number, color: "hsl(var(--syntax-number))" },
+    { tag: t.bool, color: "hsl(var(--syntax-number))" },
+    { tag: t.null, color: "hsl(var(--syntax-number))" },
+    { tag: [t.variableName, t.propertyName], color: "hsl(var(--foreground))" },
+    { tag: t.typeName, color: "hsl(var(--syntax-type))" },
+    { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "hsl(var(--syntax-function))" },
     { tag: t.comment, color: "hsl(var(--muted-foreground) / 0.8)", fontStyle: "italic" },
     { tag: t.lineComment, color: "hsl(var(--muted-foreground) / 0.8)", fontStyle: "italic" },
     { tag: t.punctuation, color: "hsl(var(--muted-foreground))" },

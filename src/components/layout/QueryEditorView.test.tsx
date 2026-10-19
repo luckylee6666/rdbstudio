@@ -22,6 +22,11 @@ vi.mock("@/components/editor/CodeMirror", () => ({
     />
   ),
 }));
+vi.mock("@/components/grid/DataGrid", () => ({
+  DataGrid: ({ rows }: { rows: unknown[][] }) => (
+    <div data-testid="result-grid">{rows.map((row) => row.map(String).join(" · ")).join(" / ")}</div>
+  ),
+}));
 
 describe("QueryEditorView buffer persistence", () => {
   const tab: WorkspaceTab = {
@@ -170,6 +175,96 @@ describe("QueryEditorView script failure reporting", () => {
     }, "-- start transaction\nBEGIN; UPDATE t SET a = 1; /* discard */ ROLLBACK;");
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]?.atomic).toBe(false);
+  });
+
+  it("shows each result set and binds the script to its query tab", async () => {
+    const r1 = { columns: [{ name: "n", data_type: "INT" }], rows: [[1]], rows_affected: null, elapsed_ms: 1, truncated: false };
+    const r2 = { ...r1, rows: [[2]] };
+    const payloads: Array<Record<string, unknown>> = [];
+    mockIPC((command, args) => {
+      if (command === "execute_script") { payloads.push(args as Record<string, unknown>); return { status: "ok", result: r2, results: [r1, r2], total_affected: 0, statements: 2 }; }
+      if (command === "editor_session_status") return { connected: true, in_transaction: false };
+      return undefined;
+    });
+    render(<QueryEditorView tab={tab} />);
+    fireEvent.change(screen.getByLabelText("SQL editor"), { target: { value: "SELECT 1; SELECT 2;" } });
+    fireEvent.click(screen.getByRole("button", { name: /运行/ }));
+    expect(await screen.findByTestId("result-grid")).toHaveTextContent("2");
+    fireEvent.click(screen.getByRole("button", { name: /结果 1/ }));
+    expect(screen.getByTestId("result-grid")).toHaveTextContent("1");
+    fireEvent.click(screen.getByRole("button", { name: /结果 2/ }));
+    expect(screen.getByTestId("result-grid")).toHaveTextContent("2");
+    expect(payloads[0]?.sessionId).toBe(tab.id);
+  });
+
+  it("closes the old tab session before running on a newly selected connection", async () => {
+    const pg: ConnectionConfig = { ...mysql, id: "pg", name: "pg-test", driver: "postgres", port: 5432 };
+    useConnections.setState({ list: [mysql, pg], status: { my: "connected", pg: "connected" } });
+    expect(useConnections.getState().list.map((item) => item.id)).toEqual(["my", "pg"]);
+    const calls: Array<{ command: string; payload: Record<string, unknown> }> = [];
+    mockIPC((command, payload) => {
+      const args = payload as Record<string, unknown>;
+      calls.push({ command, payload: args });
+      if (command === "execute_query") return { columns: [{ name: "connection", data_type: "text" }], rows: [[args.id]], rows_affected: null, elapsed_ms: 1, truncated: false };
+      if (command === "editor_session_status") return { connected: true, in_transaction: false };
+      return undefined;
+    });
+    render(<QueryEditorView tab={tab} />);
+    fireEvent.change(screen.getByLabelText("SQL editor"), { target: { value: "SELECT 1" } });
+    fireEvent.click(screen.getByRole("button", { name: /运行/ }));
+    await waitFor(() => expect(calls.some((call) => call.command === "execute_query" && call.payload.id === "my")).toBe(true));
+    await waitFor(() => expect(calls.some((call) => call.command === "editor_session_status")).toBe(true));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pg" } });
+    await waitFor(() => expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("pg"));
+    expect(calls.some((call) => call.command === "close_editor_session")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /运行/ }));
+    await waitFor(() => expect(calls.some((call) => call.command === "execute_query" && call.payload.id === "pg")).toBe(true));
+    const closeIndex = calls.findIndex((call) => call.command === "close_editor_session");
+    const newQueryIndex = calls.findIndex((call) => call.command === "execute_query" && call.payload.id === "pg");
+    expect(closeIndex).toBeGreaterThan(-1);
+    expect(closeIndex).toBeLessThan(newQueryIndex);
+    expect(calls[newQueryIndex]?.payload.sessionId).toBe(tab.id);
+  });
+
+  it("requires resetting a lost open transaction instead of sending COMMIT to a dead session", async () => {
+    useI18n.setState({ lang: "en" });
+    const closeSession = vi.fn();
+    mockIPC((command) => {
+      if (command === "execute_query") return { columns: [], rows: [], rows_affected: null, elapsed_ms: 1, truncated: false };
+      if (command === "editor_session_status") return { connected: false, in_transaction: true };
+      if (command === "close_editor_session") { closeSession(); return undefined; }
+      return undefined;
+    });
+    render(<QueryEditorView tab={tab} />);
+    fireEvent.click(screen.getByRole("button", { name: "Begin transaction" }));
+    expect(await screen.findByText("Session lost")).toBeInTheDocument();
+    // A dead session offers only a reset — never a COMMIT into the void.
+    expect(screen.queryByRole("button", { name: "Commit" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reset session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await waitFor(() => expect(closeSession).toHaveBeenCalledOnce());
+  });
+
+  it("asks before switching away from an uncommitted transaction", async () => {
+    useI18n.setState({ lang: "en" });
+    const pg: ConnectionConfig = { ...mysql, id: "pg", name: "pg-test", driver: "postgres", port: 5432 };
+    useConnections.setState({ list: [mysql, pg], status: { my: "connected", pg: "connected" } });
+    const closeSession = vi.fn();
+    mockIPC((command) => {
+      if (command === "execute_query") return { columns: [], rows: [], rows_affected: null, elapsed_ms: 1, truncated: false };
+      if (command === "editor_session_status") return { connected: true, in_transaction: true };
+      if (command === "close_editor_session") { closeSession(); return undefined; }
+      return undefined;
+    });
+    render(<QueryEditorView tab={tab} />);
+    fireEvent.click(screen.getByRole("button", { name: "Begin transaction" }));
+    await waitFor(() => expect(screen.getByText("In transaction")).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pg" } });
+    expect(screen.getByRole("dialog", { name: "Switch database connection" })).toBeInTheDocument();
+    expect(closeSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Switch and roll back" }));
+    await waitFor(() => expect(closeSession).toHaveBeenCalledOnce());
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("pg");
   });
 
 });

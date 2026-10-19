@@ -51,9 +51,10 @@ pub async fn preview_edits(
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
     let driver = pool.driver();
+    let types = data::column_bind_types(&pool, batch.schema.as_deref(), &batch.table).await?;
     Ok(batch
         .edits
         .iter()
-        .map(|e| data::preview_edit_sql(driver, batch.schema.as_deref(), &batch.table, e))
+        .map(|e| data::preview_edit_sql_typed(driver, batch.schema.as_deref(), &batch.table, e, Some(&types)))
         .collect())
 }

@@ -2,6 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Object tools respond to their workspace pane, including when both sidebars
+   are open. A narrow pane stacks the list above the editor. */
+.object-tool {
+  container-type: inline-size;
+  container-name: object-tool;
+}
+.object-tool-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(6rem, 12rem) minmax(0, 1fr);
+}
+.object-tool-layout > aside {
+  border-right-width: 0;
+  border-bottom: 1px solid hsl(var(--border) / 0.7);
+}
+.object-tool-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+}
+@container object-tool (min-width: 720px) {
+  .object-tool-layout {
+    grid-template-columns: minmax(190px, 240px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .object-tool-layout > aside {
+    border-right: 1px solid hsl(var(--border) / 0.7);
+    border-bottom-width: 0;
+  }
+}
+
 @layer base {
   :root {
     --background: 220 20% 97%;
@@ -20,6 +50,15 @@
     --success: 152 60% 40%;
     --warning: 38 92% 50%;
     --danger: 0 72% 51%;
+    color-scheme: light;
+    accent-color: hsl(var(--brand));
+    /* SQL syntax colors, tuned per theme for contrast. */
+    --syntax-keyword: 263 70% 50%;
+    --syntax-operator: 262 60% 45%;
+    --syntax-string: 142 72% 29%;
+    --syntax-number: 32 95% 35%;
+    --syntax-type: 200 98% 32%;
+    --syntax-function: 224 76% 48%;
   }
 
   .dark {
@@ -39,6 +78,15 @@
     --success: 152 60% 50%;
     --warning: 38 92% 58%;
     --danger: 0 72% 58%;
+    /* Native controls (checkboxes, select popups, scrollbars) follow the
+       theme instead of rendering light-mode white boxes. */
+    color-scheme: dark;
+    --syntax-keyword: 270 95% 75%;
+    --syntax-operator: 255 92% 76%;
+    --syntax-string: 142 69% 73%;
+    --syntax-number: 43 96% 56%;
+    --syntax-type: 199 89% 60%;
+    --syntax-function: 213 94% 68%;
   }
 
   * {
@@ -72,10 +120,23 @@
     background-clip: padding-box;
     border-radius: 999px;
   }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
   ::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--muted-foreground) / 0.5);
     background-clip: padding-box;
     border: 2px solid transparent;
+  }
+
+  /* The app chrome is not a document: ⌘A / drag-select must not paint every
+     label. Editors, code blocks and opted-in regions stay selectable. */
+  .cm-editor,
+  pre,
+  code,
+  [data-selectable] {
+    -webkit-user-select: text;
+    user-select: text;
   }
 
   /* Drag region for custom titlebar */
@@ -97,5 +158,15 @@
   }
   .hairline {
     box-shadow: inset 0 -1px 0 0 hsl(var(--border));
+  }
+}
+
+@layer utilities {
+  /* Horizontal strips that scroll by wheel/trackpad without a visible bar. */
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
   }
 }

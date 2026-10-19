@@ -20,7 +20,7 @@ const STYLES: Record<ToastKind, string> = {
 const ICON_STYLES: Record<ToastKind, string> = {
   info: "text-muted-foreground",
   success: "text-success",
-  error: "text-rose-400",
+  error: "text-rose-600 dark:text-rose-400",
 };
 
 // Renders the global toast stack in the top-right of the viewport. Driven by

@@ -47,7 +47,7 @@ fn skip_leading_trivia(sql: &str) -> &str {
     }
 }
 
-fn first_keyword(sql: &str) -> String {
+pub(crate) fn first_keyword(sql: &str) -> String {
     skip_leading_trivia(sql)
         .chars()
         .take_while(|c| c.is_alphabetic())
@@ -289,7 +289,7 @@ pub fn is_readonly(sql: &str) -> bool {
 /// True when a DML statement carries a RETURNING clause (PG/SQLite). Those
 /// produce rows and must go through the fetch path — the execute branch would
 /// drop them and the user would only see "N affected".
-fn has_returning(sql: &str) -> bool {
+pub(crate) fn has_returning(sql: &str) -> bool {
     scan_bare_words(sql, |w| w == "RETURNING")
 }
 
@@ -297,7 +297,7 @@ fn has_returning(sql: &str) -> bool {
 /// comments — uppercased, returning true the first time `pred` matches.
 /// Postgres `E'...'` escape strings honor backslash escapes so `E'O\'Brien'`
 /// doesn't desync the literal tracking.
-fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
+pub(crate) fn scan_bare_words(sql: &str, pred: impl Fn(&str) -> bool) -> bool {
     let mut chars = sql.chars().peekable();
     let mut word = String::new();
     while let Some(c) = chars.next() {
@@ -503,7 +503,7 @@ fn skip_dollar_quoted(chars: &mut std::iter::Peekable<impl Iterator<Item = char>
 
 /// Drain up to `MAX_ROWS` rows from a fetch stream; returns the rows plus
 /// whether the stream had more (i.e. the result was truncated).
-async fn fetch_capped<T>(
+pub(crate) async fn fetch_capped<T>(
     mut stream: futures::stream::BoxStream<'_, Result<T, sqlx::Error>>,
 ) -> AppResult<(Vec<T>, bool)> {
     use futures::TryStreamExt;
@@ -526,7 +526,7 @@ async fn fetch_capped<T>(
 /// there is nothing else to go on. A driver that refuses to describe the
 /// statement (MySQL cannot prepare all of them — see `mysql_select`) leaves the
 /// result headerless, exactly as before, rather than failing the query.
-async fn describe_columns<'e, DB, E>(executor: E, sql: &str) -> Vec<ColumnMeta>
+pub(crate) async fn describe_columns<'e, DB, E>(executor: E, sql: &str) -> Vec<ColumnMeta>
 where
     DB: sqlx::Database,
     E: sqlx::Executor<'e, Database = DB>,
@@ -597,20 +597,20 @@ macro_rules! fetch_mcp_bounded {
 /// state has been restored. Cancellation or any early error closes the socket
 /// instead, preventing a dirty session from leaking back into the editor pool.
 /// Shared by the MCP bridge and the editor's read-only connections.
-struct GuardedConnection<DB: sqlx::Database> {
-    inner: sqlx::pool::PoolConnection<DB>,
+pub(crate) struct GuardedConnection<DB: sqlx::Database> {
+    pub(crate) inner: sqlx::pool::PoolConnection<DB>,
     reusable: bool,
 }
 
 impl<DB: sqlx::Database> GuardedConnection<DB> {
-    fn new(inner: sqlx::pool::PoolConnection<DB>) -> Self {
+    pub(crate) fn new(inner: sqlx::pool::PoolConnection<DB>) -> Self {
         Self {
             inner,
             reusable: false,
         }
     }
 
-    fn mark_reusable(&mut self) {
+    pub(crate) fn mark_reusable(&mut self) {
         self.reusable = true;
     }
 }
@@ -745,10 +745,11 @@ pub async fn execute_script_readonly(pool: &DbPool, stmts: &[String]) -> AppResu
         return Err(AppError::msg("empty script"));
     }
     let start = Instant::now();
-    let mut last: Option<QueryResult> = None;
+    let mut results = Vec::new();
+    let mut budget = crate::db::limits::ResultBudget::default();
     for (i, sql) in stmts.iter().enumerate() {
         match execute_readonly(pool, sql).await {
-            Ok(r) => last = Some(r),
+            Ok(mut r) => { budget.retain(&mut r); results.push(r); }
             Err(e) => {
                 return Ok(ScriptOutcome::Failed {
                     failed_index: i,
@@ -760,7 +761,7 @@ pub async fn execute_script_readonly(pool: &DbPool, stmts: &[String]) -> AppResu
             }
         }
     }
-    script_ok(last, 0, stmts.len(), start)
+    script_ok(results, 0, stmts.len(), start)
 }
 
 /// Execute a single SQL query for the local MCP bridge with two independent
@@ -874,6 +875,7 @@ pub async fn execute_mcp_readonly(
 pub enum ScriptOutcome {
     Ok {
         result: QueryResult,
+        results: Vec<QueryResult>,
         total_affected: u64,
         statements: usize,
     },
@@ -910,13 +912,13 @@ pub enum RollbackState {
 /// runtime, and the conditional-DDL idiom (`PREPARE stmt FROM @ddl; EXECUTE
 /// stmt`) hides an `ALTER TABLE` behind a user variable — exactly the case
 /// worth warning about.
-fn mysql_keeps_transaction(sql: &str) -> bool {
+pub(crate) fn mysql_keeps_transaction(sql: &str) -> bool {
     match first_keyword(sql).as_str() {
         // Session and user variables are fine; `SET autocommit` and
         // `SET PASSWORD` commit.
         "SET" => {
             let rest = skip_first_keyword(sql).trim_start().to_ascii_uppercase();
-            !rest.starts_with("PASSWORD") && !rest.starts_with("AUTOCOMMIT")
+            !rest.starts_with("PASSWORD") && !scan_bare_words(sql, |word| word == "AUTOCOMMIT" || word == "PASSWORD")
         }
         "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "WITH" | "VALUES" | "TABLE"
         | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "PREPARE" | "DEALLOCATE" | "DO" | "USE"
@@ -928,7 +930,7 @@ fn mysql_keeps_transaction(sql: &str) -> bool {
 /// Whether rolling back the statements that ran (`ran` ends with the one that
 /// failed — MySQL's implicit commit happens *before* a statement executes, so
 /// a failing DDL still committed everything before it) undoes all of them.
-fn mysql_rollback_state(ran: &[String]) -> RollbackState {
+pub(crate) fn mysql_rollback_state(ran: &[String]) -> RollbackState {
     if ran.iter().all(|s| mysql_keeps_transaction(s)) {
         RollbackState::Complete
     } else {
@@ -997,15 +999,16 @@ pub async fn execute_script(
 /// Shared tail of both script paths: the last statement's result carries the
 /// whole run's elapsed time.
 fn script_ok(
-    last: Option<QueryResult>,
+    results: Vec<QueryResult>,
     total: u64,
     statements: usize,
     start: Instant,
 ) -> AppResult<ScriptOutcome> {
-    let mut result = last.expect("non-empty script always yields a result");
+    let mut result = results.last().expect("non-empty script always yields a result").clone();
     result.elapsed_ms = start.elapsed().as_millis() as u64;
     Ok(ScriptOutcome::Ok {
         result,
+        results,
         total_affected: total,
         statements,
     })
@@ -1017,7 +1020,8 @@ fn script_ok(
 macro_rules! run_statements {
     ($holder:expr, $stmts:expr, $decode:ident, $proto:ident) => {{
         let mut total: u64 = 0;
-        let mut last: Option<QueryResult> = None;
+        let mut results = Vec::new();
+        let mut budget = crate::db::limits::ResultBudget::default();
         let mut failure: Option<(usize, String)> = None;
         for (i, sql) in $stmts.iter().enumerate() {
             let one: AppResult<QueryResult> = if is_readonly(sql) || has_returning(sql) {
@@ -1046,11 +1050,12 @@ macro_rules! run_statements {
                 }
             };
             match one {
-                Ok(r) => {
+                Ok(mut r) => {
+                    budget.retain(&mut r);
                     if let Some(n) = r.rows_affected {
                         total += n;
                     }
-                    last = Some(r);
+                    results.push(r);
                 }
                 Err(e) => {
                     failure = Some((i, e.to_string()));
@@ -1058,7 +1063,7 @@ macro_rules! run_statements {
                 }
             }
         }
-        (last, total, failure)
+        (results, total, failure)
     }};
 }
 
@@ -1698,6 +1703,36 @@ fn base64_like(bytes: &[u8]) -> String {
     }
     out
 }
+
+/// Bound-text read used by search, with database-native protection even when
+/// selecting a view that invokes a function with side effects.
+pub(crate) async fn execute_readonly_text_bind(pool: &DbPool, sql: &str, value: &str) -> AppResult<QueryResult> {
+    if !is_single_statement(sql) || !is_readonly(sql) { return Err(AppError::msg("expected one read-only statement")); }
+    let start = Instant::now();
+    macro_rules! read {
+        ($pool:expr, $begin:expr, $end:expr, $decode:ident) => {{
+            let mut conn = GuardedConnection::new($pool.acquire().await?);
+            sqlx::Executor::execute(&mut *conn.inner, $begin).await?;
+            let fetched = fetch_capped(sqlx::query(sql).bind(value).fetch(&mut *conn.inner)).await;
+            let columns = if fetched.as_ref().is_ok_and(|(rows, _)| rows.is_empty()) { describe_columns(&mut *conn.inner, sql).await } else { vec![] };
+            let cleanup = sqlx::Executor::execute(&mut *conn.inner, $end).await;
+            if cleanup.is_ok() { conn.mark_reusable(); }
+            let (rows, truncated) = fetched?;
+            cleanup?;
+            let mut result = $decode(rows, start);
+            result.truncated = truncated;
+            if result.columns.is_empty() { result.columns = columns; }
+            Ok(result)
+        }};
+    }
+    match pool {
+        DbPool::Sqlite(p) => read!(p, "PRAGMA query_only = ON", "PRAGMA query_only = OFF", decode_sqlite),
+        DbPool::Postgres(p) => read!(p, "BEGIN READ ONLY", "ROLLBACK", decode_postgres),
+        DbPool::Mysql(p) => read!(p, "START TRANSACTION READ ONLY", "ROLLBACK", decode_mysql),
+        DbPool::Redis(_) => Err(AppError::msg("relational search is not supported for Redis")),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

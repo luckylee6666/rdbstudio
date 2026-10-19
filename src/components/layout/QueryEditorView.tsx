@@ -1,15 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  BookmarkPlus,
+  Check,
   CheckCircle2,
   ChevronDown,
+  Columns2,
+  Database,
   Download,
+  Ellipsis,
+  FolderOpen,
+  Save,
+  ListStart,
+  ListTree,
   Loader2,
+  Pin,
   Play,
-  Sparkles,
+  RotateCcw,
   Square,
-  TableProperties,
-  FileCode,
+  Undo2,
+  Unplug,
+  WandSparkles,
+  X,
+  type LucideIcon,
 } from "lucide-react";
 import { format as formatSql } from "sql-formatter";
 import type { WorkspaceTab } from "@/types";
@@ -34,6 +47,11 @@ import { useT } from "@/store/i18n";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { connColorValue } from "@/lib/connColors";
+import { modKey } from "@/lib/platform";
+import { useElementWidth } from "@/lib/useElementWidth";
+import { openSqlFile } from "@/lib/sqlFile";
+import { toast } from "@/store/toasts";
 
 type RunState =
   | { kind: "idle" }
@@ -41,13 +59,13 @@ type RunState =
   | {
       kind: "ok";
       result: QueryResult;
+      results?: QueryResult[];
       // For multi-statement scripts: how many statements ran in total, and a summary.
       statements?: { count: number; affected_total: number };
     }
   | { kind: "error"; message: string; failedAt?: number };
 
-const INITIAL = `-- ⌘↵ runs the query. Select text to run just that.
-SELECT 1 AS hello, 'world' AS greet;`;
+const INITIAL = `SELECT 1 AS hello, 'world' AS greet;`;
 
 // SQL primed via sessionStorage when opening a "DDL" or history tab — see
 // ConnectionTree.showDdlTab and HistoryPanel.onOpen.
@@ -109,6 +127,17 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     [tab.id]
   );
   const [state, setState] = useState<RunState>({ kind: "idle" });
+  const [sessionStatus, setSessionStatus] = useState({ connected: false, in_transaction: false });
+  const [backendNeedsReset, setBackendNeedsReset] = useState(false);
+  const [stopConfirm, setStopConfirm] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const [pendingTargetId, setPendingTargetId] = useState<string | null>(null);
+  const [pins, setPins] = useState<Array<{ id: string; result: QueryResult; label: string }>>([]);
+  const [comparePins, setComparePins] = useState(false);
+  const sessionTarget = useRef<string>();
+  useEffect(() => {
+    useWorkspace.setState((workspace) => ({tabs: workspace.tabs.map((item) => item.id === tab.id && item.transactionOpen !== sessionStatus.in_transaction ? {...item, transactionOpen: sessionStatus.in_transaction} : item)}));
+  }, [tab.id, sessionStatus.in_transaction]);
   const connections = useConnections((s) => s.list);
   const statusMap = useConnections((s) => s.status);
   const [userTargetId, setUserTargetId] = useState<string | undefined>(
@@ -123,12 +152,26 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const selectionGetter = useRef<(() => string | undefined) | null>(null);
   const t = useT();
 
+  useEffect(() => {
+    const bound = sessionTarget.current;
+    if (bound && statusMap[bound] !== "connected") {
+      if (sessionStatus.in_transaction) setBackendNeedsReset(true);
+      setSessionStatus((old) => old.connected ? {...old, connected: false} : old);
+    }
+  }, [statusMap, sessionStatus.in_transaction]);
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(
     null
   );
   const [explainMenu, setExplainMenu] = useState<{ x: number; y: number } | null>(
     null
   );
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
+  const [connectingTarget, setConnectingTarget] = useState(false);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  // Below this width the toolbar collapses secondary labels to icons instead
+  // of letting flex items squash their text into vertical stacks.
+  const toolbarWidth = useElementWidth(toolbarRef);
+  const compact = toolbarWidth > 0 && toolbarWidth < 720;
   // Non-read statement awaiting explicit confirmation before EXPLAIN ANALYZE.
   const [analyzeConfirm, setAnalyzeConfirm] = useState<string | null>(null);
   const [saveSnippetOpen, setSaveSnippetOpen] = useState(false);
@@ -167,7 +210,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
 
   const handleSaveSnippet = async () => {
     if (!snippetName.trim()) {
-      setSnippetError("Name is required");
+      setSnippetError(t("snippets.err.name_required"));
       return;
     }
     try {
@@ -197,8 +240,8 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const targetId = useMemo<string | undefined>(() => {
     const isLive = (id?: string) =>
       !!id && connected.some((c) => c.id === id);
-    if (isLive(userTargetId)) return userTargetId;
-    if (isLive(tab.connectionId)) return tab.connectionId;
+    if (userTargetId) return isLive(userTargetId) ? userTargetId : undefined;
+    if (tab.connectionId) return isLive(tab.connectionId) ? tab.connectionId : undefined;
     return connected[0]?.id;
   }, [userTargetId, tab.connectionId, connected]);
 
@@ -288,12 +331,19 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         setState({ kind: "error", message: t("query.placeholder") });
         return;
       }
+      const sessionChanged = sessionTarget.current !== targetId;
+      if (sessionTarget.current && sessionTarget.current !== targetId) {
+        await api.closeEditorSession(tab.id);
+        setBackendNeedsReset(false);
+        setSessionStatus({ connected: false, in_transaction: false });
+      }
       const now = Date.now();
-      if (now - lastRunRef.current < 150) return;
+      if (!sessionChanged && now - lastRunRef.current < 150) return;
       lastRunRef.current = now;
 
       const source = (opts?.selection ?? sql).trim();
       if (!source) return;
+      sessionTarget.current = targetId;
 
       // Redis runs each line as one command; never split by `;`.
       const isRedis = targetCfg?.driver === "redis";
@@ -333,7 +383,8 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             targetId,
             statements,
             session.qid,
-            !managesOwnTxn
+            !managesOwnTxn,
+            tab.id
           );
           if (!owns()) return;
           if (outcome.status === "failed") {
@@ -360,7 +411,8 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           }
           setState({
             kind: "ok",
-            result: outcome.result,
+            result: outcome.results?.at(-1) ?? outcome.result,
+            results: outcome.results ?? [outcome.result],
             statements: {
               count: outcome.statements,
               affected_total: outcome.total_affected,
@@ -370,13 +422,15 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         }
         let last: QueryResult | null = null;
         let affected_total = 0;
+        const results: QueryResult[] = [];
         for (let i = 0; i < statements.length; i++) {
           if (session.cancelled) {
             if (owns()) setState({ kind: "error", message: t("query.err.cancelled") });
             return;
           }
           try {
-            last = await api.executeQuery(targetId, statements[i], session.qid);
+            last = await api.executeQuery(targetId, statements[i], session.qid, isRedis ? undefined : tab.id);
+            results.push(last);
             if (last.rows_affected != null) affected_total += last.rows_affected;
           } catch (e) {
             if (!owns()) return;
@@ -406,6 +460,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         setState({
           kind: "ok",
           result: last,
+          results,
           statements:
             statements.length > 1
               ? { count: statements.length, affected_total }
@@ -419,9 +474,10 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           });
       } finally {
         if (runSessionRef.current === session) runSessionRef.current = null;
+        void api.editorSessionStatus(tab.id).then((next) => { if (next) { setSessionStatus(next); if (next.needs_reset) setBackendNeedsReset(true); } }).catch(() => {});
       }
     },
-    [sql, targetId, targetCfg, t]
+    [sql, targetId, targetCfg, t, tab.id]
   );
 
   // Visual EXPLAIN: PG, MySQL (FORMAT=JSON) and SQLite plans open as a graph
@@ -537,6 +593,51 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     }
   }, [sql, targetCfg?.driver]);
 
+  const chooseTarget = async (nextId: string) => {
+    const next = nextId || undefined;
+    if (next && useConnections.getState().status[next] !== "connected") {
+      setConnectingTarget(true);
+      try {
+        await useConnections.getState().connect(next);
+      } catch (error) {
+        setState({ kind: "error", message: String(error) });
+        return;
+      } finally {
+        setConnectingTarget(false);
+      }
+    }
+    if (sessionTarget.current && sessionTarget.current !== next && sessionStatus.in_transaction) {
+      setPendingTargetId(nextId);
+      return;
+    }
+    if (sessionTarget.current && sessionTarget.current !== next) {
+      try {
+        await api.closeEditorSession(tab.id);
+        sessionTarget.current = undefined;
+        setBackendNeedsReset(false);
+        setSessionStatus({ connected: false, in_transaction: false });
+      } catch (error) {
+        setState({ kind: "error", message: String(error) });
+        return;
+      }
+    }
+    setUserTargetId(next);
+  };
+
+  const confirmTargetChange = async () => {
+    const next = pendingTargetId || undefined;
+    setPendingTargetId(null);
+    try {
+      await api.closeEditorSession(tab.id);
+      sessionTarget.current = undefined;
+      setBackendNeedsReset(false);
+      setSessionStatus({ connected: false, in_transaction: false });
+      setUserTargetId(next);
+    } catch (error) {
+      setState({ kind: "error", message: String(error) });
+    }
+  };
+
   // ⌘⇧F from the global shortcut layer formats the active tab's buffer.
   useEffect(() => {
     const handler = () => {
@@ -554,14 +655,32 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         }))
       : [];
   const gridRows = state.kind === "ok" ? state.result.rows : [];
+  const sessionLost = backendNeedsReset || !!targetId && sessionTarget.current === targetId && !sessionStatus.connected && sessionStatus.in_transaction;
+
+  const running = state.kind === "running";
+  const isRedis = targetCfg?.driver === "redis";
+  const txBusy = !targetId || !!targetCfg?.read_only || running || sessionLost;
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 bg-surface/30 px-3">
-        {state.kind === "running" ? (
+    <div
+      className="flex h-full flex-col"
+      onKeyDown={(e) => {
+        // CodeMirror owns ⌘↵ while focused; elsewhere in the tab (toolbar,
+        // result grid) the same chord still runs the buffer.
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !(e.target as HTMLElement).closest(".cm-editor")) {
+          e.preventDefault();
+          if (!running) void run();
+        }
+      }}
+    >
+      <div
+        ref={toolbarRef}
+        className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border/70 bg-surface/30 px-2.5"
+      >
+        {running ? (
           <button
-            onClick={onStop}
-            className="flex h-7 items-center gap-1.5 rounded-md bg-danger/90 px-2.5 text-[12px] font-medium text-white transition-colors hover:bg-danger"
+            onClick={() => (sessionStatus.in_transaction ? setStopConfirm(true) : onStop())}
+            className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-danger/90 px-2.5 text-[12px] font-medium text-white shadow-soft transition-colors hover:bg-danger"
           >
             <Square className="h-3 w-3 fill-current" />
             {t("query.toolbar.stop")}
@@ -570,35 +689,57 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           <button
             onClick={() => void run()}
             disabled={!targetId}
-            className="flex h-7 items-center gap-1.5 rounded-md bg-brand px-2.5 text-[12px] font-medium text-brand-foreground transition-colors hover:bg-brand/90 disabled:opacity-50"
+            title={`${t("query.toolbar.run")} (${modKey}↵)`}
+            className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-brand px-2.5 text-[12px] font-medium text-brand-foreground shadow-soft transition-colors hover:bg-brand/90 disabled:opacity-50"
           >
-            <Play className="h-3.5 w-3.5" />
+            <Play className="h-3.5 w-3.5 fill-current" />
             {t("query.toolbar.run")}
-            <span className="ml-1 rounded bg-black/20 px-1 text-[10px]">⌘↵</span>
+            {!compact && (
+              <kbd className="rounded bg-black/15 px-1 font-sans text-[10px] font-normal">{modKey}↵</kbd>
+            )}
           </button>
         )}
-        <div className="flex items-center">
-          <button
+
+        {targetCfg && !isRedis && (
+          <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border/60 bg-background/40 p-0.5">
+            {sessionLost ? (
+              <>
+                <span className="flex items-center gap-1 whitespace-nowrap px-1.5 text-[11px] font-medium text-danger">
+                  <Unplug className="h-3 w-3" />
+                  {t("query.tx.lost")}
+                </span>
+                <ToolButton icon={RotateCcw} label={t("query.tx.reset")} compact={compact} disabled={running} onClick={() => setResetConfirm(true)} />
+              </>
+            ) : sessionStatus.in_transaction ? (
+              <>
+                <span className="flex items-center gap-1.5 whitespace-nowrap rounded-md bg-warning/15 px-2 py-1 text-[11px] font-medium text-warning">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
+                  {t("query.tx.open")}
+                </span>
+                <ToolButton icon={Check} label={t("query.tx.commit")} compact={compact} disabled={txBusy || !sessionStatus.connected} onClick={() => void run({ selection: "COMMIT" })} className="hover:text-success" />
+                <ToolButton icon={Undo2} label={t("query.tx.rollback")} compact={compact} disabled={txBusy || !sessionStatus.connected} onClick={() => void run({ selection: "ROLLBACK" })} className="hover:text-danger" />
+              </>
+            ) : (
+              <ToolButton icon={ListStart} label={t("query.tx.begin")} compact={compact} disabled={txBusy} onClick={() => void run({ selection: "BEGIN" })} />
+            )}
+          </div>
+        )}
+
+        <div className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+
+        <div className="flex shrink-0 items-center">
+          <ToolButton
+            icon={ListTree}
+            label={t("query.toolbar.explain")}
+            compact={compact}
             onClick={onExplain}
-            disabled={
-              state.kind === "running" ||
-              !targetId ||
-              targetCfg?.driver === "redis"
-            }
-            title={
-              targetCfg?.driver === "redis"
-                ? "EXPLAIN is not applicable to Redis"
-                : t("query.toolbar.explain")
-            }
-            className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
-          >
-            <TableProperties className="h-3.5 w-3.5" />
-            {t("query.toolbar.explain")}
-          </button>
+            disabled={running || !targetId || isRedis}
+            title={isRedis ? t("query.toolbar.explain_na") : t("query.toolbar.explain")}
+          />
           {targetCfg?.driver === "postgres" && (
             <button
               onClick={(e) => setExplainMenu({ x: e.clientX, y: e.clientY })}
-              disabled={state.kind === "running" || !targetId}
+              disabled={running || !targetId}
               title={t("query.toolbar.explain_options")}
               aria-label={t("query.toolbar.explain_options")}
               className="flex h-7 items-center rounded-md px-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
@@ -616,7 +757,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
                 {
                   id: "explain",
                   label: t("query.toolbar.explain"),
-                  icon: TableProperties,
+                  icon: ListTree,
                   onClick: onExplain,
                 },
                 {
@@ -631,84 +772,108 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             onClose={() => setExplainMenu(null)}
           />
         )}
-        <button
+        <ToolButton
+          icon={WandSparkles}
+          label={t("query.toolbar.format")}
+          compact={compact}
           onClick={onFormat}
-          disabled={!sql.trim() || targetCfg?.driver === "redis"}
-          title={
-            targetCfg?.driver === "redis"
-              ? "Formatting is not applicable to Redis commands"
-              : "Format SQL"
-          }
-          className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
-        >
-          <Sparkles className="h-3.5 w-3.5" />
-          Format
-        </button>
-        <button
+          disabled={!sql.trim() || isRedis}
+          title={isRedis ? t("query.toolbar.format_na") : `${t("query.toolbar.format")} (${modKey}⇧F)`}
+        />
+        <ToolButton
+          icon={BookmarkPlus}
+          label={t("query.toolbar.save_snippet")}
+          compact={compact}
           onClick={() => setSaveSnippetOpen(true)}
           disabled={!sql.trim()}
-          title="Save as Snippet"
-          className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+        />
+
+        <div className="min-w-2 flex-1" />
+
+        <label
+          title={t("query.toolbar.target")}
+          className={cn(
+            "flex h-7 min-w-0 max-w-[240px] shrink items-center gap-1.5 rounded-md border pl-2 pr-1 text-[12px] transition-colors focus-within:border-brand/60",
+            targetId ? "border-border/70 bg-surface" : "border-warning/60 bg-warning/10 text-warning"
+          )}
         >
-          <FileCode className="h-3.5 w-3.5" />
-          Save Snippet
-        </button>
-        <div className="mx-2 h-4 w-px bg-border" />
-        <label className="flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
-          {t("query.toolbar.target")}
+          {targetCfg ? (
+            <span
+              className="h-4 w-[3px] shrink-0 rounded-full"
+              style={{ background: connColorValue(targetCfg.color) ?? "hsl(var(--border))" }}
+            />
+          ) : (
+            <Database className="h-3.5 w-3.5 shrink-0" />
+          )}
           <select
             value={targetId ?? ""}
-            onChange={(e) => setUserTargetId(e.target.value || undefined)}
-            className={cn(
-              "h-7 rounded-md border bg-surface px-2 text-[12px] text-foreground focus:border-brand/60 focus:outline-none",
-              targetId
-                ? "border-border/70"
-                : "border-warning/60 bg-warning/10 text-warning"
-            )}
+            disabled={running || connectingTarget}
+            onChange={(e) => void chooseTarget(e.target.value)}
+            aria-label={t("query.toolbar.target")}
+            className="min-w-0 flex-1 cursor-pointer truncate bg-transparent pr-1 text-foreground outline-none"
           >
             <option value="">
-              {connected.length === 0
+              {connections.length === 0
                 ? t("query.toolbar.no_connections")
                 : t("query.toolbar.pick_target")}
             </option>
-            {connected.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
+            {connected.length > 0 && (
+              <optgroup label={t("query.toolbar.group_connected")}>
+                {connected.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {connections.length > connected.length && (
+              <optgroup label={t("query.toolbar.group_disconnected")}>
+                {connections
+                  .filter((c) => statusMap[c.id] !== "connected")
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+              </optgroup>
+            )}
           </select>
+          {connectingTarget && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />}
         </label>
-        <div className="flex-1" />
         <button
-          onClick={(e) => setExportMenu({ x: e.clientX, y: e.clientY })}
-          disabled={state.kind !== "ok" || state.result.rows.length === 0}
-          className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+          onClick={(e) => setMoreMenu({ x: e.clientX, y: e.clientY })}
+          title={t("common.more")}
+          aria-label={t("common.more")}
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
         >
-          <Download className="h-3.5 w-3.5" />
-          {t("query.toolbar.export")}
+          <Ellipsis className="h-4 w-4" />
         </button>
-        {exportMenu && (
+        {moreMenu && (
           <ContextMenu
-            x={exportMenu.x}
-            y={exportMenu.y}
+            x={moreMenu.x}
+            y={moreMenu.y}
             items={[
               {
-                id: "csv",
-                label: t("query.toolbar.export_csv"),
-                onClick: () => void onExport("csv"),
+                id: "open_sql_file", label: t("table_tools.open_sql"), icon: FolderOpen,
+                disabled: running || isRedis,
+                onClick: () => void openSqlFile(targetId).catch((cause) => toast.error(t("table_tools.open_sql_failed"), String(cause))),
               },
               {
-                id: "json",
-                label: t("query.toolbar.export_json"),
-                onClick: () => void onExport("json"),
+                id: "save_sql_file", label: t("query.save_sql_file"), icon: Save,
+                disabled: running || isRedis,
+                onClick: () => void saveTextFile(`${tab.title.replace(/\.sql$/i, "") || "query"}.sql`, sql, "sql")
+                  .catch((cause) => toast.error(t("query.save_sql_file_failed"), String(cause))),
               },
               {
-                id: "sql",
-                label: t("query.toolbar.export_sql"),
-                onClick: () => void onExport("sql"),
+                id: "reset",
+                label: t("query.tx.reset"),
+                icon: RotateCcw,
+                danger: true,
+                disabled: running || isRedis || !targetId,
+                onClick: () => setResetConfirm(true),
               },
             ]}
-            onClose={() => setExportMenu(null)}
+            onClose={() => setMoreMenu(null)}
           />
         )}
       </div>
@@ -724,7 +889,101 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           />
         </div>
         <div className="flex h-[40%] min-h-[180px] shrink-0 flex-col bg-background">
-          <ResultHeader state={state} tab={tab} />
+          <ResultHeader state={state} targetName={targetCfg?.name} />
+          {(state.kind === "ok" || pins.length > 0) && (
+            <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border/70 px-2 text-[11.5px]">
+              <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+                {state.kind === "ok" &&
+                  (state.results ?? [state.result]).map((result, index) => (
+                    <button
+                      key={index}
+                      onClick={() => setState({ ...state, result })}
+                      className={cn(
+                        "flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-muted-foreground hover:bg-accent hover:text-foreground",
+                        state.result === result && "bg-brand/15 text-brand hover:bg-brand/20 hover:text-brand"
+                      )}
+                    >
+                      {t("query.result.tab", { n: index + 1 })}
+                      <span className="text-[10.5px] opacity-70">
+                        {result.columns.length
+                          ? t("query.result.rows_short", { n: result.rows.length })
+                          : t("query.result.affected_short", { n: result.rows_affected ?? 0 })}
+                      </span>
+                    </button>
+                  ))}
+              </div>
+              {state.kind === "ok" && (
+                <ToolButton
+                  icon={Pin}
+                  label={t("query.result.pin")}
+                  compact={compact}
+                  onClick={() =>
+                    setPins((prev) => [
+                      ...prev.slice(-3),
+                      {
+                        id: crypto.randomUUID(),
+                        result: state.result,
+                        label: `${tab.title} · ${new Date().toLocaleTimeString()}`,
+                      },
+                    ])
+                  }
+                />
+              )}
+              {pins.length > 0 && (
+                <ToolButton
+                  icon={Columns2}
+                  label={t("query.result.compare", { n: pins.length })}
+                  compact={compact}
+                  onClick={() => setComparePins(!comparePins)}
+                  className={cn(comparePins && "bg-accent text-foreground")}
+                />
+              )}
+              <ToolButton
+                icon={Download}
+                label={t("query.toolbar.export")}
+                compact={compact}
+                onClick={(e) => setExportMenu({ x: e.clientX, y: e.clientY })}
+                disabled={state.kind !== "ok" || state.result.rows.length === 0}
+              />
+              {exportMenu && (
+                <ContextMenu
+                  x={exportMenu.x}
+                  y={exportMenu.y}
+                  items={[
+                    { id: "csv", label: t("query.toolbar.export_csv"), onClick: () => void onExport("csv") },
+                    { id: "json", label: t("query.toolbar.export_json"), onClick: () => void onExport("json") },
+                    { id: "sql", label: t("query.toolbar.export_sql"), onClick: () => void onExport("sql") },
+                  ]}
+                  onClose={() => setExportMenu(null)}
+                />
+              )}
+            </div>
+          )}
+          {comparePins && pins.length > 0 && (
+            <div className="flex h-44 min-h-[160px] shrink-0 divide-x divide-border border-b border-border">
+              {pins.slice(-2).map((pin) => (
+                <div key={pin.id} className="flex min-w-0 flex-1 flex-col">
+                  <div className="flex h-7 shrink-0 items-center justify-between gap-2 border-b border-border/60 bg-surface-muted/30 px-2 text-[11px] text-muted-foreground">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <Pin className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{pin.label}</span>
+                    </span>
+                    <button
+                      aria-label={t("query.result.unpin")}
+                      title={t("query.result.unpin")}
+                      onClick={() => setPins(pins.filter((p) => p.id !== pin.id))}
+                      className="grid h-5 w-5 place-items-center rounded hover:bg-accent hover:text-foreground"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <div className="min-h-0 flex-1">
+                    <DataGrid columns={pin.result.columns} rows={pin.result.rows} driver={targetCfg?.driver} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           {state.kind === "ok" && state.result.truncated && (
             <div className="flex shrink-0 items-center gap-2 border-b border-warning/40 bg-warning/10 px-3 py-1.5 text-[11.5px] text-warning">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -770,6 +1029,45 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         </div>
       </div>
 
+      <ConfirmDialog
+        open={stopConfirm}
+        title={t("query.stop_tx.title")}
+        message={t("query.stop_tx.message")}
+        confirmLabel={t("query.stop_tx.confirm")}
+        cancelLabel={t("query.stop_tx.keep")}
+        danger
+        onConfirm={onStop}
+        onClose={() => setStopConfirm(false)}
+      />
+      <ConfirmDialog
+        open={resetConfirm}
+        title={t("query.reset.title")}
+        message={t("query.reset.message")}
+        confirmLabel={t("query.reset.confirm")}
+        cancelLabel={t("common.cancel")}
+        danger
+        onConfirm={() => {
+          void api
+            .closeEditorSession(tab.id)
+            .then(() => {
+              sessionTarget.current = undefined;
+              setBackendNeedsReset(false);
+              setSessionStatus({ connected: false, in_transaction: false });
+            })
+            .catch((error) => setState({ kind: "error", message: String(error) }));
+        }}
+        onClose={() => setResetConfirm(false)}
+      />
+      <ConfirmDialog
+        open={pendingTargetId != null}
+        title={t("query.switch_tx.title")}
+        message={t("query.switch_tx.message")}
+        confirmLabel={t("query.switch_tx.confirm")}
+        cancelLabel={t("common.cancel")}
+        danger
+        onConfirm={() => void confirmTargetChange()}
+        onClose={() => setPendingTargetId(null)}
+      />
       <Modal
         open={saveSnippetOpen}
         onClose={() => setSaveSnippetOpen(false)}
@@ -801,7 +1099,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
               value={snippetName}
               onChange={(e) => setSnippetName(e.target.value)}
               className="h-8 rounded-md border border-border/70 bg-surface px-3 text-[12.5px] text-foreground focus:border-brand/60 focus:outline-none"
-              placeholder="e.g. Find users by email"
+              placeholder={t("snippets.name_placeholder")}
             />
           </div>
           <div className="flex flex-col gap-1.5">
@@ -813,7 +1111,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
               value={snippetDesc}
               onChange={(e) => setSnippetDesc(e.target.value)}
               className="h-8 rounded-md border border-border/70 bg-surface px-3 text-[12.5px] text-foreground focus:border-brand/60 focus:outline-none"
-              placeholder="Optional description"
+              placeholder={t("snippets.desc_placeholder")}
             />
           </div>
         </div>
@@ -835,7 +1133,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   );
 }
 
-function ResultHeader({ state, tab }: { state: RunState; tab: WorkspaceTab }) {
+function ResultHeader({ state, targetName }: { state: RunState; targetName?: string }) {
   const t = useT();
   return (
     <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-surface-muted/30 px-3 text-[11.5px] text-muted-foreground">
@@ -848,8 +1146,10 @@ function ResultHeader({ state, tab }: { state: RunState; tab: WorkspaceTab }) {
       {state.kind === "ok" && state.statements && (
         <span className="flex items-center gap-1.5 text-success">
           <CheckCircle2 className="h-3 w-3" />
-          {state.statements.count} statements ·{" "}
-          {state.statements.affected_total} affected
+          {t("query.result.statements", {
+            n: state.statements.count,
+            affected: state.statements.affected_total,
+          })}
           <span className="text-muted-foreground">
             · {state.result.elapsed_ms}ms
           </span>
@@ -875,7 +1175,38 @@ function ResultHeader({ state, tab }: { state: RunState; tab: WorkspaceTab }) {
         </span>
       )}
       <div className="flex-1" />
-      <span>{tab.title}</span>
+      {targetName && (
+        <span className="truncate text-[11px] text-muted-foreground/80">{targetName}</span>
+      )}
     </div>
+  );
+}
+
+function ToolButton({
+  icon: Icon,
+  label,
+  compact,
+  className,
+  title,
+  ...props
+}: {
+  icon: LucideIcon;
+  label: string;
+  compact?: boolean;
+} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      type="button"
+      title={title ?? label}
+      aria-label={label}
+      {...props}
+      className={cn(
+        "flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40",
+        className
+      )}
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0" />
+      {!compact && <span>{label}</span>}
+    </button>
   );
 }

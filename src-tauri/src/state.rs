@@ -150,6 +150,7 @@ pub struct AppState {
     pub store: ConnectionStore,
     pub history: HistoryStore,
     pub snippets: SnippetStore,
+    pub sessions: Arc<crate::db::sessions::EditorSessions>,
     pub pools: Arc<RwLock<HashMap<String, DbPool>>>,
     /// Live SSH tunnels keyed by connection id. Kept alive for as long as the
     /// pool is connected; dropping the entry tears down the forward.
@@ -163,9 +164,10 @@ pub struct AppState {
     pub connecting: Arc<RwLock<HashSet<String>>>,
     /// In-flight dump/restore client processes keyed by the frontend-issued
     /// operation id. Cancelling the token makes the command runner kill the
-    /// spawned child instead of waiting for it. SQLite operations have no
-    /// child process and are never registered here.
+    /// spawned child instead of waiting for it. SQLite operations use the same token at async/copy boundaries;
+    /// their temporary files are never persisted after observed cancellation.
     pub io_ops: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    pub io_progress: Arc<RwLock<HashMap<String, crate::commands::dump::IoProgress>>>,
     /// Local, in-memory MCP server and short-lived per-connection grants.
     /// Tokens and authorization state are never persisted to disk.
     pub(crate) mcp: McpRuntime,
@@ -177,11 +179,13 @@ impl AppState {
             store,
             history,
             snippets,
+            sessions: Arc::new(crate::db::sessions::EditorSessions::default()),
             pools: Arc::new(RwLock::new(HashMap::new())),
             tunnels: Arc::new(RwLock::new(HashMap::new())),
             queries: Arc::new(RwLock::new(HashMap::new())),
             connecting: Arc::new(RwLock::new(HashSet::new())),
             io_ops: Arc::new(RwLock::new(HashMap::new())),
+            io_progress: Arc::new(RwLock::new(HashMap::new())),
             mcp: McpRuntime::default(),
         }
     }
@@ -226,7 +230,7 @@ impl AppState {
     /// Abort a running query by its frontend-issued id. Returns whether a
     /// matching in-flight query existed.
     pub fn cancel_query(&self, qid: &str) -> bool {
-        match self.queries.write().remove(qid) {
+        match self.queries.read().get(qid) {
             Some(h) => {
                 h.abort();
                 true
@@ -262,10 +266,9 @@ impl AppState {
 
     /// Cancel a running dump/restore by its frontend-issued id. The runner
     /// kills the child process on its next poll. Returns false when no such
-    /// operation is registered — notably SQLite dumps/restores, which have no
-    /// external process and therefore cannot be cancelled this way.
+    /// operation is registered — SQLite dumps/restores observe this token at their async boundary.
     pub fn cancel_io_op(&self, op_id: &str) -> bool {
-        match self.io_ops.write().remove(op_id) {
+        match self.io_ops.read().get(op_id) {
             Some(token) => {
                 token.cancel();
                 true

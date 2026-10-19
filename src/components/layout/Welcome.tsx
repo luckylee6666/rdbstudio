@@ -1,5 +1,5 @@
 import { Database, Plus, Terminal, Workflow, FileDown } from "lucide-react";
-import { useWorkspace } from "@/store/workspace";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useLayout } from "@/store/layout";
 import { useT } from "@/store/i18n";
 import { enterKey, modKey } from "@/lib/platform";
@@ -15,34 +15,33 @@ export function Welcome() {
       icon: Database,
       titleKey: "welcome.action.new_connection",
       descKey: "welcome.action.new_connection.desc",
-      accent: "from-sky-500/20 to-sky-500/0 text-sky-300",
+      accent: "from-sky-500/20 to-sky-500/0 text-sky-700 dark:text-sky-300",
       run: () => setActivity("connections"),
     },
     {
       icon: Terminal,
       titleKey: "welcome.action.new_query",
       descKey: "welcome.action.new_query.desc",
-      accent: "from-emerald-500/20 to-emerald-500/0 text-emerald-300",
+      accent: "from-emerald-500/20 to-emerald-500/0 text-emerald-700 dark:text-emerald-300",
       run: () =>
         openTab({
           id: `query:${crypto.randomUUID()}`,
           kind: "query",
-          title: t("welcome.action.new_query"),
-          subtitle: "Untitled",
+          title: nextQueryTitle(),
         }),
     },
     {
       icon: Workflow,
       titleKey: "welcome.action.new_er",
       descKey: "welcome.action.new_er.desc",
-      accent: "from-violet-500/20 to-violet-500/0 text-violet-300",
+      accent: "from-violet-500/20 to-violet-500/0 text-violet-700 dark:text-violet-300",
       run: () => openPalette(),
     },
     {
       icon: FileDown,
       titleKey: "welcome.action.import",
       descKey: "welcome.action.import.desc",
-      accent: "from-amber-500/20 to-amber-500/0 text-amber-300",
+      accent: "from-amber-500/20 to-amber-500/0 text-amber-700 dark:text-amber-300",
       run: () => setActivity("connections"),
     },
   ];

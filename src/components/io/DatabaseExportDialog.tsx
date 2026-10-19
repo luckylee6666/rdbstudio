@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
@@ -6,10 +7,12 @@ import {
   DatabaseBackup,
   FolderOpen,
   Loader2,
+  Square,
 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select } from "@/components/ui/Field";
+import { DbIoProgress } from "./DbIoProgress";
 import { api, type DumpReport } from "@/lib/api";
 import { useT } from "@/store/i18n";
 import type { DriverKind } from "@/types";
@@ -33,7 +36,12 @@ export function DatabaseExportDialog({
 }: Props) {
   const [content, setContent] = useState<ExportContent>("structure_data");
   const [path, setPath] = useState("");
+  const [operationId, setOperationId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
+  const activeOperationRef = useRef<string | null>(null);
+  const cancelRequestedOperationRef = useRef<string | null>(null);
   const [report, setReport] = useState<DumpReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const t = useT();
@@ -44,6 +52,10 @@ export function DatabaseExportDialog({
     setPath("");
     setReport(null);
     setError(null);
+    setCancelPending(false);
+    setCancelRequested(false);
+    activeOperationRef.current = null;
+    cancelRequestedOperationRef.current = null;
   }, [open, database]);
 
   const fileExtension =
@@ -66,7 +78,13 @@ export function DatabaseExportDialog({
       setError(t("export.err.path"));
       return;
     }
+    const id = crypto.randomUUID();
+    activeOperationRef.current = id;
+    cancelRequestedOperationRef.current = null;
+    setOperationId(id);
     setRunning(true);
+    setCancelPending(false);
+    setCancelRequested(false);
     setReport(null);
     setError(null);
     try {
@@ -74,13 +92,47 @@ export function DatabaseExportDialog({
         connectionId,
         path,
         database,
-        content === "structure_only"
+        content === "structure_only",
+        id
       );
-      setReport(result);
+      if (activeOperationRef.current === id) setReport(result);
     } catch (cause) {
-      setError(String(cause));
+      if (activeOperationRef.current === id) {
+        setError(
+          cancelRequestedOperationRef.current === id &&
+            isCancellationError(cause)
+            ? t("database_export.cancelled")
+            : String(cause)
+        );
+      }
     } finally {
-      setRunning(false);
+      if (activeOperationRef.current === id) {
+        activeOperationRef.current = null;
+        cancelRequestedOperationRef.current = null;
+        setRunning(false);
+        setOperationId(null);
+        setCancelPending(false);
+        setCancelRequested(false);
+      }
+    }
+  };
+
+  const cancel = async () => {
+    const id = operationId;
+    if (!id || activeOperationRef.current !== id || cancelPending || cancelRequested) return;
+    setCancelPending(true);
+    setError(null);
+    try {
+      const found = await invoke<boolean>("cancel_db_io", { operationId: id });
+      if (activeOperationRef.current !== id) return;
+      if (found) {
+        cancelRequestedOperationRef.current = id;
+        setCancelRequested(true);
+      } else setError(t("database_export.cancel_unavailable"));
+    } catch (cause) {
+      if (activeOperationRef.current === id) setError(String(cause));
+    } finally {
+      if (activeOperationRef.current === id) setCancelPending(false);
     }
   };
 
@@ -98,6 +150,7 @@ export function DatabaseExportDialog({
       footer={
         <>
           <div className="mr-auto flex min-w-0 items-center gap-2 text-[12px]">
+            {running && <DbIoProgress operationId={operationId} />}
             {running && (
               <span className="flex items-center gap-1.5 text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -120,9 +173,26 @@ export function DatabaseExportDialog({
               </span>
             )}
           </div>
-          <Button variant="ghost" onClick={onClose} disabled={running}>
-            {report ? t("common.done") : t("common.cancel")}
-          </Button>
+          {running ? (
+            <Button
+              variant="danger"
+              onClick={cancel}
+              disabled={cancelPending || cancelRequested}
+            >
+              {cancelPending || cancelRequested ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Square className="h-3.5 w-3.5" />
+              )}
+              {cancelPending || cancelRequested
+                ? t("database_export.canceling")
+                : t("database_export.cancel")}
+            </Button>
+          ) : (
+            <Button variant="ghost" onClick={onClose}>
+              {report ? t("common.done") : t("common.cancel")}
+            </Button>
+          )}
           <Button variant="primary" onClick={run} disabled={running}>
             <DatabaseBackup className="h-3.5 w-3.5" />
             {t("export.btn.export")}
@@ -176,6 +246,10 @@ export function DatabaseExportDialog({
 
 function safeFileName(value: string): string {
   return value.replace(/[^\w.-]+/g, "_") || "database";
+}
+
+function isCancellationError(error: unknown): boolean {
+  return /\b(cancelled|canceled)\b/i.test(String(error));
 }
 
 function formatBytes(bytes: number): string {

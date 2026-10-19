@@ -28,6 +28,7 @@ import { explainWrap } from "@/lib/sql";
 import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
+import { useTheme } from "@/components/theme/ThemeProvider";
 
 type LoadState =
   | { kind: "loading" }
@@ -49,6 +50,7 @@ function nodeHeight(n: PlanNode): number {
 const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
 export function ExplainView({ tab }: { tab: WorkspaceTab }) {
+  const { theme } = useTheme();
   const connectionId = tab.connectionId;
   const sql = tab.sql ?? "";
   const connections = useConnections((s) => s.list);
@@ -270,8 +272,9 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
             nodesConnectable={false}
+            colorMode={theme}
             fitView
-            fitViewOptions={{ padding: 0.25 }}
+            fitViewOptions={{ padding: 0.25, minZoom: 0.6, maxZoom: 1.1 }}
             proOptions={{ hideAttribution: true }}
             minZoom={0.25}
             maxZoom={1.75}
@@ -284,11 +287,7 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
             />
             <Controls
               showInteractive={false}
-              style={{
-                background: "hsl(var(--surface-elevated))",
-                border: "1px solid hsl(var(--border))",
-                borderRadius: 8,
-              }}
+              className="overflow-hidden rounded-lg border border-border !shadow-soft"
             />
           </ReactFlow>
         )}
@@ -351,7 +350,7 @@ function PlanNodeCard({ data }: NodeProps<Node<PlanNodeData>>) {
         </span>
       </div>
       {plan.detail && (
-        <div className="truncate font-mono text-[10.5px] leading-[15px] text-sky-300">
+        <div className="truncate font-mono text-[10.5px] leading-[15px] text-sky-600 dark:text-sky-300">
           {plan.detail}
         </div>
       )}
@@ -399,6 +398,10 @@ function buildGraph(
     }
   };
   roots.forEach(walkEdges);
+  // SQLite plans are a list of top-level steps in loop order; chain them
+  // for layout only so they stack top-to-bottom instead of spreading into a
+  // row that fitView then shrinks into unreadable text.
+  for (let i = 1; i < roots.length; i++) g.setEdge(roots[i - 1].id, roots[i].id);
   dagre.layout(g);
 
   const nodes: Node[] = flat.map((n) => {

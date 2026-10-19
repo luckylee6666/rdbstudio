@@ -1,4 +1,4 @@
-import { Globe, Moon, Search, Sun } from "lucide-react";
+import { Globe, Moon, PanelLeft, PanelRight, Search, Sun } from "lucide-react";
 import mark from "@/assets/mark.png";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTheme } from "@/components/theme/ThemeProvider";
@@ -36,6 +36,7 @@ async function handleDoubleClick(e: React.MouseEvent) {
 export function TitleBar() {
   const { theme, toggle } = useTheme();
   const openPalette = useLayout((s) => s.openPalette);
+  const { sidebarVisible, inspectorVisible, toggleSidebar, toggleInspector } = useLayout();
   const t = useT();
   const { lang, toggle: toggleLang } = useI18n();
   return (
@@ -77,6 +78,31 @@ export function TitleBar() {
       </button>
 
       <div className="ml-auto flex items-center gap-1">
+        <button
+          onClick={toggleSidebar}
+          title={`${t("layout.toggle_sidebar")} (${isMac ? "⌘B" : "Ctrl+B"})`}
+          aria-label={t("layout.toggle_sidebar")}
+          aria-pressed={sidebarVisible}
+          className={cn(
+            "grid h-7 w-7 place-items-center rounded-md hover:bg-accent hover:text-foreground",
+            sidebarVisible ? "text-foreground/80" : "text-muted-foreground/60"
+          )}
+        >
+          <PanelLeft className="h-4 w-4" />
+        </button>
+        <button
+          onClick={toggleInspector}
+          title={t("layout.toggle_inspector")}
+          aria-label={t("layout.toggle_inspector")}
+          aria-pressed={inspectorVisible}
+          className={cn(
+            "grid h-7 w-7 place-items-center rounded-md hover:bg-accent hover:text-foreground",
+            inspectorVisible ? "text-foreground/80" : "text-muted-foreground/60"
+          )}
+        >
+          <PanelRight className="h-4 w-4" />
+        </button>
+        <div className="mx-1 h-4 w-px bg-border" />
         <button
           onClick={toggleLang}
           title={t("activity.lang.toggle")}

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Info, Loader2 } from "lucide-react";
+import { Loader2, PanelRightClose } from "lucide-react";
 import { api } from "@/lib/api";
 import type { TableDescription } from "@/types";
 import { useT } from "@/store/i18n";
 import { useWorkspace } from "@/store/workspace";
+import { useLayout } from "@/store/layout";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -18,6 +19,7 @@ export function Inspector() {
   );
   const [desc, setDesc] = useState<TableDescription | null>(null);
   const [loading, setLoading] = useState(false);
+  const toggleInspector = useLayout((s) => s.toggleInspector);
   const t = useT();
 
   const inspectable =
@@ -54,16 +56,22 @@ export function Inspector() {
   }, [activeTab?.id, inspectable]);
 
   return (
-    <aside className="hidden w-[300px] shrink-0 overflow-y-auto border-l border-border/70 bg-surface/40 xl:block">
+    <aside className="hidden w-[280px] shrink-0 overflow-y-auto border-l border-border/70 bg-surface/40 xl:block">
       <div className="flex items-center justify-between px-3 pb-2 pt-3">
         <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           {t("inspector.title")}
         </div>
-        {loading ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-        ) : (
-          <Info className="h-3.5 w-3.5 text-muted-foreground" />
-        )}
+        <div className="flex items-center gap-1">
+          {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+          <button
+            onClick={toggleInspector}
+            title={t("layout.hide_inspector")}
+            aria-label={t("layout.hide_inspector")}
+            className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <PanelRightClose className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
       {desc ? (
         <div className="space-y-4 px-3 pb-4 text-[12.5px]">

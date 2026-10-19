@@ -254,7 +254,11 @@ export type TabKind =
   | "welcome"
   | "er"
   | "explain"
-  | "redis-key";
+  | "redis-key"
+  | "sync"
+  | "search"
+  | "objects"
+  | "redis-tools";
 
 export interface WorkspaceTab {
   id: string;
@@ -265,6 +269,8 @@ export interface WorkspaceTab {
   table?: string;
   subtitle?: string;
   dirty?: boolean;
+  /** Runtime only: closing this tab requires rolling back open work. */
+  transactionOpen?: boolean;
   /** Pre-applied filters for table-data tabs (e.g. FK jumps). */
   initialFilters?: Filter[];
   /** Explain tabs: the SQL whose plan is visualized (persisted with the tab). */
@@ -273,6 +279,9 @@ export interface WorkspaceTab {
   // (string/hash/list/set/zset/stream/ReJSON-RL/...).
   redisKey?: string;
   redisType?: string;
+  /** Object tools opened directly from a schema tree entry. */
+  objectKind?: "event" | "sequence";
+  objectName?: string;
 }
 
 export interface Snippet {

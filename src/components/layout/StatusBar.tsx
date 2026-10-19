@@ -4,6 +4,7 @@ import { connColorValue } from "@/lib/connColors";
 import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { useWorkspace } from "@/store/workspace";
+import { tabDisplay } from "@/lib/tabTitles";
 
 export function StatusBar() {
   const activeTab = useWorkspace((s) =>
@@ -83,7 +84,7 @@ export function StatusBar() {
       {activeTab && (
         <>
           <span>·</span>
-          <span className="max-w-[240px] truncate">{activeTab.title}</span>
+          <span className="max-w-[240px] truncate">{tabDisplay(activeTab, t).title}</span>
         </>
       )}
     </footer>

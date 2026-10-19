@@ -3,6 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::history::HistoryEntry;
 use crate::state::AppState;
 use tauri::State;
+use std::sync::Arc;
 
 #[tauri::command]
 pub async fn execute_query(
@@ -10,7 +11,10 @@ pub async fn execute_query(
     id: String,
     sql: String,
     query_id: Option<String>,
+    session_id: Option<String>,
+    record_history: Option<bool>,
 ) -> AppResult<QueryResult> {
+    let generation = session_id.as_ref().map(|_| state.sessions.lease(&id)).transpose()?;
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
@@ -46,13 +50,20 @@ pub async fn execute_query(
     // its id is registered: a duplicate id is rejected (and aborted) before it
     // starts, and a cancel arriving right after the spawn still lands.
     let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+    let id_for_task = id.clone();
     let task_sql = sql.clone();
+    let sessions = Arc::clone(&state.sessions);
     let task = tokio::spawn(async move {
         if start_rx.await.is_err() {
             return Err(AppError::msg("query cancelled"));
         }
         if read_only {
             execute_readonly(&pool, &task_sql).await
+        } else if let Some(session_id) = session_id {
+            match sessions.execute(&id_for_task, &session_id, generation.expect("session lease"), &pool, &[task_sql], false).await? {
+                ScriptOutcome::Ok { result, .. } => Ok(result),
+                ScriptOutcome::Failed { error, .. } => Err(AppError::msg(error)),
+            }
         } else {
             execute(&pool, &task_sql).await
         }
@@ -95,7 +106,11 @@ pub async fn execute_query(
             at: at.clone(),
         },
     };
-    let _ = state.history.push(entry);
+    // Background reads issued by the UI itself (key viewers, server
+    // monitors) are not the user's queries and stay out of the history.
+    if record_history.unwrap_or(true) {
+        let _ = state.history.push(entry);
+    }
 
     result
 }
@@ -110,10 +125,13 @@ pub async fn execute_script(
     id: String,
     sqls: Vec<String>,
     query_id: Option<String>,
+    session_id: Option<String>,
     // False when the script drives its own BEGIN/COMMIT: it still runs on one
     // connection, but rdbstudio must not wrap (or roll back) it.
     atomic: bool,
 ) -> AppResult<ScriptOutcome> {
+    if sqls.is_empty() || sqls.len() > 128 { return Err(AppError::msg("scripts must contain 1 to 128 statements")); }
+    let generation = session_id.as_ref().map(|_| state.sessions.lease(&id)).transpose()?;
     let pool = state
         .get_pool(&id)
         .ok_or_else(|| AppError::msg("not connected"))?;
@@ -140,6 +158,8 @@ pub async fn execute_script(
 
     let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
     let task_sqls = sqls.clone();
+    let sessions = Arc::clone(&state.sessions);
+    let id_for_task = id.clone();
     let task = tokio::spawn(async move {
         if start_rx.await.is_err() {
             return Err(AppError::msg("query cancelled"));
@@ -148,6 +168,8 @@ pub async fn execute_script(
             // Nothing writes, so each statement runs behind the database's own
             // read-only mode instead of inside a transaction of ours.
             crate::db::exec::execute_script_readonly(&pool, &task_sqls).await
+        } else if let Some(session_id) = session_id {
+            sessions.execute(&id_for_task, &session_id, generation.expect("session lease"), &pool, &task_sqls, atomic).await
         } else {
             crate::db::exec::execute_script(&pool, &task_sqls, atomic).await
         }
@@ -357,4 +379,15 @@ pub fn list_history(state: State<'_, AppState>, limit: Option<usize>) -> Vec<His
 #[tauri::command]
 pub fn clear_history(state: State<'_, AppState>) -> AppResult<()> {
     state.history.clear()
+}
+
+#[tauri::command]
+pub async fn close_editor_session(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
+    state.sessions.close(&session_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn editor_session_status(state: State<'_, AppState>, session_id: String) -> AppResult<crate::db::sessions::SessionStatus> {
+    Ok(state.sessions.status(&session_id).await)
 }

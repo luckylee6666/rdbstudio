@@ -61,6 +61,7 @@ import { toast } from "@/store/toasts";
 import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
 import { ImportDialog } from "@/components/io/ImportDialog";
+import { DbIoProgress } from "@/components/io/DbIoProgress";
 import { DatabaseExportDialog } from "@/components/io/DatabaseExportDialog";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
@@ -71,11 +72,16 @@ import { CreateTableDialog } from "./CreateTableDialog";
 import { RedisKeyDialog } from "./RedisKeyDialog";
 import { NavicatImportDialog } from "./NavicatImportDialog";
 import { McpAccessDialog } from "./McpAccessDialog";
+import { RedisNamespaceTree } from "./RedisNamespaceTree";
+import { CopyTableDialog } from "./CopyTableDialog";
+import { TableMaintenanceDialog } from "./TableMaintenanceDialog";
+import { SchemaObjectTree } from "./SchemaObjectTree";
 import { PromptDialog } from "@/components/ui/PromptDialog";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useConnections, type ConnStatus } from "@/store/connections";
-import { useWorkspace } from "@/store/workspace";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { copyText } from "@/lib/clipboard";
+import { openSqlFile } from "@/lib/sqlFile";
 
 function iconFor(kind: string, expanded: boolean): LucideIcon {
   switch (kind) {
@@ -732,7 +738,7 @@ function ConnectionBranch({
     });
     if (!dest) return;
     // Client tools can be killed from the UI; SQLite VACUUM runs in-process.
-    const opId = isSqlite ? null : crypto.randomUUID();
+    const opId = crypto.randomUUID();
     setIoOpId(opId);
     setIoBusy("dump");
     try {
@@ -771,7 +777,7 @@ function ConnectionBranch({
 
   const doRestore = async (src: string) => {
     const isSqlite = cfg.driver === "sqlite";
-    const opId = isSqlite ? null : crypto.randomUUID();
+    const opId = crypto.randomUUID();
     setIoOpId(opId);
     setIoBusy("restore");
     try {
@@ -1011,7 +1017,7 @@ function ConnectionBranch({
           document.body
         )}
       <div
-        className="flex items-center gap-1 rounded-md hover:bg-accent/50"
+        className="group/row relative flex items-center gap-1 rounded-md hover:bg-accent/50"
         onContextMenu={(e) => {
           e.preventDefault();
           setRowCtx({ x: e.clientX, y: e.clientY });
@@ -1055,6 +1061,7 @@ function ConnectionBranch({
                 : `${cfg.host ?? "?"}${cfg.database ? " · " + cfg.database : ""}`}
             </div>
           </div>
+          {ioBusy && <div className="w-36 shrink-0"><DbIoProgress operationId={ioOpId} /></div>}
           {status === "connecting" || ioBusy ? (
             <Loader2 className="h-3 w-3 shrink-0 animate-spin text-warning" />
           ) : (
@@ -1069,8 +1076,10 @@ function ConnectionBranch({
         <div
           data-conn-drag-ignore
           className={cn(
-            "relative pr-1 opacity-0 group-hover:opacity-100",
-            ioBusy && ioOpId && "opacity-100"
+            // Overlay instead of a reserved column, so hidden actions never
+            // squeeze the connection name and showing them never reflows.
+            "absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-surface-elevated/95 p-0.5 opacity-0 shadow-soft ring-1 ring-border/60 transition-opacity group-focus-within/row:opacity-100 group-hover/row:opacity-100",
+            (ioBusy && ioOpId) || menuOpen ? "opacity-100" : "pointer-events-none group-hover/row:pointer-events-auto group-focus-within/row:pointer-events-auto"
           )}
         >
           {ioBusy && ioOpId && (
@@ -1269,6 +1278,10 @@ function ConnectionBranch({
               disabled: cfg.driver === "redis" || ioBusy != null,
               onClick: () => void doDump(),
             },
+            ...(cfg.driver !== "redis" ? [{
+              id: "open_sql_file", label: t("table_tools.open_sql"), icon: FileUp,
+              onClick: () => void openSqlFile(cfg.id).catch((cause) => toast.error(t("table_tools.open_sql_failed"), String(cause))),
+            } satisfies MenuEntry] : []),
             {
               id: "restore",
               label: t("conn.restore"),
@@ -1471,7 +1484,7 @@ function DatabaseNode({
                 openTab({
                   id: `query:${crypto.randomUUID()}`,
                   kind: "query",
-                  title: "Query",
+                  title: nextQueryTitle(),
                   subtitle: database,
                   connectionId,
                 }),
@@ -1510,6 +1523,7 @@ function DatabaseNode({
               onCreateKey={() => setRedisCreateOpen(true)}
             />
           )}
+          {driver !== "redis" && <SchemaObjectTree connectionId={connectionId} schema={passSchema} />}
         </div>
       )}
       <CreateTableDialog
@@ -1622,6 +1636,8 @@ function Folder({
   const [dropError, setDropError] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<TreeEntry | null>(null);
   const [copyTarget, setCopyTarget] = useState<TreeEntry | null>(null);
+  const [copyDataTarget, setCopyDataTarget] = useState<TreeEntry | null>(null);
+  const [maintenanceTarget, setMaintenanceTarget] = useState<TreeEntry | null>(null);
   const [truncateTarget, setTruncateTarget] = useState<TreeEntry | null>(null);
   // Entry name with a drop/rename/truncate in flight — its row shows a
   // spinner so slow DDL isn't silent until the refresh lands.
@@ -1632,6 +1648,11 @@ function Folder({
   const loadTables = useConnections((s) => s.loadTables);
   const branch = useConnections((s) => s.branches[connectionId]);
   const loadMoreRedisKeys = useConnections((s) => s.loadMoreRedisKeys);
+  const cfg = useConnections((s) => s.list.find((item) => item.id === connectionId));
+  const selectedKey = useWorkspace((s) => {
+    const tab = s.tabs.find((item) => item.id === s.activeTabId);
+    return tab?.kind === "redis-key" && tab.connectionId === connectionId ? tab.redisKey : null;
+  });
   const isKeysFolder = label === "Keys";
   const showLoadMore = isKeysFolder && branch?.redisDone === false;
   const loadingMore = !!branch?.redisLoadingMore;
@@ -1831,7 +1852,22 @@ function Folder({
           id: "copy_structure",
           label: t("tree.copy_structure"),
           icon: CopyPlus,
+          disabled: !!cfg?.read_only,
           onClick: () => setCopyTarget(e),
+        },
+        {
+          id: "copy_data",
+          label: t("table_tools.copy"),
+          icon: CopyPlus,
+          disabled: !!cfg?.read_only,
+          onClick: () => setCopyDataTarget(e),
+        },
+        {
+          id: "maintenance",
+          label: t("table_tools.maintenance"),
+          icon: Settings2,
+          disabled: !!cfg?.read_only,
+          onClick: () => setMaintenanceTarget(e),
         },
         {
           id: "truncate",
@@ -1887,19 +1923,29 @@ function Folder({
         ) : (
           <FolderClosed className="h-3.5 w-3.5" />
         )}
-        <span className="truncate">{label}</span>
+        <span className="truncate">{t(`tree.folder.${label.toLowerCase()}`)}</span>
         <span className="ml-auto text-[11px] tabular-nums">
           {filter ? `${visible.length}/${count}` : count}
         </span>
       </button>
       {effectiveOpen && (
         <div className="ml-4">
-          {visible.map((e) => {
+          {isKeysFolder ? <RedisNamespaceTree entries={entries} filter={filter} selectedKey={selectedKey}
+            onOpen={openData} onContextMenu={(entry, event) => {
+              event.preventDefault();
+              setCtx({ x: event.clientX, y: event.clientY, entry });
+            }} /> : visible.map((e) => {
             const Icon = iconFor(e.kind, false);
             return (
               <button
                 key={e.name}
                 onDoubleClick={() => openData(e)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    if (!event.repeat) openData(e);
+                  }
+                }}
                 onContextMenu={(ev) => {
                   ev.preventDefault();
                   setCtx({ x: ev.clientX, y: ev.clientY, entry: e });
@@ -1914,9 +1960,9 @@ function Folder({
                   <Icon
                     className={cn(
                       "h-3.5 w-3.5 shrink-0",
-                      e.kind === "table" && "text-sky-400",
-                      e.kind === "view" && "text-emerald-400",
-                      isRedisKeyKind(e.kind) && "text-rose-300/90"
+                      e.kind === "table" && "text-sky-600 dark:text-sky-400",
+                      e.kind === "view" && "text-emerald-600 dark:text-emerald-400",
+                      isRedisKeyKind(e.kind) && "text-rose-700 dark:text-rose-300/90"
                     )}
                   />
                 )}
@@ -1978,6 +2024,12 @@ function Folder({
         schema={schema}
         onClose={() => setImportTarget(null)}
       />
+      {copyDataTarget && <CopyTableDialog key={copyDataTarget.name} connectionId={connectionId}
+        table={copyDataTarget.name} schema={schema} onClose={() => setCopyDataTarget(null)}
+        onCopied={() => { void loadTables(connectionId, cacheKey, schema); }} />}
+      {maintenanceTarget && cfg && <TableMaintenanceDialog key={maintenanceTarget.name}
+        connectionId={connectionId} driver={cfg.driver} schema={schema} table={maintenanceTarget.name}
+        onClose={() => setMaintenanceTarget(null)} />}
       {dropTarget && (
         <ConfirmDialog
           open={!!dropTarget}

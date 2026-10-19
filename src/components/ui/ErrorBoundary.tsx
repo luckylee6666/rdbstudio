@@ -56,7 +56,7 @@ export class ErrorBoundary extends Component<Props, State> {
     return (
       <div className="flex h-full min-h-screen items-center justify-center bg-background p-8">
         <div className="w-full max-w-xl rounded-xl border border-rose-500/30 bg-surface-elevated p-6 shadow-elevated">
-          <div className="mb-3 flex items-center gap-2 text-rose-300">
+          <div className="mb-3 flex items-center gap-2 text-rose-700 dark:text-rose-300">
             <AlertTriangle className="h-5 w-5" />
             <h2 className="text-[15px] font-semibold">
               {tr("error.boundary.title")}
@@ -66,7 +66,7 @@ export class ErrorBoundary extends Component<Props, State> {
             {tr("error.boundary.body")}
           </p>
           <div className="mb-4 max-h-48 overflow-auto rounded-md border border-border/60 bg-surface/40 px-3 py-2 font-mono text-[11.5px] leading-snug text-foreground/90">
-            <div className="font-semibold text-rose-300">
+            <div className="font-semibold text-rose-700 dark:text-rose-300">
               {error.name}: {error.message}
             </div>
             {error.stack && (

@@ -47,6 +47,69 @@ describe("useConnections store", () => {
     expect(s.loaded).toBe(true);
   });
 
+  it("refresh adopts a live backend connection and its server version", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "list_connections") return [makeCfg("c1")];
+      if (cmd === "connection_status") return { id: "c1", connected: true, server_version: "16.2" };
+      if (cmd === "list_databases") return ["main"];
+      return undefined;
+    });
+
+    await useConnections.getState().refresh();
+
+    expect(useConnections.getState().status.c1).toBe("connected");
+    expect(useConnections.getState().versions.c1).toBe("16.2");
+    expect(useConnections.getState().branches.c1?.databases).toEqual(["main"]);
+  });
+
+  it("does not adopt a stale refresh result after a user disconnects", async () => {
+    let resolveStatus!: (value: { id: string; connected: boolean; server_version: string }) => void;
+    let markStatusStarted!: () => void;
+    const statusStarted = new Promise<void>((resolve) => { markStatusStarted = resolve; });
+    mockIPC((cmd) => {
+      if (cmd === "list_connections") return [makeCfg("c1")];
+      if (cmd === "connection_status") {
+        markStatusStarted();
+        return new Promise((resolve) => { resolveStatus = resolve; });
+      }
+      if (cmd === "disconnect") return null;
+      return undefined;
+    });
+
+    const refresh = useConnections.getState().refresh();
+    await statusStarted;
+    await useConnections.getState().disconnect("c1");
+    resolveStatus({ id: "c1", connected: true, server_version: "16.2" });
+    await refresh;
+
+    expect(useConnections.getState().status.c1).toBe("disconnected");
+    expect(useConnections.getState().versions.c1).toBeUndefined();
+  });
+
+  it("does not reintroduce a connection deleted during list refresh", async () => {
+    let resolveList!: (value: ConnectionConfig[]) => void;
+    let markListStarted!: () => void;
+    const listStarted = new Promise<void>((resolve) => { markListStarted = resolve; });
+    useConnections.setState({ list: [makeCfg("c1")], status: { c1: "connected" } });
+    mockIPC((cmd) => {
+      if (cmd === "list_connections") {
+        markListStarted();
+        return new Promise((resolve) => { resolveList = resolve; });
+      }
+      if (cmd === "delete_connection") return true;
+      return undefined;
+    });
+
+    const refresh = useConnections.getState().refresh();
+    await listStarted;
+    await useConnections.getState().remove("c1");
+    resolveList([makeCfg("c1")]);
+    await refresh;
+
+    expect(useConnections.getState().list).toEqual([]);
+    expect(useConnections.getState().status.c1).toBeUndefined();
+  });
+
   it("save appends a new connection and replaces existing by id", async () => {
     const existing = makeCfg("c1", { name: "old" });
     useConnections.setState({ list: [existing] });
@@ -72,6 +135,81 @@ describe("useConnections store", () => {
     expect(returned2).toEqual(fresh);
     const ids = useConnections.getState().list.map((c) => c.id).sort();
     expect(ids).toEqual(["c1", "c2"]);
+  });
+
+  it("save clears cached branch and version when the backend dropped the connection", async () => {
+    useConnections.setState({
+      list: [makeCfg("c1")],
+      status: { c1: "connected" },
+      versions: { c1: "old-version" },
+      branches: { c1: { databases: ["old-db"] } },
+    });
+    mockIPC((cmd, payload) => {
+      if (cmd === "save_connection") return (payload as { config: ConnectionConfig }).config;
+      if (cmd === "connection_status") return { id: "c1", connected: false, server_version: null };
+      return undefined;
+    });
+
+    await useConnections.getState().save(makeCfg("c1", { file_path: "/tmp/new.sqlite" }));
+
+    const state = useConnections.getState();
+    expect(state.status.c1).toBe("disconnected");
+    expect(state.branches.c1).toBeUndefined();
+    expect(state.versions.c1).toBeUndefined();
+  });
+
+  it("does not apply a stale save status after a new connect completes", async () => {
+    let resolveStatus!: (value: { id: string; connected: boolean; server_version: null }) => void;
+    let markStatusStarted!: () => void;
+    const statusStarted = new Promise<void>((resolve) => { markStatusStarted = resolve; });
+    useConnections.setState({ list: [makeCfg("c1")], status: { c1: "connected" } });
+    mockIPC((cmd, payload) => {
+      if (cmd === "save_connection") return (payload as { config: ConnectionConfig }).config;
+      if (cmd === "connection_status") {
+        markStatusStarted();
+        return new Promise((resolve) => { resolveStatus = resolve; });
+      }
+      if (cmd === "connect") return { id: "c1", connected: true, server_version: "new-version" };
+      if (cmd === "list_databases") return ["fresh-db"];
+      return undefined;
+    });
+
+    const saving = useConnections.getState().save(makeCfg("c1", { file_path: "/tmp/edited.sqlite" }));
+    await statusStarted;
+    await useConnections.getState().connect("c1");
+    resolveStatus({ id: "c1", connected: false, server_version: null });
+    await saving;
+
+    const state = useConnections.getState();
+    expect(state.status.c1).toBe("connected");
+    expect(state.versions.c1).toBe("new-version");
+    expect(state.branches.c1?.databases).toEqual(["fresh-db"]);
+  });
+
+  it("applies a save result when an unrelated connection changes", async () => {
+    let resolveSave!: (value: ConnectionConfig) => void;
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    useConnections.setState({ list: [makeCfg("c1"), makeCfg("c2")] });
+    mockIPC((cmd) => {
+      if (cmd === "save_connection") {
+        markSaveStarted();
+        return new Promise((resolve) => { resolveSave = resolve; });
+      }
+      if (cmd === "connect") return { id: "c2", connected: true, server_version: "8.0" };
+      if (cmd === "list_databases") return ["main"];
+      if (cmd === "connection_status") return { id: "c1", connected: false, server_version: null };
+      return undefined;
+    });
+
+    const edited = makeCfg("c1", { name: "renamed" });
+    const saving = useConnections.getState().save(edited);
+    await saveStarted;
+    await useConnections.getState().connect("c2");
+    resolveSave(edited);
+    await saving;
+
+    expect(useConnections.getState().list.find((c) => c.id === "c1")?.name).toBe("renamed");
   });
 
   it("remove strips the connection from list, status and branches", async () => {

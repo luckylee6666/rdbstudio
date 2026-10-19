@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowRightLeft,
   Plus,
+  Radio,
+  Search,
   Table2,
   Terminal,
+  Users,
   X,
   XCircle,
   Sparkles,
@@ -12,16 +16,21 @@ import {
   Network,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { useWorkspace } from "@/store/workspace";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useT } from "@/store/i18n";
 import { ContextMenu } from "@/components/ui/ContextMenu";
+import { tabDisplay } from "@/lib/tabTitles";
 import type { TabKind } from "@/types";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Welcome } from "./Welcome";
 import { TableDataView } from "./TableDataView";
 import { QueryEditorView } from "./QueryEditorView";
 import { DesignerView } from "./DesignerView";
 import { ERView } from "./ERView";
 import { ExplainView } from "./ExplainView";
+import { ConnectionToolsView } from "./ConnectionToolsView";
+import { GlobalSearchView } from "./GlobalSearchView";
+import { SyncView } from "./SyncView";
 import { RedisKeyView } from "./RedisKeyView";
 
 function tabIcon(kind: TabKind) {
@@ -40,6 +49,14 @@ function tabIcon(kind: TabKind) {
       return Sparkles;
     case "redis-key":
       return Key;
+    case "sync":
+      return ArrowRightLeft;
+    case "search":
+      return Search;
+    case "objects":
+      return Users;
+    case "redis-tools":
+      return Radio;
     default:
       return Terminal;
   }
@@ -55,6 +72,9 @@ export function WorkspaceTabs() {
     closeToRight,
     closeAll,
     openTab,
+    pendingClose,
+    confirmClose,
+    cancelClose,
   } = useWorkspace();
   const active = tabs.find((t) => t.id === activeTabId) ?? null;
   const stripRef = useRef<HTMLDivElement>(null);
@@ -75,14 +95,25 @@ export function WorkspaceTabs() {
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-background">
       <div className="flex h-10 shrink-0 items-center border-b border-border/70 bg-surface/40">
-        <div ref={stripRef} className="flex min-w-0 flex-1 items-end overflow-x-auto">
+        <div
+          ref={stripRef}
+          onWheel={(e) => {
+            // A vertical wheel over the strip pages through tabs sideways.
+            if (e.deltaY !== 0 && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+              e.currentTarget.scrollLeft += e.deltaY;
+            }
+          }}
+          className="scrollbar-none flex min-w-0 flex-1 items-end overflow-x-auto"
+        >
           {tabs.map((tab) => {
             const Icon = tabIcon(tab.kind);
             const isActive = tab.id === activeTabId;
+            const { title, subtitle } = tabDisplay(tab, t);
             return (
               <button
                 key={tab.id}
                 data-tab-id={tab.id}
+                title={subtitle ? `${title} — ${subtitle}` : title}
                 onClick={() => setActive(tab.id)}
                 onAuxClick={(e) => {
                   // Middle-click closes, matching every browser/IDE tab strip.
@@ -96,21 +127,27 @@ export function WorkspaceTabs() {
                   setCtx({ x: e.clientX, y: e.clientY, id: tab.id });
                 }}
                 className={cn(
-                  "group relative flex h-10 min-w-0 items-center gap-2 border-r border-border/70 px-3 text-[13px]",
+                  "group relative flex h-10 min-w-[104px] max-w-[240px] shrink-0 items-center gap-2 border-r border-border/70 pl-3 pr-2 text-[12.5px] transition-colors",
                   isActive
                     ? "bg-background text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
+                    : "text-muted-foreground hover:bg-surface/60 hover:text-foreground"
                 )}
               >
                 {isActive && (
                   <span className="absolute inset-x-0 top-0 h-[2px] bg-brand" />
                 )}
-                <Icon className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate max-w-[160px]">{tab.title}</span>
-                {tab.subtitle && (
-                  <span className="truncate text-[11px] text-muted-foreground">
-                    {tab.subtitle}
+                <Icon className={cn("h-3.5 w-3.5 shrink-0", isActive && "text-brand")} />
+                <span className="min-w-0 truncate">{title}</span>
+                {subtitle && (
+                  <span className="min-w-0 max-w-[96px] shrink truncate text-[11px] text-muted-foreground/80">
+                    {subtitle}
                   </span>
+                )}
+                {tab.transactionOpen && (
+                  <span
+                    title={t("query.tx.open")}
+                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
+                  />
                 )}
                 <span
                   role="button"
@@ -118,8 +155,9 @@ export function WorkspaceTabs() {
                     e.stopPropagation();
                     closeTab(tab.id);
                   }}
+                  aria-label={t("tabs.close")}
                   className={cn(
-                    "ml-1 grid h-4 w-4 place-items-center rounded opacity-0 hover:bg-accent group-hover:opacity-100",
+                    "ml-auto grid h-5 w-5 shrink-0 place-items-center rounded opacity-0 hover:bg-accent group-hover:opacity-100",
                     isActive && "opacity-60"
                   )}
                 >
@@ -134,8 +172,7 @@ export function WorkspaceTabs() {
             openTab({
               id: `query:${crypto.randomUUID()}`,
               kind: "query",
-              title: "Query",
-              subtitle: "Untitled",
+              title: nextQueryTitle(),
             })
           }
           className="mx-2 grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -151,9 +188,11 @@ export function WorkspaceTabs() {
         {active?.kind === "table-data" && (
           <TableDataView key={active.id} tab={active} />
         )}
-        {active?.kind === "query" && (
-          <QueryEditorView key={active.id} tab={active} />
-        )}
+        {tabs.filter((tab) => tab.kind === "query").map((tab) => (
+          <div key={tab.id} hidden={tab.id !== activeTabId} className="h-full">
+            <QueryEditorView tab={tab} />
+          </div>
+        ))}
         {active?.kind === "designer" && (
           <DesignerView key={active.id} tab={active} />
         )}
@@ -161,11 +200,25 @@ export function WorkspaceTabs() {
         {active?.kind === "explain" && (
           <ExplainView key={active.id} tab={active} />
         )}
+        {active?.kind === "search" && <GlobalSearchView key={active.id} />}
+        {active?.kind === "sync" && <SyncView key={active.id} />}
+        {(active?.kind === "objects" || active?.kind === "redis-tools") && <ConnectionToolsView key={active.id} kind={active.kind}
+          initialConnectionId={active.connectionId} initialSchema={active.schema} objectKind={active.objectKind} objectName={active.objectName} />}
         {active?.kind === "redis-key" && (
           <RedisKeyView key={active.id} tab={active} />
         )}
       </div>
 
+      <ConfirmDialog
+        open={pendingClose !== null}
+        onClose={cancelClose}
+        onConfirm={confirmClose}
+        danger
+        title={t("tabs.close_tx.title")}
+        message={t("tabs.close_tx.message")}
+        confirmLabel={t("tabs.close_tx.confirm")}
+        cancelLabel={t("common.cancel")}
+      />
       {ctx && (
         <ContextMenu
           x={ctx.x}

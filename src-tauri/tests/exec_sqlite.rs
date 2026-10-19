@@ -171,7 +171,9 @@ async fn execute_script_commits_all_statements() {
             result,
             total_affected,
             statements,
+            results,
         } => {
+            assert_eq!(results.len(), 3, "all statements retain their result sets");
             assert_eq!(statements, 3);
             assert_eq!(total_affected, 2, "two UPDATEs of one row each");
             assert_eq!(

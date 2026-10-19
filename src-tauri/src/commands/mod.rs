@@ -5,9 +5,14 @@ pub mod dump;
 pub mod io;
 pub mod mcp;
 pub mod meta;
+pub mod maintenance;
+pub mod native_copy;
 pub mod navicat;
 pub mod query;
 pub mod schema;
+pub mod schema_objects;
+pub mod event_tools;
+pub mod sequence_tools;
 pub mod snippets;
 
 use crate::error::{AppError, AppResult};
@@ -28,4 +33,15 @@ pub(crate) fn ensure_writable(state: &AppState, id: &str) -> AppResult<()> {
 #[tauri::command]
 pub fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+pub mod objects;
+
+pub mod sync;
+
+pub mod redis_tools;
+
+#[tauri::command]
+pub fn restart_application<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    app.restart();
 }

@@ -2,10 +2,10 @@ import type { DriverKind } from "@/types";
 import { cn } from "@/lib/cn";
 
 const palette: Record<DriverKind, { bg: string; label: string }> = {
-  postgres: { bg: "bg-sky-500/20 text-sky-300 ring-sky-400/30", label: "PG" },
-  mysql: { bg: "bg-amber-500/20 text-amber-300 ring-amber-400/30", label: "MY" },
-  sqlite: { bg: "bg-violet-500/20 text-violet-300 ring-violet-400/30", label: "SL" },
-  redis: { bg: "bg-rose-500/20 text-rose-300 ring-rose-400/30", label: "RD" },
+  postgres: { bg: "bg-sky-500/15 text-sky-700 ring-sky-500/30 dark:bg-sky-500/20 dark:text-sky-300 dark:ring-sky-400/30", label: "PG" },
+  mysql: { bg: "bg-amber-500/15 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30", label: "MY" },
+  sqlite: { bg: "bg-violet-500/15 text-violet-700 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/30", label: "SL" },
+  redis: { bg: "bg-rose-500/15 text-rose-700 ring-rose-500/30 dark:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-400/30", label: "RD" },
 };
 
 export function DriverBadge({

@@ -30,6 +30,45 @@ pub struct RestoreReport {
     pub elapsed_ms: u64,
 }
 
+#[derive(Clone, Serialize)]
+pub struct IoProgress {
+    pub stage: String,
+    pub bytes_done: u64,
+    pub bytes_total: Option<u64>,
+    pub elapsed_ms: u64,
+    #[serde(skip)]
+    started: std::time::Instant,
+    #[serde(skip)]
+    output_path: Option<PathBuf>,
+    #[serde(skip)]
+    input: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+    #[serde(skip)]
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+fn progress_start(state: &AppState, id: Option<&str>, stage: &str, output: Option<&str>, input_size: Option<u64>) {
+    if let Some(id) = id {
+        state.io_progress.write().insert(id.to_owned(), IoProgress { stage: stage.to_owned(), bytes_done: 0, bytes_total: input_size, elapsed_ms: 0, started: std::time::Instant::now(), output_path: output.map(PathBuf::from), input: None, counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) });
+    }
+}
+fn progress_input(state: &AppState, id: Option<&str>, file: &std::fs::File) -> AppResult<()> {
+    if let Some(id) = id {
+        if let Some(progress) = state.io_progress.write().get_mut(id) { progress.input = Some(std::sync::Arc::new(std::sync::Mutex::new(file.try_clone()?))); }
+    }
+    Ok(())
+}
+#[tauri::command]
+pub fn db_io_progress(state: State<'_, AppState>, operation_id: String) -> Option<IoProgress> {
+    use std::io::Seek;
+    let mut progress = state.io_progress.read().get(&operation_id).cloned()?;
+    progress.elapsed_ms = progress.started.elapsed().as_millis() as u64;
+    progress.bytes_done = progress.counter.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(path) = &progress.output_path { progress.bytes_done = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0); }
+    if let Some(file) = &progress.input { progress.bytes_done = file.lock().ok()?.stream_position().unwrap_or(0).min(progress.bytes_total.unwrap_or(u64::MAX)); }
+    if progress.bytes_total.is_some_and(|total| total > 0 && progress.bytes_done >= total) { progress.stage = "applying".into(); }
+    Some(progress)
+}
+
 /// Locate a client binary by name. PATH first, then common install locations
 /// the app doesn't inherit: a launchd-spawned macOS GUI app gets a minimal
 /// PATH, and Windows installers put the tools in versioned Program Files
@@ -90,6 +129,15 @@ fn find_binary(names: &[&str]) -> Option<PathBuf> {
 
 /// Effective server address: the SSH tunnel's local forward when one is up,
 /// otherwise the configured host/port.
+async fn operation_password(state: &AppState, config: &ConnectionConfig) -> AppResult<Option<String>> {
+    let _lifecycle = crate::state::sqlite_file_operation_lock().lock().await;
+    let current = state.store.get(&config.id).ok_or_else(|| AppError::msg("connection was removed while starting the operation"))?;
+    if crate::db::build_url(&current)? != crate::db::build_url(config)? || current.ssh.as_ref().map(|ssh| (&ssh.host, &ssh.username, &ssh.key_path)) != config.ssh.as_ref().map(|ssh| (&ssh.host, &ssh.username, &ssh.key_path)) {
+        return Err(AppError::msg("connection changed while starting the operation; retry"));
+    }
+    secret::read_password(&config.id)
+}
+
 fn effective_addr(state: &AppState, cfg: &ConnectionConfig) -> AppResult<(String, u16)> {
     if let Some(t) = state.tunnels.read().get(&cfg.id) {
         return Ok((t.local_host.clone(), t.local_port));
@@ -187,6 +235,16 @@ fn apply_mysql_dump_scope(cmd: &mut tokio::process::Command, database: Option<&s
     }
 }
 
+fn apply_mysql_dump_options(cmd: &mut tokio::process::Command) {
+    // This is a portable application backup, not a replication-topology
+    // bootstrap. Embedding GTID_PURGED makes restoring into a server with its
+    // own execution history fail (and can alter replication state).
+    cmd.arg("--loose-set-gtid-purged=OFF")
+        .arg("--hex-blob")
+        .arg("--routines")
+        .arg("--events");
+}
+
 fn apply_pg_dump_scope(cmd: &mut tokio::process::Command, schema: Option<&str>, schema_only: bool) {
     if let Some(schema) = schema {
         cmd.arg("--schema").arg(schema);
@@ -231,7 +289,11 @@ fn resolved_output(path: &Path) -> std::io::Result<PathBuf> {
     })?))
 }
 
+#[cfg(test)]
 async fn dump_sqlite(pool: &sqlx::SqlitePool, dest: &Path, schema_only: bool) -> AppResult<()> {
+    dump_sqlite_progress(pool, dest, schema_only, None).await
+}
+async fn dump_sqlite_progress(pool: &sqlx::SqlitePool, dest: &Path, schema_only: bool, progress: Option<(&AppState, &str)>) -> AppResult<()> {
     // A save-dialog overwrite confirmation must never authorize destroying
     // the database being exported, including its journal/WAL or path aliases.
     let destination = resolved_output(dest)?;
@@ -273,6 +335,9 @@ async fn dump_sqlite(pool: &sqlx::SqlitePool, dest: &Path, schema_only: bool) ->
     let staged = tempfile::Builder::new()
         .prefix(".rdbstudio-dump-")
         .tempfile_in(parent)?;
+    if let Some((state, id)) = progress {
+        if let Some(record) = state.io_progress.write().get_mut(id) { record.output_path = Some(staged.path().to_owned()); }
+    }
     let path = staged.path().to_string_lossy();
     if schema_only {
         dump_sqlite_schema(pool, &path).await?;
@@ -307,6 +372,9 @@ const SQLITE_HEADER: [u8; 16] = *b"SQLite format 3\0";
 /// copy lands in a sibling temp file before being renamed over the target, so
 /// a failed or interrupted copy never leaves a truncated database behind.
 pub async fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
+    restore_sqlite_progress(target, src, None).await
+}
+async fn restore_sqlite_progress(target: &Path, src: &Path, counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>) -> AppResult<()> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut source = std::fs::File::open(src)
@@ -338,7 +406,8 @@ pub async fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
         .prefix(".rdbstudio-restore-")
         .tempfile_in(parent)?;
     let tmp = staged.path().to_path_buf();
-    if let Err(e) = std::io::copy(&mut source, staged.as_file_mut())
+    let mut output = CountingWriter { output: staged.as_file_mut(), counter };
+    if let Err(e) = std::io::copy(&mut source, &mut output)
         .and_then(|_| staged.as_file().sync_all())
     {
         return Err(AppError::msg(format!(
@@ -401,6 +470,19 @@ pub async fn restore_sqlite_file(target: &Path, src: &Path) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+struct CountingWriter<'a> {
+    output: &'a mut std::fs::File,
+    counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+}
+impl std::io::Write for CountingWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let count = std::io::Write::write(self.output, buffer)?;
+        if let Some(counter) = &self.counter { counter.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed); }
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(self.output) }
 }
 
 fn canonical_target_path(path: &Path) -> AppResult<PathBuf> {
@@ -518,6 +600,7 @@ impl Drop for IoOpGuard<'_> {
     fn drop(&mut self) {
         if let Some(op_id) = self.op_id.take() {
             self.state.finish_io_op(&op_id);
+            self.state.io_progress.write().remove(&op_id);
         }
     }
 }
@@ -528,11 +611,12 @@ async fn run_tool(
     cancel: Option<CancellationToken>,
 ) -> AppResult<()> {
     use tokio::io::AsyncReadExt;
+    if cancel.as_ref().is_some_and(|token| token.is_cancelled()) { return Err(AppError::msg(format!("{tool} cancelled"))); }
 
     // Capture output while the process runs: waiting without draining a full
     // pipe would deadlock, and a cancel needs to distinguish "killed by the
     // button" from "tool failed".
-    cmd.stdout(std::process::Stdio::piped())
+    cmd.kill_on_drop(true).stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = cmd
         .spawn()
@@ -540,14 +624,17 @@ async fn run_tool(
     let mut child_stdout = child.stdout.take().expect("stdout is piped");
     let mut child_stderr = child.stderr.take().expect("stderr is piped");
     let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = child_stdout.read_to_end(&mut buf).await;
-        buf
+        let _ = tokio::io::copy(&mut child_stdout, &mut tokio::io::sink()).await;
     });
     let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = child_stderr.read_to_end(&mut buf).await;
-        buf
+        let mut tail = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(count) = child_stderr.read(&mut chunk).await {
+            if count == 0 { break; }
+            tail.extend_from_slice(&chunk[..count]);
+            if tail.len() > 8192 { tail.drain(..tail.len()-8192); }
+        }
+        tail
     });
 
     let status = match &cancel {
@@ -583,6 +670,34 @@ async fn run_tool(
     Ok(())
 }
 
+fn staged_dump_file(dest: &Path) -> AppResult<tempfile::NamedTempFile> {
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    Ok(tempfile::Builder::new().prefix(".rdbstudio-dump-").tempfile_in(parent)?)
+}
+
+async fn run_staged_dump(
+    cmd: tokio::process::Command,
+    tool: &str,
+    cancel: Option<CancellationToken>,
+    staged: tempfile::NamedTempFile,
+    dest: &Path,
+) -> AppResult<u64> {
+    run_tool(cmd, tool, cancel.clone()).await?;
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(AppError::msg(format!("{tool} cancelled")));
+    }
+    let bytes = staged.as_file().metadata()?.len();
+    if bytes == 0 {
+        return Err(AppError::msg(format!("{tool} produced an empty dump")));
+    }
+    staged.as_file().sync_all()?;
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(AppError::msg(format!("{tool} cancelled")));
+    }
+    staged.persist(dest).map_err(|e| AppError::msg(format!("failed to save dump: {}", e.error)))?;
+    Ok(bytes)
+}
+
 #[tauri::command]
 pub async fn dump_database(
     state: State<'_, AppState>,
@@ -598,6 +713,8 @@ pub async fn dump_database(
         .ok_or_else(|| AppError::msg("unknown connection"))?;
     let start = std::time::Instant::now();
 
+    let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id.clone())?;
+    progress_start(&state, operation_id.as_deref(), "writing", None, None);
     match cfg.driver {
         DriverKind::Redis => {
             return Err(AppError::msg(
@@ -616,10 +733,14 @@ pub async fn dump_database(
                     return Err(AppError::msg("SQLite only supports the main database"));
                 }
             }
-            dump_sqlite(p, Path::new(&dest_path), schema_only).await?;
+            if let Some(token) = cancel {
+                tokio::select! { biased;
+                    _ = token.cancelled() => return Err(AppError::msg("SQLite dump cancelled")),
+                    result = dump_sqlite_progress(p, Path::new(&dest_path), schema_only, operation_id.as_deref().map(|id| (&*state, id))) => result?,
+                }
+            } else { dump_sqlite_progress(p, Path::new(&dest_path), schema_only, operation_id.as_deref().map(|id| (&*state, id))).await?; }
         }
         DriverKind::Postgres => {
-            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["pg_dump"]).ok_or_else(|| {
                 AppError::msg(
                     "pg_dump not found — install it (e.g. `brew install libpq`) and retry",
@@ -632,6 +753,10 @@ pub async fn dump_database(
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or("postgres");
+            let staged = staged_dump_file(Path::new(&dest_path))?;
+            if let Some(op_id) = operation_id.as_deref() {
+                if let Some(progress) = state.io_progress.write().get_mut(op_id) { progress.output_path = Some(staged.path().to_owned()); }
+            }
             let mut cmd = tokio::process::Command::new(bin);
             cmd.arg("--host")
                 .arg(&host)
@@ -642,19 +767,19 @@ pub async fn dump_database(
                 .arg("--no-password")
                 .arg("--format=plain")
                 .arg("--file")
-                .arg(&dest_path);
+                .arg(staged.path());
             apply_pg_dump_scope(&mut cmd, database.as_deref(), schema_only);
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--username").arg(u);
             }
-            if let Some(pw) = secret::read_password(&id)? {
+            if let Some(pw) = operation_password(&state, &cfg).await? {
                 cmd.env("PGPASSWORD", pw);
             }
             apply_pg_ssl(&mut cmd, &cfg, via_tunnel)?;
-            run_tool(cmd, "pg_dump", cancel).await?;
+            let bytes = run_staged_dump(cmd, "pg_dump", cancel, staged, Path::new(&dest_path)).await?;
+            return Ok(DumpReport { path: dest_path, bytes, elapsed_ms: start.elapsed().as_millis() as u64 });
         }
         DriverKind::Mysql => {
-            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["mysqldump", "mariadb-dump"]).ok_or_else(|| {
                 AppError::msg(
                     "mysqldump not found — install it (e.g. `brew install mysql-client`) and retry",
@@ -662,15 +787,19 @@ pub async fn dump_database(
             })?;
             let (host, port) = effective_addr(&state, &cfg)?;
             let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
+            let staged = staged_dump_file(Path::new(&dest_path))?;
+            if let Some(op_id) = operation_id.as_deref() {
+                if let Some(progress) = state.io_progress.write().get_mut(op_id) { progress.output_path = Some(staged.path().to_owned()); }
+            }
             let mut cmd = tokio::process::Command::new(bin);
             cmd.arg("--host")
                 .arg(&host)
                 .arg("--port")
                 .arg(port.to_string())
-                .arg("--single-transaction")
-                .arg("--routines")
-                .arg("--result-file")
-                .arg(&dest_path);
+                .arg("--single-transaction");
+            apply_mysql_dump_options(&mut cmd);
+            cmd.arg("--result-file")
+                .arg(staged.path());
             if schema_only {
                 cmd.arg("--no-data");
             }
@@ -681,11 +810,12 @@ pub async fn dump_database(
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--user").arg(u);
             }
-            if let Some(pw) = secret::read_password(&id)? {
+            if let Some(pw) = operation_password(&state, &cfg).await? {
                 cmd.env("MYSQL_PWD", pw);
             }
             apply_mysql_ssl(&mut cmd, &cfg, via_tunnel)?;
-            run_tool(cmd, "mysqldump", cancel).await?;
+            let bytes = run_staged_dump(cmd, "mysqldump", cancel, staged, Path::new(&dest_path)).await?;
+            return Ok(DumpReport { path: dest_path, bytes, elapsed_ms: start.elapsed().as_millis() as u64 });
         }
     }
 
@@ -714,6 +844,8 @@ pub async fn restore_database(
     }
     let start = std::time::Instant::now();
 
+    let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id.clone())?;
+    progress_start(&state, operation_id.as_deref(), "reading", None, std::fs::metadata(&src_path).ok().map(|m| m.len()));
     match cfg.driver {
         DriverKind::Sqlite => {
             // Serialize with SQLite connection tests, connects (including MCP
@@ -748,11 +880,16 @@ pub async fn restore_database(
                     "disconnect every connection that uses this SQLite database file before restoring",
                 ));
             }
-            restore_sqlite_file(&target_path, Path::new(&src_path)).await?;
+            let counter = operation_id.as_deref().and_then(|id| state.io_progress.read().get(id).map(|p| std::sync::Arc::clone(&p.counter)));
+            if let Some(token) = cancel {
+                tokio::select! { biased;
+                    _ = token.cancelled() => return Err(AppError::msg("SQLite restore cancelled")),
+                    result = restore_sqlite_progress(&target_path, Path::new(&src_path), counter) => result?,
+                }
+            } else { restore_sqlite_progress(&target_path, Path::new(&src_path), counter).await?; }
         }
         DriverKind::Redis => return Err(AppError::msg("restore is not supported for Redis")),
         DriverKind::Postgres => {
-            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["psql"]).ok_or_else(|| {
                 AppError::msg("psql not found — install it (e.g. `brew install libpq`) and retry")
             })?;
@@ -763,7 +900,10 @@ pub async fn restore_database(
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or("postgres");
+            let input = std::fs::File::open(&src_path)?;
+            progress_input(&state, operation_id.as_deref(), &input)?;
             let mut cmd = tokio::process::Command::new(bin);
+            cmd.stdin(std::process::Stdio::from(input));
             cmd.arg("--host")
                 .arg(&host)
                 .arg("--port")
@@ -774,18 +914,17 @@ pub async fn restore_database(
                 .arg("-v")
                 .arg("ON_ERROR_STOP=1")
                 .arg("--file")
-                .arg(&src_path);
+                .arg("-");
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--username").arg(u);
             }
-            if let Some(pw) = secret::read_password(&id)? {
+            if let Some(pw) = operation_password(&state, &cfg).await? {
                 cmd.env("PGPASSWORD", pw);
             }
             apply_pg_ssl(&mut cmd, &cfg, via_tunnel)?;
             run_tool(cmd, "psql", cancel).await?;
         }
         DriverKind::Mysql => {
-            let (_io_guard, cancel) = IoOpGuard::begin(&state, operation_id)?;
             let bin = find_binary(&["mysql", "mariadb"]).ok_or_else(|| {
                 AppError::msg(
                     "mysql client not found — install it (e.g. `brew install mysql-client`) and retry",
@@ -794,6 +933,7 @@ pub async fn restore_database(
             let (host, port) = effective_addr(&state, &cfg)?;
             let via_tunnel = state.tunnels.read().contains_key(&cfg.id);
             let file = std::fs::File::open(&src_path)?;
+            progress_input(&state, operation_id.as_deref(), &file)?;
             let mut cmd = tokio::process::Command::new(bin);
             cmd.arg("--host")
                 .arg(&host)
@@ -806,7 +946,7 @@ pub async fn restore_database(
             if let Some(u) = cfg.username.as_deref().filter(|s| !s.is_empty()) {
                 cmd.arg("--user").arg(u);
             }
-            if let Some(pw) = secret::read_password(&id)? {
+            if let Some(pw) = operation_password(&state, &cfg).await? {
                 cmd.env("MYSQL_PWD", pw);
             }
             apply_mysql_ssl(&mut cmd, &cfg, via_tunnel)?;
@@ -821,8 +961,8 @@ pub async fn restore_database(
 
 /// Cancel an in-flight dump/restore by the operation id the frontend passed
 /// to `dump_database` / `restore_database`. Returns whether a live operation
-/// was found; SQLite snapshots have no child process, so they always report
-/// `false` here.
+/// was found. SQLite work is cancelled at its async boundary before the
+/// staged file is persisted; client processes are killed and reaped.
 #[tauri::command]
 pub fn cancel_db_io(state: State<'_, AppState>, operation_id: String) -> bool {
     state.cancel_io_op(&operation_id)
@@ -866,6 +1006,100 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, vec!["--databases", "app"]);
+    }
+
+    #[test]
+    fn mysql_dump_options_are_portable_and_preserve_binary_values() {
+        let mut cmd = tokio::process::Command::new("mysqldump");
+        apply_mysql_dump_options(&mut cmd);
+        let args: Vec<_> = cmd.as_std().get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["--loose-set-gtid-purged=OFF", "--hex-blob", "--routines", "--events"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_external_dump_preserves_existing_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("backup.sql");
+        std::fs::write(&dest, b"previous backup").unwrap();
+        let staged = staged_dump_file(&dest).unwrap();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("printf partial > \"$1\"; exit 7").arg("mock").arg(staged.path());
+
+        assert!(run_staged_dump(cmd, "mock-dump", None, staged, &dest).await.is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous backup");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_external_dump_replaces_existing_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("backup.sql");
+        std::fs::write(&dest, b"previous backup").unwrap();
+        let staged = staged_dump_file(&dest).unwrap();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("printf replacement > \"$1\"").arg("mock").arg(staged.path());
+
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_staged_dump(cmd, "mock-dump", None, staged, &dest),
+        )
+        .await
+        .expect("mock dump should finish promptly")
+        .unwrap();
+        assert_eq!(bytes, b"replacement".len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_successful_external_dump_preserves_existing_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("backup.sql");
+        std::fs::write(&dest, b"previous backup").unwrap();
+        let staged = staged_dump_file(&dest).unwrap();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(":");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_staged_dump(cmd, "mock-dump", None, staged, &dest),
+        )
+        .await
+        .expect("mock dump should finish promptly");
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous backup");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_external_dump_preserves_existing_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("backup.sql");
+        std::fs::write(&dest, b"previous backup").unwrap();
+        let staged = staged_dump_file(&dest).unwrap();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("printf partial > \"$1\"; exec sleep 10").arg("mock").arg(staged.path());
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            cancel.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_staged_dump(cmd, "mock-dump", Some(token), staged, &dest),
+        )
+        .await
+        .expect("cancellation should promptly reap the mock process");
+        assert!(result.is_err());
+        task.await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous backup");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

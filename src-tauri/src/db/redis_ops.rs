@@ -404,7 +404,12 @@ fn reply_to_table(args: &[String], v: RVal, start: Instant) -> QueryResult {
         RVal::Nil => single_cell("result", Json::Null, elapsed),
         RVal::SimpleString(s) => single_cell("result", json!(s), elapsed),
         RVal::Int(i) => single_cell("result", json!(i), elapsed),
-        RVal::BulkString(b) => single_cell("result", bytes_to_json(&b), elapsed),
+        RVal::BulkString(bytes) => {
+            let binary = std::str::from_utf8(&bytes).is_err() || bytes.contains(&0);
+            let mut result = single_cell("result", if binary { Json::String(base64_like(&bytes)) } else { bytes_to_json(&bytes) }, elapsed);
+            if binary { result.columns[0].data_type = "redis-binary-base64".into(); }
+            result
+        }
         RVal::Array(items) => {
             if is_stream_reply(cmd_name) {
                 return stream_to_table(items, elapsed);

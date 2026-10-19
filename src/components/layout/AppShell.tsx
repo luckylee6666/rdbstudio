@@ -9,10 +9,16 @@ import { WorkspaceTabs } from "./WorkspaceTabs";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { anyModalOpen } from "@/components/ui/Modal";
 import { useLayout } from "@/store/layout";
-import { useWorkspace } from "@/store/workspace";
+import { usePrefs } from "@/store/prefs";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 
 export function AppShell() {
   const sidebarVisible = useLayout((s) => s.sidebarVisible);
+  const inspectorVisible = useLayout((s) => s.inspectorVisible);
+  const editorFontSize = usePrefs((s) => s.editorFontSize);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--editor-font-size", `${editorFontSize}px`);
+  }, [editorFontSize]);
   const { toggle: toggleTheme } = useTheme();
 
   // Global shortcuts advertised on the Welcome page / Settings: ⌘T new query,
@@ -30,7 +36,7 @@ export function AppShell() {
         useWorkspace.getState().openTab({
           id: `query:${crypto.randomUUID()}`,
           kind: "query",
-          title: "Query",
+          title: nextQueryTitle(),
         });
       } else if (k === "w" && !e.shiftKey) {
         e.preventDefault();
@@ -59,13 +65,13 @@ export function AppShell() {
   }, [toggleTheme]);
 
   return (
-    <div className="flex h-full w-full flex-col bg-background text-foreground">
+    <div className="flex h-full w-full select-none flex-col bg-background text-foreground">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
         <ActivityBar />
         {sidebarVisible && <Sidebar />}
         <WorkspaceTabs />
-        <Inspector />
+        {inspectorVisible && <Inspector />}
       </div>
       <StatusBar />
       <CommandPalette />

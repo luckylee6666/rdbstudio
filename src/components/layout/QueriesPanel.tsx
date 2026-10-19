@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Plus, Terminal, Database } from "lucide-react";
-import { useWorkspace } from "@/store/workspace";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
@@ -35,10 +35,10 @@ export function QueriesPanel() {
     openTab({
       id: `query:${crypto.randomUUID()}`,
       kind: "query",
-      title: t("welcome.action.new_query"),
+      title: nextQueryTitle(),
       subtitle: connectionId
         ? connections.find((c) => c.id === connectionId)?.name
-        : "Untitled",
+        : undefined,
       connectionId,
     });
 

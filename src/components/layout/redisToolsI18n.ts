@@ -1,0 +1,93 @@
+import { useI18n } from "@/store/i18n";
+
+const text = {
+  en: {
+    tools: "Redis tools",
+    back: "Back to key",
+    cluster: "Cluster topology",
+    loadCluster: "Load cluster info",
+    pubsub: "Pub/Sub monitor",
+    channel: "Channel or pattern",
+    subscribe: "Subscribe",
+    stop: "Stop",
+    listening: "Listening",
+    startFailed: "Could not start subscription",
+    pollFailed: "Subscription ended",
+    dropped: "{{n}} messages dropped because the local buffer was full.",
+    noMessages: "Waiting for messages…",
+    clusterFailed: "Cluster information is unavailable",
+    nodes: "Nodes",
+    clusterInfo: "Cluster info",
+    binary: "binary",
+    loadMore: "Load more",
+    loadMoreFailed: "Could not load the next page",
+    addEntry: "Append entry",
+    addField: "Add field",
+    fieldName: "Field name",
+    fieldValue: "Field value",
+    add: "Add",
+    groups: "Consumer groups",
+    refreshGroups: "Refresh groups",
+    createGroup: "Create group",
+    groupName: "Group name",
+    consumers: "consumers",
+    pending: "pending",
+    noGroups: "No consumer groups",
+    confirmDeleteGroup: "Delete consumer group {{name}}?",
+    invalidEntry: "Enter a field name and value",
+    invalidGroup: "Enter a group name",
+    operationFailed: "Operation failed",
+    cancel: "Cancel",
+    clusterHint: "Reads CLUSTER INFO / CLUSTER NODES. Standalone servers report that cluster support is disabled.",
+  },
+  zh: {
+    tools: "Redis 工具",
+    back: "返回 key",
+    cluster: "集群拓扑",
+    loadCluster: "读取集群信息",
+    pubsub: "发布/订阅监听",
+    channel: "频道或模式",
+    subscribe: "订阅",
+    stop: "停止",
+    listening: "监听中",
+    startFailed: "启动订阅失败",
+    pollFailed: "订阅已结束",
+    dropped: "本地缓冲区已满，丢弃 {{n}} 条消息。",
+    noMessages: "等待消息…",
+    clusterFailed: "无法读取集群信息",
+    nodes: "节点",
+    clusterInfo: "集群信息",
+    binary: "二进制",
+    loadMore: "加载更多",
+    loadMoreFailed: "加载下一页失败",
+    addEntry: "追加条目",
+    addField: "添加字段",
+    fieldName: "字段名",
+    fieldValue: "字段值",
+    add: "添加",
+    groups: "消费者组",
+    refreshGroups: "刷新分组",
+    createGroup: "新建分组",
+    groupName: "分组名称",
+    consumers: "个消费者",
+    pending: "条待处理",
+    noGroups: "没有消费者组",
+    confirmDeleteGroup: "删除消费者组「{{name}}」？",
+    invalidEntry: "请输入字段名和值",
+    invalidGroup: "请输入分组名称",
+    operationFailed: "操作失败",
+    cancel: "取消",
+    clusterHint: "读取 CLUSTER INFO / CLUSTER NODES。单机实例会提示未启用集群。",
+  },
+} as const;
+
+export function useRedisToolsT() {
+  const lang = useI18n((state) => state.lang);
+  return (key: keyof typeof text.en, params?: Record<string, string | number>) => {
+    let value: string = text[lang][key];
+    for (const [name, replacement] of Object.entries(params ?? {})) {
+      value = value.replaceAll(`{{${name}}}`, String(replacement));
+    }
+    return value;
+  };
+}

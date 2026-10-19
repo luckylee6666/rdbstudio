@@ -178,6 +178,66 @@ describe("ConnectionTree table operations", () => {
 
   afterEach(() => clearMocks());
 
+  it.each(["Enter", " "])("opens a focused table with the %s key", async (key) => {
+    mockIPC((command) => {
+      if (command === "list_connections") return [connections[0]];
+      if (command === "list_databases") return ["app"];
+      if (command === "list_tables") return [{ name: "users", kind: "table" }];
+      return undefined;
+    });
+    render(<ConnectionTree />);
+    await waitFor(() => expect(useConnections.getState().branches.local?.loading).toBe(false));
+    fireEvent.click(screen.getByText("local-9.0"));
+    fireEvent.click(await screen.findByText("app"));
+    const table = await screen.findByRole("button", { name: "users" });
+    table.focus();
+    fireEvent.keyDown(table, { key, repeat: true });
+    expect(useWorkspace.getState().activeTabId).toBe("welcome");
+    expect(fireEvent.keyDown(table, { key })).toBe(false);
+    expect(useWorkspace.getState().activeTabId).toBe("data:local:app:users");
+    expect(useWorkspace.getState().tabs).toHaveLength(2);
+  });
+
+  it.each([
+    ["复制结构与数据", "复制表 · users"],
+    ["维护表", "维护表 · users"],
+  ])("opens the %s tool from the table menu", async (label, title) => {
+    mockIPC((command) => {
+      if (command === "list_connections") return [connections[0]];
+      if (command === "list_databases") return ["app"];
+      if (command === "list_tables") return [{ name: "users", kind: "table" }];
+      return undefined;
+    });
+    render(<ConnectionTree />);
+    await waitFor(() => expect(useConnections.getState().branches.local?.loading).toBe(false));
+    fireEvent.click(screen.getByText("local-9.0"));
+    fireEvent.click(await screen.findByText("app"));
+    fireEvent.contextMenu(await screen.findByText("users"));
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(await screen.findByRole("dialog", { name: title })).toBeInTheDocument();
+  });
+
+  it("opens a SQL file from its connection menu without executing it", async () => {
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "list_connections") return [connections[0]];
+      if (command === "list_databases") return ["app"];
+      if (command === "plugin:dialog|open") return "/tmp/task.sql";
+      if (command === "read_sql_file") return "SELECT 42;";
+      return undefined;
+    });
+    render(<ConnectionTree />);
+    fireEvent.contextMenu(screen.getByText("local-9.0"));
+    fireEvent.click(screen.getByRole("button", { name: "打开 SQL 文件" }));
+    await waitFor(() => expect(useWorkspace.getState().tabs.at(-1)?.title).toBe("task.sql"));
+    const state = useWorkspace.getState();
+    expect(state.tabs.at(-1)?.connectionId).toBe("local");
+    expect(sessionStorage.getItem(`rdb:sql:${state.activeTabId}`)).toBe("SELECT 42;");
+    expect(calls).not.toContain("execute_query");
+    expect(calls).not.toContain("execute_script");
+  });
+
   it("renames the selected table with its database scope", async () => {
     const calls: Array<Record<string, unknown>> = [];
     let renamed = false;
@@ -227,7 +287,7 @@ describe("ConnectionTree table operations", () => {
     expect(useToasts.getState().items.at(-1)?.title).toBe("已重命名为 customers");
   });
 
-  it("keeps the CSV import entry reachable for tables", async () => {
+  it("keeps the multi-format data import entry reachable for tables", async () => {
     mockIPC((command) => {
       if (command === "list_connections") return [connections[0]];
       if (command === "list_databases") return ["app"];
@@ -245,10 +305,10 @@ describe("ConnectionTree table operations", () => {
     fireEvent.click(screen.getByText("local-9.0"));
     fireEvent.click(await screen.findByText("app"));
     fireEvent.contextMenu(await screen.findByText("users"));
-    fireEvent.click(screen.getByRole("button", { name: "导入 CSV" }));
+    fireEvent.click(screen.getByRole("button", { name: "导入数据" }));
 
     expect(
-      await screen.findByRole("dialog", { name: "导入 CSV · app.users" })
+      await screen.findByRole("dialog", { name: "导入数据 · app.users" })
     ).toBeInTheDocument();
   });
 

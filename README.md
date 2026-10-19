@@ -12,7 +12,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://tauri.app"><img src="https://img.shields.io/badge/Tauri-2.0-blueviolet?logo=tauri" alt="Tauri" /></a>
   <a href="https://react.dev"><img src="https://img.shields.io/badge/React-18-61dafb?logo=react" alt="React" /></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.77+-dea584?logo=rust" alt="Rust" /></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.88+-dea584?logo=rust" alt="Rust" /></a>
 </p>
 
 <p align="center"><strong>Modern cross-platform database GUI</strong> — A Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis, built with Tauri 2 + React + sqlx.</p>
@@ -33,7 +33,7 @@
 - Table designer with live DDL preview; create table / schema, rename, truncate, duplicate structure
 - ER diagram with automatic layout
 - CSV import (batched multi-row INSERTs with per-row error reporting) and table export
-- **Whole-database dump & restore**: SQLite via `VACUUM INTO`, PostgreSQL via `pg_dump`/`psql`, MySQL via `mysqldump`/`mysql` — client binaries auto-discovered, passwords never touch the command line
+- **Whole-database dump & restore**: SQLite via `VACUUM INTO`, PostgreSQL via `pg_dump`/`psql`, MySQL via `mysqldump`/`mysql` — client binaries auto-discovered, passwords never touch the command line. Failed or cancelled exports preserve existing backups. MySQL includes routines/events and hex-encoded binary values, and omits global GTID state for ordinary data restores (not replication provisioning).
 
 **Redis**
 - Type-aware key viewer (string / hash / list / set / zset / stream / JSON) with TTL, paginated SCAN
@@ -72,7 +72,7 @@ Signed / notarized builds will land once code-signing certificates are in place.
 ### Build from source
 
 Requires:
-- **Rust** 1.77+ (`rustup install stable`)
+- **Rust** 1.88+ (`rustup install stable`)
 - **Node** 20+ and **pnpm** 10+
 - **OS deps**: see [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 
@@ -99,13 +99,22 @@ pnpm tauri build   # release bundle in src-tauri/target/release/bundle/
 
 See **Settings → Shortcuts** in-app for the full list.
 
+## Development changes (Unreleased)
+
+Query-tab sessions and transaction controls, multiple/pinned results, index and foreign-key editing, database objects and privileges, bounded schema/data synchronization and transfer, global data search, Excel/JSON/XML imports, form and binary editing, Redis pagination/Pub/Sub/Streams/cluster status, backup progress, and an in-app updater client.
+
+Object tools include PostgreSQL sequence options and MySQL event schedules. Sequence values retain integer precision and restart requires confirmation; events are created disabled and use a separate enable action. Event forms support simple interval units and a single SQL statement (use `CALL` for compound logic); an unchanged legacy compound body can be preserved while editing its schedule or comment.
+
+Table copying defaults to a native mode for a new table on the same connection and in the same schema. It supports tables without primary keys, duplicate rows, and data beyond the portable mode's 10,000-row / 16 MiB limits; rows stay inside the database instead of passing through JSON. Preview the SQL and object omissions, then copy an execution-time snapshot with phase/elapsed-time progress and cancellation before final commit or publication. SQLite/PostgreSQL use a transaction; MySQL supports InnoDB and uses a private staging table with an atomic rename. Foreign keys, triggers, sequence behavior, and cleanup permissions vary by engine; see the [copy scope and limits](docs/navicat-gap-audit.md#2026-10-18-同连接原生表复制). The existing portable mode retains its primary-key, type, and size limits.
+
+See [the implementation and scope](docs/navicat-gap-audit.md) and [release signing setup](docs/release-signing.md) before using migrations or publishing signed updates.
+
 ## Roadmap
 
 - Code-signed + notarized builds; auto-update channel
-- Per-query-tab sessions and multiple result sets
-- Structure comparison and data synchronization
-- Dump/restore progress reporting (PostgreSQL/MySQL cancellation is available)
-- Redis Pub/Sub, Cluster, and Streams tooling
+- More complete schema migrations for complex constraints, indexes, generated columns and partitions
+- Redis cluster topology operations and transparent routing
+- Streaming execution and richer progress/cancellation for large synchronization jobs
 
 See the [Navicat comparison and review](docs/navicat-gap-audit.md) for scope and validation limits.
 

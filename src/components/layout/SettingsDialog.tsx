@@ -17,8 +17,10 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { useI18n, useT } from "@/store/i18n";
 import { useConnections } from "@/store/connections";
+import { EDITOR_FONT_SIZES, GRID_PAGE_SIZES, usePrefs } from "@/store/prefs";
 import { toast } from "@/store/toasts";
 import { api } from "@/lib/api";
+import { UpdateSettings } from "./UpdateSettings";
 import { cn } from "@/lib/cn";
 import type { McpStatus } from "@/types";
 
@@ -32,6 +34,7 @@ export function SettingsDialog({ open, onClose }: Props) {
   const { theme, set: setTheme } = useTheme();
   const { lang, setLang } = useI18n();
   const connections = useConnections((s) => s.list);
+  const { editorFontSize, gridPageSize, setEditorFontSize, setGridPageSize } = usePrefs();
 
   const [version, setVersion] = useState<string>("");
   const [clearing, setClearing] = useState(false);
@@ -117,6 +120,23 @@ export function SettingsDialog({ open, onClose }: Props) {
               ]}
               onChange={(v) => setLang(v as "zh" | "en")}
               icon={Globe}
+            />
+          </Row>
+        </Section>
+
+        <Section title={t("settings.editor_data")}>
+          <Row label={t("settings.editor_font")} hint={t("settings.editor_font.hint")}>
+            <ToggleGroup
+              value={String(editorFontSize)}
+              options={EDITOR_FONT_SIZES.map((size) => ({ value: String(size), label: String(size) }))}
+              onChange={(v) => setEditorFontSize(Number(v))}
+            />
+          </Row>
+          <Row label={t("settings.page_size")} hint={t("settings.page_size.hint")}>
+            <ToggleGroup
+              value={String(gridPageSize)}
+              options={GRID_PAGE_SIZES.map((size) => ({ value: String(size), label: String(size) }))}
+              onChange={(v) => setGridPageSize(Number(v))}
             />
           </Row>
         </Section>
@@ -213,6 +233,10 @@ export function SettingsDialog({ open, onClose }: Props) {
               </div>
             )}
           </div>
+        </Section>
+
+        <Section title={t("update.section")}>
+          <UpdateSettings />
         </Section>
 
         <Section title={t("settings.shortcuts")}>

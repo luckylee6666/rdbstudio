@@ -51,13 +51,24 @@
     },
     "windows": {
       "wix": {
-        "language": ["en-US", "zh-CN"]
+        "language": [
+          "en-US",
+          "zh-CN"
+        ]
       }
     },
     "linux": {
       "deb": {
         "depends": []
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/luckylee6666/rdbstudio/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgxNTEzNkE2RTZGQzRBQTMKUldTalN2em1walpSZ1kxc013b28vSy82QklxSGNDU2lZRUtOc3pRQmlLblp0bVlYU0tPbGxhbUYK"
     }
   }
 }

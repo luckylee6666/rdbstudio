@@ -3,7 +3,7 @@ import { Plus, Search, FileCode, Trash2, Edit, Play } from "lucide-react";
 import { api } from "@/lib/api";
 import { useT } from "@/store/i18n";
 import { toast } from "@/store/toasts";
-import { useWorkspace } from "@/store/workspace";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -116,8 +116,7 @@ export function SnippetsPanel() {
       useWorkspace.getState().openTab({
         id: `query:${crypto.randomUUID()}`,
         kind: "query",
-        title: "Query",
-        subtitle: "Untitled",
+        title: nextQueryTitle(),
       });
       setTimeout(() => {
         window.dispatchEvent(new CustomEvent("insert-sql", { detail: code }));

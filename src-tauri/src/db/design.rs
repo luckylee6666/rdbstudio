@@ -126,6 +126,8 @@ async fn describe_sqlite(
     let info = sqlx::query(&format!("PRAGMA table_info({})", quoted))
         .fetch_all(p)
         .await?;
+    let table_definition: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").bind(table).fetch_optional(p).await?;
+    let autoincrement = table_definition.as_deref().is_some_and(|ddl| crate::db::exec::scan_bare_words(ddl, |word| word == "AUTOINCREMENT"));
     let columns: Vec<ColumnDetail> = info
         .iter()
         .map(|r| {
@@ -135,6 +137,7 @@ async fn describe_sqlite(
             let dflt: Option<String> = r.try_get("dflt_value").ok().flatten();
             let pk: i64 = r.try_get("pk").unwrap_or(0);
             let cid: i64 = r.try_get("cid").unwrap_or(0);
+            let is_auto_increment = autoincrement && pk > 0 && ty.eq_ignore_ascii_case("INTEGER");
             ColumnDetail {
                 name,
                 data_type: ty,
@@ -146,7 +149,7 @@ async fn describe_sqlite(
                 numeric_precision: None,
                 numeric_scale: None,
                 is_primary_key: pk > 0,
-                is_auto_increment: false, // SQLite uses ROWID alias; not easily detectable
+                is_auto_increment,
                 is_identity: false,
                 identity_generation: None,
             }
@@ -335,23 +338,22 @@ async fn describe_postgres(
 
     // Foreign keys
     let fk_rows = sqlx::query(
-        "SELECT tc.constraint_name, \
-                array_agg(kcu.column_name ORDER BY kcu.ordinal_position) AS cols, \
-                ccu.table_schema AS ref_schema, \
-                ccu.table_name AS ref_table, \
-                array_agg(ccu.column_name ORDER BY kcu.ordinal_position) AS ref_cols, \
-                rc.update_rule, rc.delete_rule \
-         FROM information_schema.table_constraints tc \
-         JOIN information_schema.key_column_usage kcu \
-           ON tc.constraint_name = kcu.constraint_name \
-          AND tc.table_schema = kcu.table_schema \
-         JOIN information_schema.referential_constraints rc \
-           ON tc.constraint_name = rc.constraint_name \
-         JOIN information_schema.constraint_column_usage ccu \
-           ON ccu.constraint_name = tc.constraint_name \
-         WHERE tc.table_schema = $1 AND tc.table_name = $2 \
-           AND tc.constraint_type = 'FOREIGN KEY' \
-         GROUP BY tc.constraint_name, ccu.table_schema, ccu.table_name, rc.update_rule, rc.delete_rule",
+        "SELECT con.conname::text AS constraint_name, \
+                array_agg(a.attname::text ORDER BY pairs.ordinality) AS cols, \
+                rn.nspname::text AS ref_schema, rc.relname::text AS ref_table, \
+                array_agg(ra.attname::text ORDER BY pairs.ordinality) AS ref_cols, \
+                CASE con.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule, \
+                CASE con.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule \
+         FROM pg_constraint con \
+         JOIN pg_class c ON c.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_class rc ON rc.oid = con.confrelid \
+         JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+         JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS pairs(local_num, ref_num, ordinality) ON true \
+         JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = pairs.local_num \
+         JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = pairs.ref_num \
+         WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'f' \
+         GROUP BY con.oid, con.conname, rn.nspname, rc.relname, con.confupdtype, con.confdeltype",
     )
     .bind(&schema)
     .bind(table)
@@ -401,7 +403,7 @@ async fn describe_postgres(
     let idx_rows = sqlx::query(
         "SELECT i.relname AS name, ix.indisunique AS is_unique, ix.indisprimary AS is_primary, \
                 am.amname AS method, \
-                array_agg(a.attname ORDER BY array_position(ix.indkey::int[], a.attnum)) AS cols \
+                array_agg(a.attname::text ORDER BY array_position(ix.indkey::int[], a.attnum)) AS cols \
          FROM pg_class t \
          JOIN pg_index ix ON t.oid = ix.indrelid \
          JOIN pg_class i ON i.oid = ix.indexrelid \

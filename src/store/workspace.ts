@@ -1,18 +1,18 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { api } from "@/lib/api";
 import type { WorkspaceTab } from "@/types";
 
 // Editor buffers live outside the store (rdb:buf:<tabId> in localStorage,
 // rdb:sql:<tabId> primes in sessionStorage) — scrub them when tabs close so
 // storage doesn't accumulate orphans.
 function cleanupTabStorage(ids: string[]) {
-  try {
-    for (const id of ids) {
+  for (const id of ids) {
+    try {
       localStorage.removeItem(`rdb:buf:${id}`);
       sessionStorage.removeItem(`rdb:sql:${id}`);
-    }
-  } catch {
-    /* storage unavailable — nothing to clean */
+    } catch { /* unavailable storage must not prevent connection cleanup */ }
+    try { void api.closeEditorSession(id).catch(() => {}); } catch { /* test/browser IPC unavailable */ }
   }
 }
 
@@ -20,11 +20,25 @@ interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string | null;
   openTab: (tab: WorkspaceTab) => void;
-  closeTab: (id: string) => void;
-  closeOthers: (id: string) => void;
-  closeToRight: (id: string) => void;
-  closeAll: () => void;
+  closeTab: (id: string, force?: boolean) => void;
+  closeOthers: (id: string, force?: boolean) => void;
+  closeToRight: (id: string, force?: boolean) => void;
+  closeAll: (force?: boolean) => void;
+  pendingClose: (() => void) | null;
+  confirmClose: () => void;
+  cancelClose: () => void;
   setActive: (id: string) => void;
+}
+
+/** Next free "Query N" title; localized for display by lib/tabTitles. */
+export function nextQueryTitle(): string {
+  let max = 0;
+  for (const tab of useWorkspace.getState().tabs) {
+    if (tab.kind !== "query") continue;
+    const n = Number(/^Query (\d+)$/.exec(tab.title)?.[1] ?? 0);
+    max = Math.max(max, n);
+  }
+  return `Query ${max + 1}`;
 }
 
 export const useWorkspace = create<WorkspaceState>()(
@@ -38,6 +52,9 @@ export const useWorkspace = create<WorkspaceState>()(
         },
       ],
       activeTabId: "welcome",
+      pendingClose: null,
+      confirmClose: () => { const action = get().pendingClose; set({pendingClose: null}); action?.(); },
+      cancelClose: () => set({pendingClose: null}),
       openTab: (tab) => {
         const existing = get().tabs.find((t) => t.id === tab.id);
         if (existing) {
@@ -52,7 +69,8 @@ export const useWorkspace = create<WorkspaceState>()(
         }
         set({ tabs: [...get().tabs, tab], activeTabId: tab.id });
       },
-      closeTab: (id) => {
+      closeTab: (id, force = false) => {
+        if (!force && get().tabs.some((tab) => tab.id === id && tab.transactionOpen)) { set({pendingClose: () => get().closeTab(id, true)}); return; }
         cleanupTabStorage([id]);
         const tabs = get().tabs.filter((t) => t.id !== id);
         const activeTabId =
@@ -61,7 +79,8 @@ export const useWorkspace = create<WorkspaceState>()(
             : get().activeTabId;
         set({ tabs, activeTabId });
       },
-      closeOthers: (id) => {
+      closeOthers: (id, force = false) => {
+        if (!force && get().tabs.some((tab) => tab.id !== id && tab.transactionOpen)) { set({pendingClose: () => get().closeOthers(id, true)}); return; }
         const kept = get().tabs.filter((t) => t.id === id);
         if (kept.length === 0) return;
         cleanupTabStorage(
@@ -71,10 +90,11 @@ export const useWorkspace = create<WorkspaceState>()(
         );
         set({ tabs: kept, activeTabId: id });
       },
-      closeToRight: (id) => {
+      closeToRight: (id, force = false) => {
         const tabs = get().tabs;
         const idx = tabs.findIndex((t) => t.id === id);
         if (idx < 0) return;
+        if (!force && tabs.slice(idx + 1).some((tab) => tab.transactionOpen)) { set({pendingClose: () => get().closeToRight(id, true)}); return; }
         cleanupTabStorage(tabs.slice(idx + 1).map((t) => t.id));
         const kept = tabs.slice(0, idx + 1);
         const active = get().activeTabId;
@@ -83,7 +103,8 @@ export const useWorkspace = create<WorkspaceState>()(
           activeTabId: kept.some((t) => t.id === active) ? active : id,
         });
       },
-      closeAll: () => {
+      closeAll: (force = false) => {
+        if (!force && get().tabs.some((tab) => tab.transactionOpen)) { set({pendingClose: () => get().closeAll(true)}); return; }
         cleanupTabStorage(get().tabs.map((t) => t.id));
         set({ tabs: [], activeTabId: null });
       },
@@ -93,7 +114,7 @@ export const useWorkspace = create<WorkspaceState>()(
       // Restores the open workspace across restarts. Editor buffers are
       // restored separately by QueryEditorView from rdb:buf:<tabId>.
       name: "rdb:workspace",
-      partialize: (s) => ({ tabs: s.tabs, activeTabId: s.activeTabId }),
+      partialize: (s) => ({ tabs: s.tabs.map((tab) => { const saved = {...tab}; delete saved.transactionOpen; return saved; }), activeTabId: s.activeTabId }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<
           Pick<WorkspaceState, "tabs" | "activeTabId">

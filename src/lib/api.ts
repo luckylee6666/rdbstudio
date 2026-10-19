@@ -41,6 +41,7 @@ export type ScriptOutcome =
   | {
       status: "ok";
       result: QueryResult;
+      results?: QueryResult[];
       total_affected: number;
       statements: number;
     }
@@ -119,8 +120,20 @@ export const api = {
       limit: limit ?? null,
     }),
 
-  executeQuery: (id: string, sql: string, queryId?: string) =>
-    invoke<QueryResult>("execute_query", { id, sql, queryId: queryId ?? null }),
+  executeQuery: (
+    id: string,
+    sql: string,
+    queryId?: string,
+    sessionId?: string,
+    opts?: { recordHistory?: boolean }
+  ) =>
+    invoke<QueryResult>("execute_query", {
+      id,
+      sql,
+      queryId: queryId ?? null,
+      ...(sessionId ? { sessionId } : {}),
+      ...(opts?.recordHistory === false ? { recordHistory: false } : {}),
+    }),
   /**
    * Runs every statement on one connection. `atomic` wraps them in a
    * transaction; pass false when the script has its own BEGIN/COMMIT.
@@ -129,14 +142,18 @@ export const api = {
     id: string,
     sqls: string[],
     queryId?: string,
-    atomic = true
+    atomic = true,
+    sessionId?: string
   ) =>
     invoke<ScriptOutcome>("execute_script", {
       id,
       sqls,
       queryId: queryId ?? null,
       atomic,
+      ...(sessionId ? { sessionId } : {}),
     }),
+  closeEditorSession: (sessionId: string) => invoke<void>("close_editor_session", { sessionId }),
+  editorSessionStatus: (sessionId: string) => invoke<{ connected: boolean; in_transaction: boolean; needs_reset?: boolean }>("editor_session_status", { sessionId }),
   redisRenameMember: (
     id: string,
     key: string,
@@ -250,16 +267,20 @@ export const api = {
     id: string,
     destPath: string,
     database?: string,
-    schemaOnly = false
+    schemaOnly = false,
+    operationId?: string
   ) =>
     invoke<DumpReport>("dump_database", {
       id,
       destPath,
       database: database ?? null,
       schemaOnly,
+      ...(operationId ? { operationId } : {}),
     }),
   restoreDatabase: (id: string, srcPath: string) =>
     invoke<RestoreReport>("restore_database", { id, srcPath }),
+  previewImportFile: (path: string, sheet: string | null, hasHeader: boolean) => invoke<CsvPreview & { sheets: string[] }>("preview_import_file", { path, sheet, hasHeader }),
+  importFile: (id: string, options: ImportCsvOptions & { sheet?: string | null }) => invoke<ImportReport>("import_file", { id, options }),
   previewCsv: (path: string, delimiter: string, hasHeader: boolean, limit = 5) =>
     invoke<CsvPreview>("preview_csv", {
       path,

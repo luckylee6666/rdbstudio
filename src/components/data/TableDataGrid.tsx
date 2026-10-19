@@ -16,6 +16,7 @@ import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
 import { toCSV } from "@/lib/csv";
 import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
+import { binarySummary, isBinaryType } from "@/lib/binary";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { useT } from "@/store/i18n";
 import type { ColumnInfo, DriverKind, OrderBy } from "@/types";
@@ -45,6 +46,8 @@ interface Props {
   onCellEdit: (rowKey: string, colIndex: number, value: unknown) => void;
   onRowRevert: (rowKey: string) => void;
   onRowDelete: (rowKey: string) => void;
+  /** Binary cells cannot be typed into; double-click opens the row form. */
+  onOpenForm?: (rowKey: string) => void;
 }
 
 /** Cell value as the same text the grid shows (NULL for null). */
@@ -92,6 +95,7 @@ export function TableDataGrid({
   onCellEdit,
   onRowRevert,
   onRowDelete,
+  onOpenForm,
 }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [widths, setWidths] = useState<number[]>(() =>
@@ -290,6 +294,10 @@ export function TableDataGrid({
                         deleted={row.deleted}
                         readOnly={!cellEditable}
                         onStartEdit={() => {
+                          if (isBinaryType(c.data_type)) {
+                            onOpenForm?.(row.key);
+                            return;
+                          }
                           if (!cellEditable) return;
                           setEditing({ row: row.key, col: i });
                         }}
@@ -360,7 +368,8 @@ function HeaderCell({
     >
       <button
         onClick={onClick}
-        className="flex flex-1 items-center gap-1.5 px-2 py-1 text-left hover:bg-accent/40"
+        title={`${col.name} · ${col.data_type}${col.nullable || col.is_primary_key ? "" : " · NOT NULL"}`}
+        className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left hover:bg-accent/40"
       >
         <span className="truncate">{col.name}</span>
         {col.is_primary_key && (
@@ -369,8 +378,12 @@ function HeaderCell({
           </span>
         )}
         {!col.nullable && !col.is_primary_key && (
-          <span className="text-[10px] text-muted-foreground">!</span>
+          // Filled diamond = NOT NULL, same convention as the ER diagram.
+          <span className="h-1.5 w-1.5 shrink-0 rotate-45 bg-muted-foreground/70" />
         )}
+        <span className="min-w-0 truncate text-[10.5px] font-normal lowercase text-muted-foreground/70">
+          {col.data_type}
+        </span>
         <span className="ml-auto text-muted-foreground">
           {order === "asc" ? (
             <ArrowUp className="h-3 w-3 text-brand" />
@@ -474,8 +487,11 @@ function EditableCell({
   const t = useT();
   const isNull = value === null || value === undefined;
   const isNumeric = NUMERIC_TYPE.test(column.data_type);
+  const binary = !isNull && isBinaryType(column.data_type) ? binarySummary(value) : null;
   const display = isNull
     ? "NULL"
+    : binary
+    ? binary
     : typeof value === "string"
     ? value
     : typeof value === "boolean"
@@ -502,14 +518,21 @@ function EditableCell({
         isNumeric && "justify-end tabular-nums",
         isNull && "italic text-muted-foreground/50",
         dirty && "bg-amber-500/10",
-        isInsert && !dirty && "text-emerald-300",
+        isInsert && !dirty && "text-emerald-700 dark:text-emerald-300",
         deleted && "line-through",
         !readOnly && "cursor-cell"
       )}
       style={{ width, height: ROW_HEIGHT }}
-      title={isNull ? "NULL" : display}
+      title={isNull ? "NULL" : binary ? undefined : display}
     >
-      <span className="truncate">{display}</span>
+      {binary ? (
+        <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground" title={t("grid.binary_hint")}>
+          <FileText className="h-3 w-3 shrink-0" />
+          <span className="truncate">{display}</span>
+        </span>
+      ) : (
+        <span className="truncate">{display}</span>
+      )}
       {isFk && !isNull && onFkJump && (
         <button
           onClick={(e) => {
@@ -549,18 +572,19 @@ function CellInput({
   const commitRef = useRef(onCommit);
   commitRef.current = onCommit;
   useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
-  useEffect(
-    () => () => {
+    const input = ref.current;
+    input?.focus();
+    input?.select();
+    return () => {
+      // StrictMode re-runs effects on an input that is still attached; only
+      // a real removal (row scrolled out) should flush the draft.
+      if (input?.isConnected) return;
       if (focusedRef.current && !committedRef.current) {
         committedRef.current = true;
         commitRef.current(valRef.current);
       }
-    },
-    []
-  );
+    };
+  }, []);
   return (
     <div
       className="flex items-stretch border-r border-border/60 bg-surface-elevated"

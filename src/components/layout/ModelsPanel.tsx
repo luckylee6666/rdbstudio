@@ -67,7 +67,7 @@ export function ModelsPanel() {
                   <Workflow
                     className={cn(
                       "h-3.5 w-3.5 shrink-0",
-                      active ? "text-brand" : "text-violet-400"
+                      active ? "text-brand" : "text-violet-600 dark:text-violet-400"
                     )}
                   />
                   <div className="min-w-0 flex-1">

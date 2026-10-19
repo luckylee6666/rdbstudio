@@ -107,12 +107,23 @@ pub fn list_connections(state: State<'_, AppState>) -> Vec<ConnectionConfig> {
     state.store.list()
 }
 
+fn connection_target_signature(config: &ConnectionConfig) -> serde_json::Value {
+    let mut value = serde_json::to_value(config).unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        for key in ["name", "group", "pinned", "color", "password"] { object.remove(key); }
+    }
+    value
+}
+
 #[tauri::command]
 pub async fn save_connection(
     state: State<'_, AppState>,
     config: ConnectionConfig,
 ) -> AppResult<ConnectionConfig> {
     let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
+    let before = state.store.get(&config.id);
+    let credentials_changed = config.password.as_deref().is_some_and(|s| !s.is_empty()) || config.ssh.as_ref().and_then(|s| s.password.as_deref()).is_some_and(|s| !s.is_empty());
+    let target_changed = before.as_ref().is_some_and(|old| credentials_changed || connection_target_signature(old) != connection_target_signature(&config));
     // Persist secrets first and roll them back if a later keychain or config
     // write fails. A failed Save must never leave a changed config on disk.
     let saved = save_connection_inner(&state.store, config, &OsSecretBackend)?;
@@ -120,6 +131,12 @@ pub async fn save_connection(
     // that connection must require a fresh authorization rather than letting
     // an older token silently inherit a different host/database/identity.
     state.mcp.revoke_connection(&saved.id);
+    if target_changed {
+        crate::commands::redis_tools::stop_redis_subscriptions_for_connection(&saved.id);
+        state.sessions.close_connection(&saved.id).await;
+        if let Some(pool) = state.remove_pool(&saved.id) { pool.close().await; }
+        state.remove_tunnel(&saved.id);
+    }
     Ok(saved)
 }
 
@@ -127,6 +144,8 @@ pub async fn save_connection(
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<bool> {
     let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
     state.mcp.revoke_connection(&id);
+    crate::commands::redis_tools::stop_redis_subscriptions_for_connection(&id);
+    state.sessions.close_connection(&id).await;
     let _ = secret::delete_password(&id);
     let _ = secret::delete_password(&ssh_secret_id(&id));
     if let Some(pool) = state.remove_pool(&id) {
@@ -253,6 +272,8 @@ async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummar
     // pool/tunnel first. A plain re-insert would drop the old DbPool without
     // running its async `close()`, leaking sqlx connections / server sessions,
     // and would stack a second SSH forward. Mirrors `disconnect`'s ordering.
+    crate::commands::redis_tools::stop_redis_subscriptions_for_connection(id);
+    state.sessions.close_connection(id).await;
     if let Some(old) = state.remove_pool(id) {
         old.close().await;
     }
@@ -280,6 +301,7 @@ async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummar
         state.insert_tunnel(id.to_string(), t);
     }
     state.insert_pool(id.to_string(), pool);
+    state.sessions.mark_connected(id);
     Ok(ConnectionSummary {
         id: id.to_string(),
         connected: true,
@@ -290,6 +312,8 @@ async fn connect_inner(state: &AppState, id: &str) -> AppResult<ConnectionSummar
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let _file_lifecycle_guard = crate::state::sqlite_file_operation_lock().lock().await;
+    crate::commands::redis_tools::stop_redis_subscriptions_for_connection(&id);
+    state.sessions.close_connection(&id).await;
     if let Some(pool) = state.remove_pool(&id) {
         pool.close().await;
     }
@@ -299,12 +323,30 @@ pub async fn disconnect(state: State<'_, AppState>, id: String) -> AppResult<()>
 }
 
 #[tauri::command]
-pub fn connection_status(state: State<'_, AppState>, id: String) -> ConnectionSummary {
-    let connected = state.pools.read().contains_key(&id);
+pub async fn connection_status(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<ConnectionSummary> {
+    let pool = state.get_pool(&id);
+    Ok(connection_summary(id, pool).await)
+}
+
+async fn connection_summary(id: String, pool: Option<DbPool>) -> ConnectionSummary {
+    let connected = pool.is_some();
+    let server_version = match pool {
+        Some(pool) => tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::db::meta::server_version(&pool),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok),
+        None => None,
+    };
     ConnectionSummary {
         id,
         connected,
-        server_version: None,
+        server_version,
     }
 }
 
@@ -360,6 +402,36 @@ mod tests {
             ssh: None,
             password: None,
         }
+    }
+
+    #[tokio::test]
+    async fn connection_summary_includes_live_sqlite_version() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let summary = connection_summary(
+            "sqlite-1".into(),
+            Some(DbPool::Sqlite(pool.clone())),
+        )
+        .await;
+
+        assert!(summary.connected);
+        assert!(summary
+            .server_version
+            .as_deref()
+            .is_some_and(|version| version.starts_with("SQLite ")));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn connection_summary_without_pool_is_disconnected_without_version() {
+        let summary = connection_summary("sqlite-1".into(), None).await;
+
+        assert!(!summary.connected);
+        assert!(summary.server_version.is_none());
     }
 
     #[test]

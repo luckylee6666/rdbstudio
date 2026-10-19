@@ -4,9 +4,11 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  FileText,
   Filter as FilterIcon,
   Plus,
   RefreshCw,
+  Table2,
   Undo2,
 } from "lucide-react";
 import type {
@@ -23,6 +25,7 @@ import {
   TableDataGrid,
   type GridRow,
 } from "@/components/data/TableDataGrid";
+import { RowFormEditor, isBinaryType } from "@/components/data/RowFormEditor";
 import { FilterBuilder } from "@/components/data/FilterBuilder";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -31,8 +34,8 @@ import { useConnections } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
 import { useT } from "@/store/i18n";
 import { toast } from "@/store/toasts";
+import { usePrefs } from "@/store/prefs";
 
-const PAGE_SIZE = 100;
 
 type Pending =
   | { kind: "update"; rowKey: string; pk: Record<string, unknown>; set: Record<string, unknown> }
@@ -85,6 +88,9 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
 
+  const [formView, setFormView] = useState(false);
+  const pageSize = usePrefs((s) => s.gridPageSize);
+  const [formRowKey, setFormRowKey] = useState<string | null>(null);
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
   const [showFilter, setShowFilter] = useState(false);
   const [preview, setPreview] = useState<string[] | null>(null);
@@ -184,13 +190,13 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
     (offset: number): TableQuery => ({
       schema,
       table,
-      limit: PAGE_SIZE,
+      limit: pageSize,
       offset,
       order_by: order,
       filters,
       where_raw: whereRaw || undefined,
     }),
-    [schema, table, order, filters, whereRaw]
+    [schema, table, order, filters, whereRaw, pageSize]
   );
 
   const load = useCallback(
@@ -218,7 +224,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
                   return [] as ColumnInfo[];
                 })
             : Promise.resolve([] as ColumnInfo[]),
-          api.fetchTableData(connectionId, makeQuery(nextPage * PAGE_SIZE)),
+          api.fetchTableData(connectionId, makeQuery(nextPage * pageSize)),
           api.countTableRows(connectionId, makeQuery(0)).catch((e) => {
             // Row count is informational; surface the failure as a toast but
             // don't block the data fetch.
@@ -259,7 +265,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
         if (loadGen.current === gen) setLoading(false);
       }
     },
-    [connectionId, table, schema, columns, makeQuery, viewIdentity]
+    [connectionId, table, schema, columns, makeQuery, viewIdentity, pageSize]
   );
 
   const hardRefresh = useCallback(() => {
@@ -335,6 +341,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
 
   const onCellEdit = (rowKey: string, colIndex: number, value: unknown) => {
     const col = columns[colIndex];
+    if (isBinaryType(col.data_type) && typeof value === "string") value = { $binary: value };
     if (!col) return;
     setPending((prev) => {
       const next = new Map(prev);
@@ -353,7 +360,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
       const pk: Record<string, unknown> = {};
       for (const p of identCols) {
         const i = columns.findIndex((c) => c.name === p.name);
-        pk[p.name] = origVals[i];
+        pk[p.name] = isBinaryType(p.data_type) && typeof origVals[i] === "string" ? { $binary: origVals[i] } : origVals[i];
       }
       // If value matches original, drop the change from the set
       const origIdx = columns.findIndex((c) => c.name === col.name);
@@ -401,7 +408,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
       const pk: Record<string, unknown> = {};
       for (const p of identCols) {
         const i = columns.findIndex((c) => c.name === p.name);
-        pk[p.name] = origVals[i];
+        pk[p.name] = isBinaryType(p.data_type) && typeof origVals[i] === "string" ? { $binary: origVals[i] } : origVals[i];
       }
       next.set(rowKey, { kind: "delete", rowKey, pk });
       return next;
@@ -476,7 +483,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
   };
 
   const pendingCount = pending.size;
-  const totalPages = rowCount != null ? Math.max(1, Math.ceil(rowCount / PAGE_SIZE)) : null;
+  const totalPages = rowCount != null ? Math.max(1, Math.ceil(rowCount / pageSize)) : null;
 
   return (
     <div className="flex h-full flex-col">
@@ -504,6 +511,27 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
           </span>
         )}
         <div className="flex-1" />
+        <div className="mr-2 flex items-center gap-0.5 rounded-lg border border-border/60 bg-background/40 p-0.5">
+          {([
+            [false, Table2, t("table.view.grid")],
+            [true, FileText, t("table.view.form")],
+          ] as const).map(([value, Icon, label]) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={formView === value}
+              disabled={applying}
+              onClick={() => setFormView(value)}
+              className={cn(
+                "flex h-6 items-center gap-1.5 rounded-md px-2 text-[11.5px] transition-colors disabled:opacity-50",
+                formView === value ? "bg-surface-elevated text-foreground shadow-soft" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="text-[12px] text-muted-foreground">
           {tab.title}
           {order && (
@@ -533,6 +561,17 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
           <ErrorBanner message={error} />
         ) : loading && rows.length === 0 ? (
           <LoadingState />
+        ) : formView ? (
+          <RowFormEditor
+            columns={columns}
+            rows={gridRows}
+            editable={editable && !applying}
+            onCellEdit={onCellEdit}
+            onRowRevert={onRowRevert}
+            onRowDelete={onRowDelete}
+            selectedKey={formRowKey}
+            onSelect={setFormRowKey}
+          />
         ) : (
           <TableDataGrid
             key={viewIdentity}
@@ -548,12 +587,17 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
             onCellEdit={onCellEdit}
             onRowRevert={onRowRevert}
             onRowDelete={onRowDelete}
+            onOpenForm={(rowKey) => {
+              setFormRowKey(rowKey);
+              setFormView(true);
+            }}
           />
         )}
       </div>
 
       <footer className="flex h-9 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap border-t border-border/70 bg-surface/50 px-3 text-[11.5px] text-muted-foreground">
         <Pager
+          pageSize={pageSize}
           page={page}
           totalPages={totalPages}
           rowCount={rowCount}
@@ -573,7 +617,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
         )}
         {pendingCount > 0 && (
           <>
-            <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-400">
+            <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
               {t("table.footer.pending", { n: pendingCount })}
             </span>
             <button
@@ -686,18 +730,20 @@ function Pager({
   page,
   totalPages,
   rowCount,
+  pageSize,
   onPrev,
   onNext,
 }: {
   page: number;
+  pageSize: number;
   totalPages: number | null;
   rowCount: number | null;
   onPrev: () => void;
   onNext: () => void;
 }) {
   const t = useT();
-  const start = page * PAGE_SIZE + 1;
-  const end = rowCount != null ? Math.min((page + 1) * PAGE_SIZE, rowCount) : "?";
+  const start = page * pageSize + 1;
+  const end = rowCount != null ? Math.min((page + 1) * pageSize, rowCount) : "?";
   return (
     <div className="flex items-center gap-2">
       <button

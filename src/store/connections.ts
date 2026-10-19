@@ -51,7 +51,20 @@ interface ConnectionsState {
   loadMoreRedisKeys: (id: string, cacheKey: string) => Promise<void>;
 }
 
-export const useConnections = create<ConnectionsState>((set, get) => ({
+export const useConnections = create<ConnectionsState>((set, get) => {
+  // Invalidate refresh snapshots when a user mutates connection state while
+  // list/status requests are pending.
+  let mutationEpoch = 0;
+  const saveGenerations = new Map<string, number>();
+  const deletionGenerations = new Map<string, number>();
+  const lifecycleGenerations = new Map<string, number>();
+  const bumpGeneration = (map: Map<string, number>, id: string) => {
+    const generation = (map.get(id) ?? 0) + 1;
+    map.set(id, generation);
+    return generation;
+  };
+
+  return {
   list: [],
   loaded: false,
   listError: null,
@@ -64,11 +77,42 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
 
   refresh: async () => {
     try {
+      const epoch = mutationEpoch;
       const list = await api.listConnections();
+      if (epoch !== mutationEpoch) return;
       set({ list, loaded: true, listError: null });
+      // Adopt pools the backend still holds (e.g. after a webview reload) so
+      // the UI never shows "disconnected" for a live connection.
+      const candidates = list.filter((c) => get().status[c.id] === undefined);
+      const live = await Promise.all(
+        candidates
+          .map((c) =>
+            api
+              .connectionStatus(c.id)
+              .then((s) => (s?.connected ? s : null))
+              .catch(() => null)
+          )
+      );
+      if (epoch !== mutationEpoch) return;
+      const adopted = live.filter((s): s is NonNullable<typeof s> => s !== null);
+      if (adopted.length > 0) {
+        const status = { ...get().status };
+        const versions = { ...get().versions };
+        for (const s of adopted) {
+          // A user action may have changed status (or removed the connection)
+          // while connection_status was in flight. Only adopt untouched rows.
+          if (status[s.id] !== undefined || !get().list.some((c) => c.id === s.id)) continue;
+          status[s.id] = "connected";
+          if (s.server_version) versions[s.id] = s.server_version;
+        }
+        set({ status, versions });
+      }
       // re-fetch trees for currently-connected pools so stale cache clears
       for (const c of list) {
-        if (get().status[c.id] === "connected") {
+        if (
+          get().list.some((current) => current.id === c.id) &&
+          get().status[c.id] === "connected"
+        ) {
           await get().refreshBranch(c.id);
         }
       }
@@ -90,20 +134,68 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   save: async (cfg) => {
+    mutationEpoch++;
+    const saveGeneration = cfg.id ? bumpGeneration(saveGenerations, cfg.id) : undefined;
+    const deletionGeneration = cfg.id ? deletionGenerations.get(cfg.id) ?? 0 : undefined;
+    const saveLifecycleGeneration = cfg.id ? bumpGeneration(lifecycleGenerations, cfg.id) : undefined;
     const saved = await api.saveConnection(cfg);
+    if (
+      cfg.id &&
+      (saveGenerations.get(cfg.id) !== saveGeneration ||
+        (deletionGenerations.get(cfg.id) ?? 0) !== deletionGeneration)
+    ) {
+      return saved;
+    }
     const list = [...get().list.filter((c) => c.id !== saved.id), saved];
     set({ list });
+    const statusGeneration = lifecycleGenerations.get(saved.id) ?? 0;
+    if (
+      saveLifecycleGeneration !== undefined &&
+      saveLifecycleGeneration !== (lifecycleGenerations.get(saved.id) ?? 0)
+    ) {
+      return saved;
+    }
+    await api
+      .connectionStatus(saved.id)
+      .then((status) => {
+        if (
+          statusGeneration === (lifecycleGenerations.get(saved.id) ?? 0) &&
+          get().list.some((c) => c.id === saved.id) &&
+          status &&
+          !status.connected
+        ) {
+          const branches = { ...get().branches };
+          delete branches[saved.id];
+          const versions = { ...get().versions };
+          delete versions[saved.id];
+          set({
+            status: { ...get().status, [saved.id]: "disconnected" },
+            branches,
+            versions,
+          });
+        }
+      })
+      .catch(() => {
+        // Saving succeeded; status can be retried independently.
+      });
     return saved;
   },
 
   remove: async (id) => {
+    mutationEpoch++;
+    bumpGeneration(deletionGenerations, id);
+    bumpGeneration(lifecycleGenerations, id);
     await api.deleteConnection(id);
     const { [id]: _s, ...status } = get().status;
     const { [id]: _b, ...branches } = get().branches;
+    const { [id]: _v, ...versions } = get().versions;
+    const { [id]: _e, ...errors } = get().errors;
     set({
       list: get().list.filter((c) => c.id !== id),
       status,
       branches,
+      versions,
+      errors,
     });
   },
 
@@ -111,15 +203,19 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     // One attempt at a time — a second click during a slow (e.g. SSH) connect
     // would race the first and leave status reflecting whichever finished last.
     if (get().status[id] === "connecting") return;
+    mutationEpoch++;
+    bumpGeneration(lifecycleGenerations, id);
     set({ status: { ...get().status, [id]: "connecting" }, errors: { ...get().errors, [id]: undefined } });
     try {
       const s = await api.connect(id);
+      bumpGeneration(lifecycleGenerations, id);
       set({
         status: { ...get().status, [id]: "connected" },
         versions: { ...get().versions, [id]: s.server_version ?? undefined },
       });
       await get().loadDatabases(id);
     } catch (e: unknown) {
+      bumpGeneration(lifecycleGenerations, id);
       set({
         status: { ...get().status, [id]: "error" },
         errors: { ...get().errors, [id]: String(e) },
@@ -129,13 +225,18 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   disconnect: async (id) => {
+    mutationEpoch++;
+    bumpGeneration(lifecycleGenerations, id);
     await api.disconnect(id);
     clearSchemaColumns(id);
     const branches = { ...get().branches };
     delete branches[id];
+    const versions = { ...get().versions };
+    delete versions[id];
     set({
       status: { ...get().status, [id]: "disconnected" },
       branches,
+      versions,
     });
   },
 
@@ -148,6 +249,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     });
     try {
       const databases = await api.listDatabases(id);
+      if (!get().list.some((c) => c.id === id) || get().status[id] !== "connected") return;
       const latest = get().branches[id] ?? {};
       set({
         branches: {
@@ -156,6 +258,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
         },
       });
     } catch (e: unknown) {
+      if (!get().list.some((c) => c.id === id) || get().status[id] !== "connected") return;
       const latest = get().branches[id] ?? {};
       set({
         branches: {
@@ -257,6 +360,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
       );
     }
   },
-}));
+  };
+});
 
 export type { ConnStatus };

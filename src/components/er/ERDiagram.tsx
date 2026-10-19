@@ -3,7 +3,9 @@ import {
   Background,
   BackgroundVariant,
   Controls,
+  Handle,
   MiniMap,
+  Position,
   ReactFlow,
   type Edge,
   type Node,
@@ -14,6 +16,7 @@ import dagre from "dagre";
 import type { TableDescription } from "@/types";
 import { KeyRound, Link2 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { useTheme } from "@/components/theme/ThemeProvider";
 
 type TableNodeData = {
   desc: TableDescription;
@@ -30,6 +33,7 @@ function nodeHeight(t: TableDescription) {
 
 export function ERDiagram({ tables }: { tables: TableDescription[] }) {
   const [hoverTable, setHoverTable] = useState<string | null>(null);
+  const { theme } = useTheme();
 
   const { nodes, edges } = useMemo(() => buildGraph(tables), [tables]);
   const [localNodes, setLocalNodes] = useState<Node[]>(nodes);
@@ -86,6 +90,8 @@ export function ERDiagram({ tables }: { tables: TableDescription[] }) {
         edges={decoratedEdges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
+        colorMode={theme}
+        nodesConnectable={false}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
@@ -101,21 +107,13 @@ export function ERDiagram({ tables }: { tables: TableDescription[] }) {
         <MiniMap
           pannable
           zoomable
-          nodeColor={() => "hsl(var(--brand))"}
-          maskColor="hsl(var(--background) / 0.8)"
-          style={{
-            background: "hsl(var(--surface-elevated))",
-            border: "1px solid hsl(var(--border))",
-            borderRadius: 8,
-          }}
+          nodeColor={() => "hsl(var(--brand) / 0.6)"}
+          maskColor="hsl(var(--background) / 0.7)"
+          className="!h-[120px] !w-[180px] overflow-hidden rounded-lg border border-border !bg-surface-elevated"
         />
         <Controls
           showInteractive={false}
-          style={{
-            background: "hsl(var(--surface-elevated))",
-            border: "1px solid hsl(var(--border))",
-            borderRadius: 8,
-          }}
+          className="overflow-hidden rounded-lg border border-border !shadow-soft"
         />
       </ReactFlow>
     </div>
@@ -166,12 +164,29 @@ function TableNode({ id, data }: TableNodeProps) {
         {desc.columns.map((c) => (
           <li
             key={c.name}
-            className="flex h-[22px] items-center gap-1.5 px-3"
+            className="relative flex h-[22px] items-center gap-1.5 px-3"
+            title={`${c.name} ${c.data_type}${c.nullable ? "" : " NOT NULL"}`}
           >
+            {/* Per-column anchors: FK edges leave the referencing column and
+                land on the referenced one, Navicat-style. */}
+            <Handle
+              type="target"
+              id={columnHandle("in", c.name)}
+              position={Position.Left}
+              isConnectable={false}
+              className="!h-1.5 !w-1.5 !min-w-0 !border-0 !bg-transparent"
+            />
+            <Handle
+              type="source"
+              id={columnHandle("out", c.name)}
+              position={Position.Right}
+              isConnectable={false}
+              className="!h-1.5 !w-1.5 !min-w-0 !border-0 !bg-transparent"
+            />
             {c.is_primary_key ? (
               <KeyRound className="h-2.5 w-2.5 shrink-0 text-brand" />
             ) : desc.foreign_keys.some((f) => f.columns.includes(c.name)) ? (
-              <Link2 className="h-2.5 w-2.5 shrink-0 text-emerald-400" />
+              <Link2 className="h-2.5 w-2.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
             ) : (
               <span className="h-2.5 w-2.5" />
             )}
@@ -183,18 +198,26 @@ function TableNode({ id, data }: TableNodeProps) {
             >
               {c.name}
             </span>
-            <span className="truncate font-mono text-[10px] text-sky-300">
+            <span className="truncate font-mono text-[10px] text-sky-600 dark:text-sky-300">
               {c.data_type}
             </span>
-            {!c.nullable && (
-              <span className="text-[9px] text-muted-foreground">!</span>
-            )}
+            {/* MySQL Workbench / Navicat convention: filled = NOT NULL. */}
+            <span
+              className={cn(
+                "h-1.5 w-1.5 shrink-0 rotate-45",
+                c.nullable ? "border border-muted-foreground/60" : "bg-muted-foreground"
+              )}
+            />
           </li>
         ))}
       </ul>
       <div className="h-3 bg-surface-muted/40" />
     </div>
   );
+}
+
+function columnHandle(side: "in" | "out", column: string) {
+  return `${side}:${column}`;
 }
 
 function buildGraph(tables: TableDescription[]): {
@@ -217,6 +240,8 @@ function buildGraph(tables: TableDescription[]): {
           id: `fk:${t.name}:${fk.name}`,
           source: t.name,
           target: fk.referenced_table,
+          sourceHandle: columnHandle("out", fk.columns[0]),
+          targetHandle: columnHandle("in", fk.referenced_columns[0] ?? fk.columns[0]),
           type: "smoothstep",
           label: fk.columns.join(","),
           labelStyle: { fontSize: 10, fill: "hsl(var(--muted-foreground))" },

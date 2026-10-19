@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -68,7 +68,10 @@ pub fn mcp_status(state: State<'_, AppState>) -> McpStatus {
 }
 
 #[tauri::command]
-pub async fn start_mcp(app: AppHandle, state: State<'_, AppState>) -> AppResult<McpStatus> {
+pub async fn start_mcp<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> AppResult<McpStatus> {
     ensure_server(&app, &state).await?;
     Ok(status_for(&state))
 }
@@ -86,8 +89,8 @@ pub fn revoke_mcp_authorizations(state: State<'_, AppState>) -> McpStatus {
 }
 
 #[tauri::command]
-pub async fn create_mcp_authorization(
-    app: AppHandle,
+pub async fn create_mcp_authorization<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     id: String,
     ttl_minutes: Option<u64>,
@@ -152,7 +155,7 @@ fn status_for(state: &AppState) -> McpStatus {
     }
 }
 
-async fn ensure_server(app: &AppHandle, state: &AppState) -> AppResult<String> {
+async fn ensure_server<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> AppResult<String> {
     let _start = state.mcp.start_lock.lock().await;
     if let (Some(url), _) = state.mcp.status() {
         return Ok(url);
@@ -171,7 +174,11 @@ async fn ensure_server(app: &AppHandle, state: &AppState) -> AppResult<String> {
     Ok(url)
 }
 
-async fn serve(listener: TcpListener, app: AppHandle, mut stop: oneshot::Receiver<()>) {
+async fn serve<R: Runtime>(
+    listener: TcpListener,
+    app: AppHandle<R>,
+    mut stop: oneshot::Receiver<()>,
+) {
     loop {
         tokio::select! {
             _ = &mut stop => break,
@@ -206,9 +213,9 @@ async fn serve(listener: TcpListener, app: AppHandle, mut stop: oneshot::Receive
     }
 }
 
-async fn handle_http(
+async fn handle_http<R: Runtime>(
     request: Request<Incoming>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<Response<HttpBody>, Infallible> {
     let response = handle_http_inner(request, app)
         .await
@@ -218,9 +225,9 @@ async fn handle_http(
     Ok(response)
 }
 
-async fn handle_http_inner(
+async fn handle_http_inner<R: Runtime>(
     request: Request<Incoming>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> AppResult<Response<HttpBody>> {
     if request.uri().path() != "/mcp" {
         return Ok(text_response(StatusCode::NOT_FOUND, "not found"));
@@ -414,7 +421,11 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": input_schema })
 }
 
-async fn call_tool(app: &AppHandle, grant: &McpGrant, params: Value) -> AppResult<Value> {
+async fn call_tool<R: Runtime>(
+    app: &AppHandle<R>,
+    grant: &McpGrant,
+    params: Value,
+) -> AppResult<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)

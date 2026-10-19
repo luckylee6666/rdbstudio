@@ -47,6 +47,9 @@ export function ImportDialog({
   const [report, setReport] = useState<ImportReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const t = useT();
+  const [sheets, setSheets] = useState<string[]>([]);
+  const [sheet, setSheet] = useState<string | null>(null);
+  const isCsv = !path || /\.(csv|tsv|txt)$/i.test(path);
 
   useEffect(() => {
     if (!open) return;
@@ -73,11 +76,11 @@ export function ImportDialog({
     let alive = true;
     setPreviewing(true);
     setError(null);
-    api
-      .previewCsv(path, delimiter, hasHeader, 5)
-      .then((p) => {
+    const request = isCsv ? api.previewCsv(path, delimiter, hasHeader, 5) : api.previewImportFile(path, sheet, hasHeader);
+    request.then((p) => {
         if (!alive) return;
         setPreview(p);
+        if ("sheets" in p) setSheets(p.sheets as string[]);
         // auto-map by name if headers present
         if (p.headers && columns.length > 0) {
           const m = p.headers.map((h) =>
@@ -96,13 +99,13 @@ export function ImportDialog({
     return () => {
       alive = false;
     };
-  }, [path, delimiter, hasHeader, columns]);
+  }, [path, delimiter, hasHeader, columns, isCsv, sheet]);
 
   const pickPath = async () => {
     const picked = await openDialog({
-      filters: [{ name: "CSV", extensions: ["csv", "tsv", "txt"] }],
+      filters: [{ name: "CSV / Excel / JSON / XML", extensions: ["csv", "tsv", "txt", "xlsx", "xls", "ods", "json", "xml"] }],
     });
-    if (typeof picked === "string") setPath(picked);
+    if (typeof picked === "string") { setSheet(null); setSheets([]); setPath(picked); }
   };
 
   const csvColCount = preview?.sample_rows[0]?.length ?? 0;
@@ -120,7 +123,8 @@ export function ImportDialog({
     setError(null);
     setReport(null);
     try {
-      const r = await api.importCsv(connectionId, {
+      const importer = isCsv ? api.importCsv : api.importFile;
+      const r = await importer(connectionId, {
         path,
         schema: schema ?? null,
         table,
@@ -128,6 +132,7 @@ export function ImportDialog({
         has_header: hasHeader,
         mode,
         column_map: mapping.map((m) => (m === "-" ? "" : m)),
+        sheet,
       });
       setReport(r);
     } catch (e) {
@@ -202,6 +207,8 @@ export function ImportDialog({
           </div>
         </div>
 
+        {sheets.length > 0 && <div><Label>{t("import.worksheet")}</Label><Select value={sheet ?? sheets[0]} onChange={(event) => setSheet(event.target.value)}>{sheets.map((name) => <option key={name} value={name}>{name}</option>)}</Select></div>}
+        {!isCsv && <p className="text-[11px] text-muted-foreground">{t("import.formats_hint")}</p>}
         <div className="grid grid-cols-3 gap-3">
           <div>
             <Label>{t("export.delimiter")}</Label>

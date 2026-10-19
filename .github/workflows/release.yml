@@ -32,6 +32,16 @@ jobs:
   publish-tauri:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     permissions:
       contents: write
     strategy:
@@ -91,36 +101,31 @@ jobs:
       - name: Run Rust tests
         run: cd src-tauri && cargo test --no-default-features
 
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows' && hashFiles('.github/scripts/import-windows-certificate.ps1') != ''
+        shell: pwsh
+        run: .github/scripts/import-windows-certificate.ps1
+
+      - name: Prepare signing and updater configuration
+        id: release-config
+        if: hashFiles('.github/scripts/prepare-release.mjs') != ''
+        run: node .github/scripts/prepare-release.mjs
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ─── Signing (commented until certificates are available) ──────────
-          # macOS Developer ID + notarization:
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows code-signing:
-          # WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          # WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          # Tauri updater signing (run `pnpm tauri signer generate` first):
-          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "rdbstudio ${{ env.RELEASE_TAG }}"
           releaseBody: |
             ## rdbstudio ${{ env.RELEASE_TAG }}
 
-            > **Unsigned build** — first launch needs an extra step:
-            > - **macOS (arm64)**: 双击会提示"无法验证…是否包含恶意软件" →
-            >   点 **完成** → **系统设置 → 隐私与安全性** → 滚到底部，
-            >   "已阻止使用 rdbstudio" 旁点 **仍要打开** → 再次双击即可。
-            >   （app 已做 ad-hoc 签名，**不会**出现"已损坏"。）
-            > - **Windows (x64)**: SmartScreen → "More info" → "Run anyway".
-            > Signed + notarized builds will land once code-signing certificates are in place.
+            macOS signing: ${{ env.APPLE_CERTIFICATE != '' && 'configured' || 'not configured' }}.
+            Windows signing: ${{ env.WINDOWS_CERTIFICATE != '' && 'configured' || 'not configured' }}.
+            Signed automatic-update artifacts: ${{ steps.release-config.outputs.updater == 'true' && 'enabled' || 'not configured' }}.
+
+            If platform signing is not configured, macOS may require System Settings →
+            Privacy & Security → Open Anyway; Windows may show SmartScreen.
 
             See [CHANGELOG.md](https://github.com/luckylee6666/rdbstudio/blob/main/CHANGELOG.md).
           releaseDraft: false
@@ -128,4 +133,4 @@ jobs:
           # marked as a stable release. Add more markers (-pre, -dev, ...) here
           # if we adopt them.
           prerelease: ${{ contains(env.RELEASE_TAG, '-rc') || contains(env.RELEASE_TAG, '-beta') || contains(env.RELEASE_TAG, '-alpha') }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.release-config.outputs.config != '' && format('--config "{0}"', steps.release-config.outputs.config) || '' }}

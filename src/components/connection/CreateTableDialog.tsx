@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { AlertTriangle, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
@@ -274,7 +274,7 @@ export function CreateTableDialog({
       width={780}
       footer={
         <div className="flex w-full flex-col gap-2">
-          {(buildError || submitError) && (
+          {(submitError || (buildError && tableName.trim())) && (
             <div className="flex items-start gap-1.5 text-[12px] text-danger">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span className="break-words">
@@ -317,7 +317,7 @@ export function CreateTableDialog({
           </div>
           <div>
             <Label>{t("create.table.schema")}</Label>
-            <Input value={schema ?? "—"} disabled />
+            <Input value={schema ?? t("create.table.schema_default")} disabled />
           </div>
         </div>
 
@@ -372,7 +372,7 @@ export function CreateTableDialog({
                           updateCol(c.id, { name: e.target.value })
                         }
                         placeholder="col_name"
-                        className="w-full rounded border border-border/50 bg-background px-1.5 py-1 font-mono outline-none focus:border-primary"
+                        className="w-full rounded border border-border/50 bg-background px-1.5 py-1 font-mono outline-none focus:border-brand/60"
                       />
                     </td>
                     <td className="px-1.5 py-1">
@@ -383,24 +383,30 @@ export function CreateTableDialog({
                             updateCol(c.id, { type: e.target.value })
                           }
                           placeholder="TYPE"
-                          className="min-w-0 flex-1 rounded border border-border/50 bg-background px-1.5 py-1 font-mono outline-none focus:border-primary"
+                          className="min-w-0 flex-1 rounded border border-border/50 bg-background px-1.5 py-1 font-mono outline-none focus:border-brand/60"
                         />
-                        <select
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value)
-                              updateCol(c.id, { type: e.target.value });
-                          }}
-                          className="w-7 shrink-0 rounded border border-border/50 bg-background px-0 text-[10px] outline-none focus:border-primary"
-                          title={t("create.table.pick_preset")}
-                        >
-                          <option value="">▾</option>
-                          {typeOptions.map((opt) => (
-                            <option key={opt} value={opt}>
-                              {opt}
+                        <div className="relative grid w-7 shrink-0 place-items-center rounded border border-border/50 bg-background text-muted-foreground hover:text-foreground focus-within:border-brand/60">
+                          <ChevronDown className="pointer-events-none h-3.5 w-3.5" />
+                          <select
+                            value=""
+                            onChange={(e) => {
+                              if (e.target.value)
+                                updateCol(c.id, { type: e.target.value });
+                            }}
+                            aria-label={t("create.table.pick_preset")}
+                            title={t("create.table.pick_preset")}
+                            className="absolute inset-0 cursor-pointer appearance-none opacity-0"
+                          >
+                            <option value="" disabled>
+                              {t("create.table.pick_preset")}
                             </option>
-                          ))}
-                        </select>
+                            {typeOptions.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                       </div>
                     </td>
                     <td className="px-1.5 py-1 text-center">
@@ -427,7 +433,7 @@ export function CreateTableDialog({
                           }
                         />
                         {c.primaryKey && (
-                          <KeyRound className="ml-1 h-3 w-3 text-amber-400" />
+                          <KeyRound className="ml-1 h-3 w-3 text-amber-600 dark:text-amber-400" />
                         )}
                       </label>
                     </td>
@@ -452,8 +458,9 @@ export function CreateTableDialog({
                         onChange={(e) =>
                           updateCol(c.id, { defaultValue: e.target.value })
                         }
-                        placeholder="NULL · 0 · 'x' · NOW()"
-                        className="w-full rounded border border-border/50 bg-background px-1.5 py-1 font-mono outline-none focus:border-primary"
+                        placeholder={t("create.table.default_placeholder")}
+                        title={t("create.table.default_hint")}
+                        className="w-full rounded border border-border/50 bg-background px-1.5 py-1 font-mono outline-none focus:border-brand/60"
                       />
                     </td>
                     <td className="px-1 py-1 text-center">

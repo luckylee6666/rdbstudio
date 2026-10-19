@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Braces, Check, Clipboard, FileText, Terminal, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
+import { binarySummary, isBinaryType } from "@/lib/binary";
 import { copyText } from "@/lib/clipboard";
 import { toCSV } from "@/lib/csv";
 import { toInsertSql, toJSONRows } from "@/lib/rowcopy";
@@ -239,6 +240,7 @@ export function DataGrid({
                       key={i}
                       width={widths[i]}
                       value={row?.[i]}
+                      dataType={columns[i]?.data_type}
                       selected={
                         selected?.row === vr.index && selected?.col === i
                       }
@@ -284,6 +286,7 @@ export function DataGrid({
 function Cell({
   width,
   value,
+  dataType,
   selected,
   onClick,
   onDoubleClick,
@@ -291,6 +294,7 @@ function Cell({
 }: {
   width: number;
   value: unknown;
+  dataType?: string;
   selected?: boolean;
   onClick?: () => void;
   onDoubleClick?: () => void;
@@ -298,8 +302,11 @@ function Cell({
 }) {
   const isNull = value === null || value === undefined;
   const isNumeric = typeof value === "number" || typeof value === "bigint";
+  const binary = !isNull && dataType && isBinaryType(dataType) ? binarySummary(value) : null;
   const display = isNull
     ? "NULL"
+    : binary
+    ? binary
     : typeof value === "string"
     ? value
     : typeof value === "boolean"

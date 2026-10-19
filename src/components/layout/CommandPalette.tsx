@@ -18,7 +18,7 @@ import { cn } from "@/lib/cn";
 import { anyModalOpen } from "@/components/ui/Modal";
 import { useLayout } from "@/store/layout";
 import { useConnections } from "@/store/connections";
-import { useWorkspace } from "@/store/workspace";
+import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { useT } from "@/store/i18n";
 
@@ -81,7 +81,7 @@ export function CommandPalette() {
           openTab({
             id: `query:${crypto.randomUUID()}`,
             kind: "query",
-            title: "Query",
+            title: nextQueryTitle(),
             subtitle: c.name,
             connectionId: c.id,
           }),

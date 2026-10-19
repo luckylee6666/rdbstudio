@@ -1,12 +1,20 @@
 pub mod alter;
 pub mod data;
 pub mod design;
+pub mod event_tools;
 pub mod exec;
 pub mod io;
 pub mod meta;
+pub mod maintenance;
+pub mod native_copy;
 pub mod pool;
 pub mod redis_ops;
+pub mod redis_tools;
 pub mod ssh;
+pub mod sessions;
+pub mod schema_objects;
+pub mod sequence_tools;
+pub mod sync;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{ConnectionConfig, DriverKind};
@@ -473,3 +481,9 @@ mod tests {
         assert!(build_url(&c).is_err());
     }
 }
+
+pub mod objects;
+
+pub mod imports;
+
+pub mod limits;

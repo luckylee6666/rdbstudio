@@ -477,12 +477,25 @@ pub struct EditResult {
 }
 
 #[derive(Debug, Clone)]
-enum BindValue {
+pub(crate) enum BindValue {
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
     Str(String),
+    Bytes(Vec<u8>),
+    Invalid(String),
+}
+
+fn column_bind(value: &serde_json::Value, column: &str, types: Option<&HashMap<String, String>>) -> BindValue {
+    let is_marker = value.as_object().is_some_and(|object| object.len() == 1 && object.contains_key("$binary"));
+    let binary_column = types.and_then(|types| types.get(column)).is_none_or(|ty| { let ty = ty.to_ascii_lowercase(); ty == "bytea" || ty.contains("blob") || ty.contains("binary") });
+    if is_marker && !binary_column { BindValue::Str(value.to_string()) } else { json_to_bind(value) }
+}
+
+pub(crate) async fn column_bind_types(pool: &DbPool, schema: Option<&str>, table: &str) -> AppResult<HashMap<String, String>> {
+    if let DbPool::Postgres(pool) = pool { return pg_column_types(pool, schema, table).await; }
+    Ok(crate::db::meta::list_columns(pool, schema, table).await?.into_iter().map(|column| (column.name, column.data_type)).collect())
 }
 
 fn json_to_bind(v: &serde_json::Value) -> BindValue {
@@ -504,6 +517,13 @@ fn json_to_bind(v: &serde_json::Value) -> BindValue {
                 BindValue::Str(n.to_string())
             }
         }
+        serde_json::Value::Object(object) if object.len() == 1 && object.contains_key("$binary") => {
+            use base64::Engine;
+            match object.get("$binary").and_then(|v| v.as_str()).and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok()) {
+                Some(bytes) if bytes.len() <= 8 * 1024 * 1024 => BindValue::Bytes(bytes),
+                _ => BindValue::Invalid("binary values must contain valid base64 and at most 8 MiB".into()),
+            }
+        }
         serde_json::Value::String(s) => BindValue::Str(s.clone()),
         other => BindValue::Str(other.to_string()),
     }
@@ -514,6 +534,7 @@ fn build_edit_sql_impl<F>(
     schema: Option<&str>,
     table: &str,
     edit: &Edit,
+    override_identity: bool,
     mut get_ph_and_bind: F,
 ) -> String
 where
@@ -551,6 +572,7 @@ where
             )
         }
         Edit::Insert { values } => {
+            if values.is_empty() { return if driver == DriverKind::Mysql { format!("INSERT INTO {target} () VALUES ()") } else { format!("INSERT INTO {target} DEFAULT VALUES") }; }
             let cols: Vec<String> = values
                 .iter()
                 .map(|(c, _)| quote_ident(driver, c))
@@ -565,9 +587,10 @@ where
                 })
                 .collect();
             format!(
-                "INSERT INTO {} ({}) VALUES ({})",
+                "INSERT INTO {} ({}){} VALUES ({})",
                 target,
                 cols.join(", "),
+                if override_identity && driver == DriverKind::Postgres { " OVERRIDING SYSTEM VALUE" } else { "" },
                 phs.join(", ")
             )
         }
@@ -590,16 +613,19 @@ where
     }
 }
 
-fn build_edit_sql(
+pub(crate) fn build_edit_sql(
     driver: DriverKind,
     schema: Option<&str>,
     table: &str,
     edit: &Edit,
     pg_types: Option<&HashMap<String, String>>,
 ) -> (String, Vec<BindValue>) {
+    build_edit_sql_bulk(driver, schema, table, edit, pg_types, false)
+}
+fn build_edit_sql_bulk(driver: DriverKind, schema: Option<&str>, table: &str, edit: &Edit, pg_types: Option<&HashMap<String,String>>, override_identity: bool) -> (String, Vec<BindValue>) {
     let mut binds = Vec::new();
-    let sql = build_edit_sql_impl(driver, schema, table, edit, |ph_n, col, v| {
-        binds.push(json_to_bind(v));
+    let sql = build_edit_sql_impl(driver, schema, table, edit, override_identity, |ph_n, col, v| {
+        binds.push(column_bind(v, col, pg_types));
         let ph = placeholder(driver, ph_n);
         // PostgreSQL refuses an assignment from a text-typed parameter to a
         // non-text column (42804). sqlx always declares String binds as TEXT,
@@ -641,7 +667,7 @@ pub(crate) async fn pg_column_types(
     Ok(map)
 }
 
-fn bind_sqlite(
+pub(crate) fn bind_sqlite(
     args: &mut sqlx::sqlite::SqliteArguments<'_>,
     b: &BindValue,
 ) -> AppResult<()> {
@@ -652,13 +678,15 @@ fn bind_sqlite(
         BindValue::Bool(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
         BindValue::Int(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
         BindValue::Float(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
+        BindValue::Bytes(bytes) => args.add(bytes.clone()).map_err(|e| AppError::msg(e.to_string())),
+        BindValue::Invalid(error) => Err(AppError::msg(error.clone())),
         BindValue::Str(s) => args
             .add(s.clone())
             .map_err(|e| AppError::msg(e.to_string())),
     }
 }
 
-fn bind_pg(
+pub(crate) fn bind_pg(
     args: &mut sqlx::postgres::PgArguments,
     b: &BindValue,
 ) -> AppResult<()> {
@@ -669,13 +697,15 @@ fn bind_pg(
         BindValue::Bool(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
         BindValue::Int(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
         BindValue::Float(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
+        BindValue::Bytes(bytes) => args.add(bytes.clone()).map_err(|e| AppError::msg(e.to_string())),
+        BindValue::Invalid(error) => Err(AppError::msg(error.clone())),
         BindValue::Str(s) => args
             .add(s.clone())
             .map_err(|e| AppError::msg(e.to_string())),
     }
 }
 
-fn bind_mysql(
+pub(crate) fn bind_mysql(
     args: &mut sqlx::mysql::MySqlArguments,
     b: &BindValue,
 ) -> AppResult<()> {
@@ -688,6 +718,8 @@ fn bind_mysql(
             .map_err(|e| AppError::msg(e.to_string())),
         BindValue::Int(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
         BindValue::Float(v) => args.add(*v).map_err(|e| AppError::msg(e.to_string())),
+        BindValue::Bytes(bytes) => args.add(bytes.clone()).map_err(|e| AppError::msg(e.to_string())),
+        BindValue::Invalid(error) => Err(AppError::msg(error.clone())),
         BindValue::Str(s) => args
             .add(s.clone())
             .map_err(|e| AppError::msg(e.to_string())),
@@ -750,9 +782,32 @@ fn single_row_violation(edit: &Edit, idx: usize, n: u64, applied: u64) -> Option
     }
 }
 
+async fn lock_pg_sequences(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, schema: Option<&str>, table: &str) -> AppResult<Vec<(String,String)>> {
+    let columns: Vec<String> = sqlx::query_scalar("SELECT column_name::text FROM information_schema.columns WHERE table_schema=COALESCE($1,current_schema()) AND table_name=$2 AND (is_identity='YES' OR column_default LIKE 'nextval(%')")
+        .bind(schema).bind(table).fetch_all(&mut **tx).await?;
+    let target = qualified(DriverKind::Postgres, schema, table);
+    let mut sequences = Vec::new();
+    for column in columns {
+        let sequence: Option<String> = sqlx::query_scalar("SELECT pg_catalog.pg_get_serial_sequence($1,$2)").bind(&target).bind(&column).fetch_one(&mut **tx).await?;
+        let sequence = sequence.ok_or_else(|| AppError::msg("an auto-increment column uses a shared or unowned sequence; synchronize it explicitly"))?;
+        let increment: i64 = sqlx::query_scalar("SELECT seqincrement FROM pg_catalog.pg_sequence WHERE seqrelid=$1::regclass").bind(&sequence).fetch_one(&mut **tx).await?;
+        if increment <= 0 { return Err(AppError::msg("descending PostgreSQL sequences need an explicit transfer plan")); }
+        // A no-op ALTER holds PostgreSQL's sequence lock through commit, so
+        // concurrent nextval() calls cannot race the counter alignment below.
+        sqlx::query(&format!("ALTER SEQUENCE {sequence} INCREMENT BY {increment}")).execute(&mut **tx).await?;
+        sequences.push((column, sequence));
+    }
+    Ok(sequences)
+}
+
 pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResult> {
+    apply_edits_internal(pool, batch, false).await
+}
+pub(crate) async fn apply_synced_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResult> { apply_edits_internal(pool, batch, true).await }
+async fn apply_edits_internal(pool: &DbPool, batch: &EditBatch, synchronize_sequences: bool) -> AppResult<EditResult> {
     let driver = pool.driver();
     let mut applied = 0u64;
+    let types = column_bind_types(pool, batch.schema.as_deref(), &batch.table).await?;
 
     match pool {
         DbPool::Redis(_) => return crate::db::redis_ops::unsupported("Apply edits"),
@@ -760,7 +815,7 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
             let mut tx = p.begin().await?;
             for (idx, e) in batch.edits.iter().enumerate() {
                 let (sql, binds) =
-                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e, None);
+                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e, Some(&types));
                 let mut args = sqlx::sqlite::SqliteArguments::default();
                 for b in &binds {
                     bind_sqlite(&mut args, b)?;
@@ -787,15 +842,16 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
             tx.commit().await?;
         }
         DbPool::Postgres(p) => {
-            let types = pg_column_types(p, batch.schema.as_deref(), &batch.table).await?;
             let mut tx = p.begin().await?;
+            let sequences = if synchronize_sequences && batch.edits.iter().any(|edit| matches!(edit, Edit::Insert { .. })) { lock_pg_sequences(&mut tx, batch.schema.as_deref(), &batch.table).await? } else { vec![] };
             for (idx, e) in batch.edits.iter().enumerate() {
-                let (sql, binds) = build_edit_sql(
+                let (sql, binds) = build_edit_sql_bulk(
                     driver,
                     batch.schema.as_deref(),
                     &batch.table,
                     e,
                     Some(&types),
+                    synchronize_sequences,
                 );
                 let mut args = sqlx::postgres::PgArguments::default();
                 for b in &binds {
@@ -820,13 +876,21 @@ pub async fn apply_edits(pool: &DbPool, batch: &EditBatch) -> AppResult<EditResu
                     }
                 }
             }
+            for (column, sequence) in sequences {
+                let target = qualified(DriverKind::Postgres, batch.schema.as_deref(), &batch.table);
+                let maximum: Option<i64> = sqlx::query_scalar(&format!("SELECT MAX({})::bigint FROM {target}", quote_ident(DriverKind::Postgres, &column))).fetch_one(&mut *tx).await?;
+                if let Some(maximum) = maximum {
+                    let last: i64 = sqlx::query_scalar(&format!("SELECT last_value FROM {sequence}")).fetch_one(&mut *tx).await?;
+                    if maximum >= last { sqlx::query("SELECT pg_catalog.setval($1::regclass, $2, true)").bind(&sequence).bind(maximum).execute(&mut *tx).await?; }
+                }
+            }
             tx.commit().await?;
         }
         DbPool::Mysql(p) => {
             let mut tx = p.begin().await?;
             for (idx, e) in batch.edits.iter().enumerate() {
                 let (sql, binds) =
-                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e, None);
+                    build_edit_sql(driver, batch.schema.as_deref(), &batch.table, e, Some(&types));
                 let mut args = sqlx::mysql::MySqlArguments::default();
                 for b in &binds {
                     bind_mysql(&mut args, b)?;
@@ -868,13 +932,22 @@ pub fn preview_edit_sql(
     table: &str,
     edit: &Edit,
 ) -> String {
-    build_edit_sql_impl(driver, schema, table, edit, |_ph_n, _col, v| {
-        match json_to_bind(v) {
+    preview_edit_sql_typed(driver, schema, table, edit, None)
+}
+
+pub(crate) fn preview_edit_sql_typed(driver: DriverKind, schema: Option<&str>, table: &str, edit: &Edit, types: Option<&HashMap<String,String>>) -> String {
+    build_edit_sql_impl(driver, schema, table, edit, false, |_ph_n, col, v| {
+        match column_bind(v, col, types) {
             BindValue::Null => "NULL".into(),
             BindValue::Bool(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
             BindValue::Int(v) => v.to_string(),
             BindValue::Float(v) => v.to_string(),
             BindValue::Str(s) => sql_string_literal(driver, &s),
+            BindValue::Bytes(bytes) => {
+                let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                match driver { DriverKind::Postgres => format!("decode('{hex}', 'hex')"), _ => format!("X'{hex}'") }
+            }
+            BindValue::Invalid(_) => "NULL /* invalid binary value */".to_owned(),
         }
     })
 }

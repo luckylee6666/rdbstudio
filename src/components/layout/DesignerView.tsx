@@ -14,13 +14,12 @@ import {
   ScrollText,
   Trash2,
   Undo2,
+  Zap,
 } from "lucide-react";
 import type {
   AlterPlan,
   ColumnDetail,
   ColumnEdit,
-  ForeignKey,
-  IndexInfo,
   TableDescription,
   WorkspaceTab,
 } from "@/types";
@@ -32,13 +31,17 @@ import { ReadOnlySql } from "@/components/editor/ReadOnlySql";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { useT } from "@/store/i18n";
+import { useConnections } from "@/store/connections";
+import { ConstraintEditorPanel } from "@/components/layout/ConstraintEditorPanel";
+import { ObjectManagerView } from "@/components/layout/ObjectManagerView";
 
-type SubTab = "columns" | "indexes" | "fks" | "ddl";
+type SubTab = "columns" | "indexes" | "fks" | "ddl" | "objects";
 
 export function DesignerView({ tab }: { tab: WorkspaceTab }) {
   const connectionId = tab.connectionId!;
   const schema = tab.schema;
   const table = tab.table ?? tab.title;
+  const connection = useConnections((s) => s.list.find((c) => c.id === connectionId));
 
   const [desc, setDesc] = useState<TableDescription | null>(null);
   const [ddl, setDdl] = useState<string>("");
@@ -155,9 +158,28 @@ export function DesignerView({ tab }: { tab: WorkspaceTab }) {
               ) : (
                 <ColumnsPanel columns={desc.columns} />
               ))}
-            {active === "indexes" && <IndexesPanel indexes={desc.indexes} />}
-            {active === "fks" && <ForeignKeysPanel fks={desc.foreign_keys} />}
+            {(active === "indexes" || active === "fks") && connection && <ConstraintEditorPanel
+              id={connectionId}
+              schema={schema}
+              table={table}
+              driver={connection.driver}
+              columns={desc.columns.map((c) => c.name)}
+              indexes={desc.indexes}
+              foreignKeys={desc.foreign_keys}
+              readOnly={connection.read_only}
+              initialMode={active === "fks" ? "foreign_key" : "index"}
+              onSaved={() => void load()}
+            />}
             {active === "ddl" && <DDLPanel ddl={ddl} />}
+            {active === "objects" && connection && (
+              <ObjectManagerView
+                connectionId={connectionId}
+                schema={schema}
+                driver={connection.driver}
+                readOnly={connection.read_only}
+                table={table}
+              />
+            )}
           </>
         ) : null}
       </div>
@@ -356,6 +378,12 @@ function Header({
           active={active === "ddl"}
           onClick={() => setActive("ddl")}
         />
+        <SubTabBtn
+          icon={Zap}
+          label={t("designer.tab.triggers")}
+          active={active === "objects"}
+          onClick={() => setActive("objects")}
+        />
       </div>
     </div>
   );
@@ -443,13 +471,13 @@ function ColumnsPanel({ columns }: { columns: ColumnDetail[] }) {
                 </div>
               </Td>
               <Td>
-                <span className="font-mono text-sky-300">{formatType(c)}</span>
+                <span className="font-mono text-sky-700 dark:text-sky-300">{formatType(c)}</span>
               </Td>
               <Td>
                 {c.nullable ? (
                   <span className="text-muted-foreground">NULL</span>
                 ) : (
-                  <span className="text-amber-400">NOT NULL</span>
+                  <span className="text-amber-600 dark:text-amber-400">NOT NULL</span>
                 )}
               </Td>
               <Td>
@@ -565,7 +593,7 @@ function ColumnsEditor({
                     onChange={(ev) =>
                       update(i, { data_type: ev.target.value })
                     }
-                    className="h-7 w-full rounded border border-border/70 bg-surface px-2 font-mono text-[12.5px] text-sky-300 focus:border-brand/60 focus:outline-none"
+                    className="h-7 w-full rounded border border-border/70 bg-surface px-2 font-mono text-[12.5px] text-sky-700 dark:text-sky-300 focus:border-brand/60 focus:outline-none"
                   />
                 </Td>
                 <Td>
@@ -633,97 +661,6 @@ function ColumnsEditor({
   );
 }
 
-function IndexesPanel({ indexes }: { indexes: IndexInfo[] }) {
-  const t = useT();
-  return (
-    <div className="h-full overflow-auto">
-      <table className="w-full border-separate border-spacing-0 text-[12.5px]">
-        <thead className="sticky top-0 z-10 bg-surface/95 backdrop-blur">
-          <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
-            <Th>{t("design.col.name")}</Th>
-            <Th>{t("design.col.columns")}</Th>
-            <Th>{t("design.col.unique")}</Th>
-            <Th>{t("design.col.primary")}</Th>
-            <Th>{t("design.col.method")}</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {indexes.map((i) => (
-            <tr key={i.name} className="hover:bg-accent/30">
-              <Td>
-                <span className="font-mono">{i.name}</span>
-              </Td>
-              <Td>
-                <span className="font-mono">{i.columns.join(", ")}</span>
-              </Td>
-              <Td>{i.is_unique ? <Pill tone="brand">unique</Pill> : "—"}</Td>
-              <Td>{i.is_primary ? <Pill tone="brand">PK</Pill> : "—"}</Td>
-              <Td className="text-muted-foreground">{i.method ?? "—"}</Td>
-            </tr>
-          ))}
-          {indexes.length === 0 && (
-            <tr>
-              <td colSpan={5} className="py-10 text-center text-muted-foreground">
-                {t("design.indexes.none")}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ForeignKeysPanel({ fks }: { fks: ForeignKey[] }) {
-  const t = useT();
-  return (
-    <div className="h-full overflow-auto">
-      <table className="w-full border-separate border-spacing-0 text-[12.5px]">
-        <thead className="sticky top-0 z-10 bg-surface/95 backdrop-blur">
-          <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
-            <Th>{t("design.col.name")}</Th>
-            <Th>{t("design.col.columns")}</Th>
-            <Th>{t("design.col.references")}</Th>
-            <Th>{t("design.col.on_update")}</Th>
-            <Th>{t("design.col.on_delete")}</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {fks.map((f) => (
-            <tr key={f.name} className="hover:bg-accent/30">
-              <Td>
-                <span className="font-mono">{f.name}</span>
-              </Td>
-              <Td>
-                <span className="font-mono">{f.columns.join(", ")}</span>
-              </Td>
-              <Td>
-                <span className="font-mono">
-                  {f.referenced_schema ? `${f.referenced_schema}.` : ""}
-                  {f.referenced_table}
-                </span>
-                <span className="text-muted-foreground">
-                  {" "}
-                  ({f.referenced_columns.join(", ")})
-                </span>
-              </Td>
-              <Td className="text-muted-foreground">{f.on_update ?? "—"}</Td>
-              <Td className="text-muted-foreground">{f.on_delete ?? "—"}</Td>
-            </tr>
-          ))}
-          {fks.length === 0 && (
-            <tr>
-              <td colSpan={5} className="py-10 text-center text-muted-foreground">
-                {t("design.fks.none")}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 function DDLPanel({ ddl }: { ddl: string }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
@@ -779,8 +716,8 @@ function Pill({
 }) {
   const toneMap = {
     brand: "bg-brand/20 text-brand",
-    success: "bg-emerald-500/15 text-emerald-300",
-    warning: "bg-amber-500/15 text-amber-300",
+    success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+    warning: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
   };
   return (
     <span
