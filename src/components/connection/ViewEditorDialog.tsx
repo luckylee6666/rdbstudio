@@ -61,7 +61,7 @@ export function ViewEditorDialog({
     try {
       const res = await api.executeQuery(
         connectionId,
-        `SELECT * FROM (${clean}) AS _rdb_view_preview LIMIT 20`,
+        `SELECT * FROM (\n${clean}\n) AS _rdb_view_preview LIMIT 20`,
         undefined,
         undefined,
         { recordHistory: false }

@@ -1019,9 +1019,17 @@ pub fn extract_view_select_body(ddl: &str) -> String {
                 i += 1;
             }
             let word = &ddl[start..i];
-            if !seen_view && word.eq_ignore_ascii_case("VIEW") {
-                seen_view = true;
-            } else if seen_view && word.eq_ignore_ascii_case("AS") {
+            if !seen_view {
+                if word.eq_ignore_ascii_case("VIEW") {
+                    seen_view = true;
+                } else if word.eq_ignore_ascii_case("SELECT")
+                    || word.eq_ignore_ascii_case("WITH")
+                    || word.eq_ignore_ascii_case("VALUES")
+                    || word.eq_ignore_ascii_case("TABLE")
+                {
+                    break;
+                }
+            } else if word.eq_ignore_ascii_case("AS") {
                 body_start = Some(i);
                 break;
             }
@@ -1113,9 +1121,13 @@ pub fn build_save_view_statements(
     if clean_sql.is_empty() {
         return Err(AppError::msg("view SELECT query is required"));
     }
-    if !crate::db::exec::is_readonly(clean_sql) {
+    let kw = crate::db::exec::first_keyword(clean_sql);
+    if !matches!(kw.as_str(), "SELECT" | "WITH" | "VALUES" | "TABLE")
+        || !crate::db::exec::is_readonly(clean_sql)
+        || !crate::db::exec::is_single_statement(clean_sql)
+    {
         return Err(AppError::msg(
-            "view definition must be a SELECT or WITH query",
+            "view definition must be a single SELECT or WITH query",
         ));
     }
 
@@ -1136,15 +1148,15 @@ pub fn build_save_view_statements(
             stmts.push(format!("CREATE VIEW {} AS\n{}", target_qualified, clean_sql));
         }
         DriverKind::Postgres | DriverKind::Mysql => {
+            stmts.push(format!(
+                "CREATE OR REPLACE VIEW {} AS\n{}",
+                target_qualified, clean_sql
+            ));
             if let Some(orig) = orig_trimmed {
                 if orig != trimmed_name {
                     stmts.push(format!("DROP VIEW IF EXISTS {}", qualify(orig)));
                 }
             }
-            stmts.push(format!(
-                "CREATE OR REPLACE VIEW {} AS\n{}",
-                target_qualified, clean_sql
-            ));
         }
         DriverKind::Redis => {
             return crate::db::redis_ops::unsupported("Save view");
@@ -1185,10 +1197,10 @@ mod view_tests {
 
     #[test]
     fn extract_view_select_body_preserves_plain_select_with_column_aliases() {
-        let raw = "SELECT id AS user_id, name AS display_name FROM users;";
+        let raw = "SELECT view, id AS user_id, name AS display_name FROM users;";
         assert_eq!(
             extract_view_select_body(raw),
-            "SELECT id AS user_id, name AS display_name FROM users"
+            "SELECT view, id AS user_id, name AS display_name FROM users"
         );
     }
 
@@ -1223,12 +1235,37 @@ mod view_tests {
             vec!["CREATE OR REPLACE VIEW \"public\".\"v_users\" AS\nSELECT id FROM users"]
         );
 
+        let mysql_rename_stmts = build_save_view_statements(
+            DriverKind::Mysql,
+            Some("app"),
+            "v_new",
+            Some("v_old"),
+            "SELECT id FROM users",
+        )
+        .unwrap();
+        assert_eq!(
+            mysql_rename_stmts,
+            vec![
+                "CREATE OR REPLACE VIEW `app`.`v_new` AS\nSELECT id FROM users",
+                "DROP VIEW IF EXISTS `app`.`v_old`"
+            ]
+        );
+
         assert!(build_save_view_statements(
             DriverKind::Sqlite,
             None,
             "v_bad",
             None,
             "DELETE FROM users"
+        )
+        .is_err());
+
+        assert!(build_save_view_statements(
+            DriverKind::Sqlite,
+            None,
+            "v_multi",
+            None,
+            "SELECT 1; SELECT 2"
         )
         .is_err());
     }

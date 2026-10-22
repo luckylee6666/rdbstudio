@@ -151,6 +151,8 @@ export interface ColumnDetail {
   numeric_scale?: number | null;
   is_primary_key: boolean;
   is_auto_increment: boolean;
+  is_identity?: boolean;
+  identity_generation?: string | null;
 }
 
 export interface ForeignKey {

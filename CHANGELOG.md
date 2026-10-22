@@ -5,6 +5,8 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-22
+
 ### Added
 - 导出列数据脱敏（Data Masking）：单表导出（CSV / JSON / SQL INSERT）支持按列配置 `email`、`phone`、`name`、`partial`、`redact`、`hash`、`null` 7 种脱敏规则，并提供敏感列名智能识别。
 - 测试数据生成器（Test Data Generator）：表右键支持按列配置 14 类生成规则（自增序列、随机整数/浮点数、布尔、UUID v4、姓名、邮箱、手机号、随机词组、枚举列表、日期、时间戳等）与空值比例，内置种子复现预览与事务内批量写入。

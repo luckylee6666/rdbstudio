@@ -143,7 +143,10 @@ export function ServerMonitorView({
         <div className="w-56">
           <Select
             value={connId}
-            onChange={(e) => setConnId(e.target.value)}
+            onChange={(e) => {
+              setSnapshot(null);
+              setConnId(e.target.value);
+            }}
             aria-label={t("monitor.connection")}
           >
             {list.length === 0 && (

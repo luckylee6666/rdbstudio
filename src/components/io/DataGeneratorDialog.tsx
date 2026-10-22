@@ -27,7 +27,7 @@ export function inferColumnGeneratorConfig(
   const dtype = col.data_type.toLowerCase();
   const defaultNullPct = col.nullable && !col.is_primary_key ? 10 : 0;
 
-  if (col.is_auto_increment) {
+  if (col.is_auto_increment || col.is_identity) {
     return {
       column: col.name,
       rule: "skip",
@@ -401,21 +401,23 @@ export function DataGeneratorDialog({
                           <Input
                             type="number"
                             value={cfg.start ?? 1}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              const n = Number(e.target.value);
                               updateConfig(idx, {
-                                start: Number(e.target.value) || 1,
-                              })
-                            }
+                                start: Number.isFinite(n) ? n : 1,
+                              });
+                            }}
                             placeholder="Start"
                           />
                           <Input
                             type="number"
                             value={cfg.step ?? 1}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              const n = Number(e.target.value);
                               updateConfig(idx, {
-                                step: Number(e.target.value) || 1,
-                              })
-                            }
+                                step: Number.isFinite(n) && n !== 0 ? n : 1,
+                              });
+                            }}
                             placeholder="Step"
                           />
                         </>
@@ -426,21 +428,23 @@ export function DataGeneratorDialog({
                           <Input
                             type="number"
                             value={cfg.min ?? 1}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              const n = Number(e.target.value);
                               updateConfig(idx, {
-                                min: Number(e.target.value) || 0,
-                              })
-                            }
+                                min: Number.isFinite(n) ? n : 0,
+                              });
+                            }}
                             placeholder="Min"
                           />
                           <Input
                             type="number"
                             value={cfg.max ?? 1000}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              const n = Number(e.target.value);
                               updateConfig(idx, {
-                                max: Number(e.target.value) || 1000,
-                              })
-                            }
+                                max: Number.isFinite(n) ? n : 1000,
+                              });
+                            }}
                             placeholder="Max"
                           />
                         </>

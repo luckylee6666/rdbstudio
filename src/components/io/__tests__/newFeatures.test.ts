@@ -45,6 +45,18 @@ describe("new workbench features", () => {
       inferColumnGeneratorConfig(
         makeCol({
           name: "id",
+          data_type: "BIGINT",
+          is_primary_key: true,
+          is_identity: true,
+          nullable: false,
+        })
+      ).rule
+    ).toBe("skip");
+
+    expect(
+      inferColumnGeneratorConfig(
+        makeCol({
+          name: "id",
           data_type: "INTEGER",
           is_primary_key: true,
           is_auto_increment: false,
