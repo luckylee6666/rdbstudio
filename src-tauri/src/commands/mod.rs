@@ -41,6 +41,11 @@ pub mod sync;
 
 pub mod redis_tools;
 
+pub mod datagen;
+
+pub mod monitor;
+
+
 #[tauri::command]
 pub fn restart_application<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     app.restart();

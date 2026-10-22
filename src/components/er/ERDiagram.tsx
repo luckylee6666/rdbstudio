@@ -31,28 +31,221 @@ function nodeHeight(t: TableDescription) {
   return HEADER_H + t.columns.length * ROW_H + FOOTER_H;
 }
 
-export function ERDiagram({ tables }: { tables: TableDescription[] }) {
+export type ErPositions = Record<string, { x: number; y: number }>;
+
+export function loadErPositions(layoutKey?: string): ErPositions {
+  if (!layoutKey) return {};
+  try {
+    const raw = localStorage.getItem(`rdb:erLayout:${layoutKey}`);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveErPositions(layoutKey: string | undefined, pos: ErPositions) {
+  if (!layoutKey) return;
+  try {
+    if (Object.keys(pos).length === 0) {
+      localStorage.removeItem(`rdb:erLayout:${layoutKey}`);
+    } else {
+      localStorage.setItem(`rdb:erLayout:${layoutKey}`, JSON.stringify(pos));
+    }
+  } catch {
+    /* ignore storage errors */
+  }
+}
+
+function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * Synthesize a standalone, crisp vector SVG of the ER diagram using either
+ * user-arranged node positions or the default Dagre layout.
+ */
+export function buildErSvg(
+  tables: TableDescription[],
+  customPositions?: ErPositions
+): string {
+  const { nodes, edges } = buildGraph(tables, customPositions);
+  if (nodes.length === 0) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"></svg>`;
+  }
+  const posMap = new Map<string, { x: number; y: number; h: number; desc: TableDescription }>();
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const n of nodes) {
+    const desc = (n.data as TableNodeData).desc;
+    const h = nodeHeight(desc);
+    const x = n.position.x;
+    const y = n.position.y;
+    posMap.set(n.id, { x, y, h, desc });
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + NODE_WIDTH);
+    maxY = Math.max(maxY, y + h);
+  }
+
+  const pad = 40;
+  const width = Math.max(320, Math.ceil(maxX - minX + pad * 2));
+  const height = Math.max(200, Math.ceil(maxY - minY + pad * 2));
+  const ox = -minX + pad;
+  const oy = -minY + pad;
+
+  const lines: string[] = [];
+  lines.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11">`
+  );
+  lines.push(
+    `<rect width="100%" height="100%" fill="#0f172a" />`
+  );
+
+  // Render FK edges first so table cards sit above connectors
+  for (const e of edges) {
+    const src = posMap.get(e.source);
+    const dst = posMap.get(e.target);
+    if (!src || !dst) continue;
+    const srcColName = (e.sourceHandle ?? "").replace(/^out:/, "");
+    const dstColName = (e.targetHandle ?? "").replace(/^in:/, "");
+    const srcIdx = Math.max(
+      0,
+      src.desc.columns.findIndex((c) => c.name === srcColName)
+    );
+    const dstIdx = Math.max(
+      0,
+      dst.desc.columns.findIndex((c) => c.name === dstColName)
+    );
+    const x1 = src.x + ox + NODE_WIDTH;
+    const y1 = src.y + oy + HEADER_H + srcIdx * ROW_H + ROW_H / 2;
+    const x2 = dst.x + ox;
+    const y2 = dst.y + oy + HEADER_H + dstIdx * ROW_H + ROW_H / 2;
+    const cx = (x1 + x2) / 2;
+    lines.push(
+      `<path d="M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}" fill="none" stroke="#64748b" stroke-width="1.5" />`
+    );
+    lines.push(`<circle cx="${x2}" cy="${y2}" r="3" fill="#38bdf8" />`);
+  }
+
+  // Render table nodes
+  for (const [, item] of posMap) {
+    const x = item.x + ox;
+    const y = item.y + oy;
+    const h = item.h;
+    const { desc } = item;
+    lines.push(`<g transform="translate(${x}, ${y})">`);
+    lines.push(
+      `<rect width="${NODE_WIDTH}" height="${h}" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1" />`
+    );
+    lines.push(
+      `<rect width="${NODE_WIDTH}" height="${HEADER_H}" rx="8" fill="#0f172a" />`
+    );
+    lines.push(
+      `<line x1="0" y1="${HEADER_H}" x2="${NODE_WIDTH}" y2="${HEADER_H}" stroke="#334155" stroke-width="1" />`
+    );
+    lines.push(
+      `<text x="12" y="20" fill="#f8fafc" font-weight="bold" font-size="12">${escapeXml(
+        desc.name
+      )}</text>`
+    );
+    desc.columns.forEach((col, idx) => {
+      const cy = HEADER_H + idx * ROW_H;
+      const badge = col.is_primary_key
+        ? "PK"
+        : desc.foreign_keys.some((f) => f.columns.includes(col.name))
+        ? "FK"
+        : "";
+      const badgeColor = col.is_primary_key ? "#38bdf8" : "#34d399";
+      if (badge) {
+        lines.push(
+          `<text x="10" y="${cy + 15}" fill="${badgeColor}" font-size="9" font-weight="bold">${badge}</text>`
+        );
+      }
+      lines.push(
+        `<text x="30" y="${cy + 15}" fill="#e2e8f0">${escapeXml(
+          col.name
+        )}</text>`
+      );
+      lines.push(
+        `<text x="${NODE_WIDTH - 10}" y="${
+          cy + 15
+        }" fill="#7dd3fc" font-size="10" text-anchor="end">${escapeXml(
+          col.data_type
+        )}</text>`
+      );
+    });
+    lines.push(`</g>`);
+  }
+
+  lines.push(`</svg>`);
+  return lines.join("\n");
+}
+
+export function ERDiagram({
+  tables,
+  layoutKey,
+  layoutResetVersion = 0,
+  onPositionsChange,
+}: {
+  tables: TableDescription[];
+  layoutKey?: string;
+  layoutResetVersion?: number;
+  onPositionsChange?: (positions: ErPositions) => void;
+}) {
   const [hoverTable, setHoverTable] = useState<string | null>(null);
   const { theme } = useTheme();
 
-  const { nodes, edges } = useMemo(() => buildGraph(tables), [tables]);
+  const { nodes, edges } = useMemo(
+    () => buildGraph(tables, loadErPositions(layoutKey)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tables, layoutKey, layoutResetVersion]
+  );
   const [localNodes, setLocalNodes] = useState<Node[]>(nodes);
 
   useEffect(() => {
     setLocalNodes(nodes);
-  }, [nodes]);
+    const map: ErPositions = {};
+    for (const n of nodes) {
+      map[n.id] = n.position;
+    }
+    onPositionsChange?.(map);
+  }, [nodes, onPositionsChange]);
 
-  const onNodesChange = useCallback((changes: any) => {
-    setLocalNodes((nds) =>
-      nds.map((n) => {
-        const ch = changes.find((c: any) => c.id === n.id);
-        if (ch?.type === "position" && ch.position) {
-          return { ...n, position: ch.position };
+  const onNodesChange = useCallback(
+    (changes: any) => {
+      setLocalNodes((nds) => {
+        let mutated = false;
+        const next = nds.map((n) => {
+          const ch = changes.find((c: any) => c.id === n.id);
+          if (ch?.type === "position" && ch.position) {
+            mutated = true;
+            return { ...n, position: ch.position };
+          }
+          return n;
+        });
+        if (mutated) {
+          const saved = loadErPositions(layoutKey);
+          for (const n of next) {
+            saved[n.id] = n.position;
+          }
+          saveErPositions(layoutKey, saved);
+          onPositionsChange?.(saved);
         }
-        return n;
-      })
-    );
-  }, []);
+        return next;
+      });
+    },
+    [layoutKey, onPositionsChange]
+  );
 
   const decoratedEdges: Edge[] = edges.map((e) => ({
     ...e,
@@ -220,7 +413,10 @@ function columnHandle(side: "in" | "out", column: string) {
   return `${side}:${column}`;
 }
 
-function buildGraph(tables: TableDescription[]): {
+export function buildGraph(
+  tables: TableDescription[],
+  customPositions?: ErPositions
+): {
   nodes: Node[];
   edges: Edge[];
 } {
@@ -252,15 +448,18 @@ function buildGraph(tables: TableDescription[]): {
   dagre.layout(g);
 
   const nodes: Node[] = tables.map((t) => {
+    const saved = customPositions?.[t.name];
     const n = g.node(t.name);
     return {
       id: t.name,
       type: "table",
       data: { desc: t },
-      position: {
-        x: (n?.x ?? 0) - NODE_WIDTH / 2,
-        y: (n?.y ?? 0) - nodeHeight(t) / 2,
-      },
+      position: saved
+        ? { x: saved.x, y: saved.y }
+        : {
+            x: (n?.x ?? 0) - NODE_WIDTH / 2,
+            y: (n?.y ?? 0) - nodeHeight(t) / 2,
+          },
     };
   });
 

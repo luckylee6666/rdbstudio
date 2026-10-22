@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Activity,
   Database,
   History,
   Settings,
@@ -32,6 +33,7 @@ const tools = [
   { kind: "search", icon: Search, labelKey: "tool.search.title" },
   { kind: "objects", icon: Users, labelKey: "tool.objects.title" },
   { kind: "redis-tools", icon: Radio, labelKey: "tool.redis.title" },
+  { kind: "monitor", icon: Activity, labelKey: "tool.monitor.title" },
 ] as const;
 
 export function ActivityBar() {

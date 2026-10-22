@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Activity,
   ArrowRightLeft,
   Plus,
   Radio,
@@ -32,6 +33,7 @@ import { ConnectionToolsView } from "./ConnectionToolsView";
 import { GlobalSearchView } from "./GlobalSearchView";
 import { SyncView } from "./SyncView";
 import { RedisKeyView } from "./RedisKeyView";
+import { ServerMonitorView } from "./ServerMonitorView";
 
 function tabIcon(kind: TabKind) {
   switch (kind) {
@@ -57,6 +59,8 @@ function tabIcon(kind: TabKind) {
       return Users;
     case "redis-tools":
       return Radio;
+    case "monitor":
+      return Activity;
     default:
       return Terminal;
   }
@@ -206,6 +210,12 @@ export function WorkspaceTabs() {
           initialConnectionId={active.connectionId} initialSchema={active.schema} objectKind={active.objectKind} objectName={active.objectName} />}
         {active?.kind === "redis-key" && (
           <RedisKeyView key={active.id} tab={active} />
+        )}
+        {active?.kind === "monitor" && (
+          <ServerMonitorView
+            key={active.id}
+            initialConnectionId={active.connectionId}
+          />
         )}
       </div>
 

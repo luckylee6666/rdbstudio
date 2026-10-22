@@ -1,18 +1,34 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  FileDown,
+  Loader2,
+  RefreshCw,
+  RotateCcw,
+} from "lucide-react";
 import type { TableDescription, WorkspaceTab } from "@/types";
 import { api } from "@/lib/api";
-import { ERDiagram } from "@/components/er/ERDiagram";
+import { saveTextFile } from "@/lib/csv";
+import {
+  buildErSvg,
+  ERDiagram,
+  saveErPositions,
+  type ErPositions,
+} from "@/components/er/ERDiagram";
+import { toast } from "@/store/toasts";
 import { useT } from "@/store/i18n";
 
 export function ERView({ tab }: { tab: WorkspaceTab }) {
   const connectionId = tab.connectionId!;
   const schema = tab.schema;
+  const layoutKey = `${connectionId}:${schema ?? "main"}`;
   const [tables, setTables] = useState<TableDescription[]>([]);
   // Total tables in the schema, so a capped diagram can say what it left out.
   const [totalTables, setTotalTables] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [positions, setPositions] = useState<ErPositions>({});
+  const [resetVersion, setResetVersion] = useState(0);
   const t = useT();
 
   const ER_LIMIT = 80;
@@ -41,6 +57,27 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
 
   const fkCount = tables.reduce((n, t) => n + t.foreign_keys.length, 0);
 
+  const resetLayout = () => {
+    saveErPositions(layoutKey, {});
+    setResetVersion((v) => v + 1);
+  };
+
+  const exportSvg = async () => {
+    try {
+      const svg = buildErSvg(tables, positions);
+      const savedPath = await saveTextFile(
+        `${schema ?? "schema"}-er.svg`,
+        svg,
+        "svg"
+      );
+      if (savedPath) {
+        toast.success(t("er.export_svg_done"), savedPath);
+      }
+    } catch (e) {
+      toast.error(t("er.err"), String(e));
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-10 shrink-0 items-center gap-3 border-b border-border/70 bg-surface/30 px-3 text-[11.5px] text-muted-foreground">
@@ -65,6 +102,22 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
         <span>·</span>
         <span>{t("er.relationships", { n: fkCount })}</span>
         <div className="flex-1" />
+        <button
+          onClick={resetLayout}
+          disabled={tables.length === 0}
+          className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
+        >
+          <RotateCcw className="h-3 w-3" />
+          {t("er.reset_layout")}
+        </button>
+        <button
+          onClick={() => void exportSvg()}
+          disabled={tables.length === 0}
+          className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
+        >
+          <FileDown className="h-3 w-3" />
+          {t("er.export_svg")}
+        </button>
         <button
           onClick={() => void load()}
           className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground"
@@ -96,7 +149,12 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
             {t("er.empty")}
           </div>
         ) : (
-          <ERDiagram tables={tables} />
+          <ERDiagram
+            tables={tables}
+            layoutKey={layoutKey}
+            layoutResetVersion={resetVersion}
+            onPositionsChange={setPositions}
+          />
         )}
       </div>
     </div>

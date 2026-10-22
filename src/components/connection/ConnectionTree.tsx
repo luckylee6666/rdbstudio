@@ -40,6 +40,7 @@ import {
   Trash2,
   Type,
   View,
+  Wand2,
   Workflow,
   X,
   type LucideIcon,
@@ -61,6 +62,7 @@ import { toast } from "@/store/toasts";
 import { quoteIdent } from "@/lib/sql";
 import { ExportDialog } from "@/components/io/ExportDialog";
 import { ImportDialog } from "@/components/io/ImportDialog";
+import { DataGeneratorDialog } from "@/components/io/DataGeneratorDialog";
 import { DbIoProgress } from "@/components/io/DbIoProgress";
 import { DatabaseExportDialog } from "@/components/io/DatabaseExportDialog";
 import { useT } from "@/store/i18n";
@@ -69,6 +71,7 @@ import { connColorValue } from "@/lib/connColors";
 import { DriverBadge } from "./driverIcon";
 import { ConnectionDialog } from "./ConnectionDialog";
 import { CreateTableDialog } from "./CreateTableDialog";
+import { ViewEditorDialog } from "./ViewEditorDialog";
 import { RedisKeyDialog } from "./RedisKeyDialog";
 import { NavicatImportDialog } from "./NavicatImportDialog";
 import { McpAccessDialog } from "./McpAccessDialog";
@@ -1296,6 +1299,18 @@ function ConnectionBranch({
               onClick: () => setMcpOpen(true),
             },
             {
+              id: "monitor",
+              label: t("tool.monitor.title"),
+              icon: Activity,
+              onClick: () =>
+                useWorkspace.getState().openTab({
+                  id: `tool:monitor:${cfg.id}`,
+                  kind: "monitor",
+                  title: t("tool.monitor.title"),
+                  connectionId: cfg.id,
+                }),
+            },
+            {
               id: "edit",
               label: t("conn.edit"),
               icon: Pencil,
@@ -1390,6 +1405,7 @@ function DatabaseNode({
   const tablesError = branch?.tablesError?.[schemaKey];
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [viewCreateOpen, setViewCreateOpen] = useState(false);
   const [redisCreateOpen, setRedisCreateOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const refreshBranch = useConnections((s) => s.refreshBranch);
@@ -1467,6 +1483,16 @@ function DatabaseNode({
               },
             },
             {
+              id: "new_view",
+              label: t("tree.new_view"),
+              icon: View,
+              disabled: driver === "redis",
+              onClick: () => {
+                if (!open) setOpen(true);
+                setViewCreateOpen(true);
+              },
+            },
+            {
               id: "export_database",
               label:
                 driver === "postgres"
@@ -1533,6 +1559,16 @@ function DatabaseNode({
         schema={passSchema}
         onClose={() => setCreateOpen(false)}
         onCreated={() => {
+          void loadTables(connectionId, schemaKey, passSchema);
+        }}
+      />
+      <ViewEditorDialog
+        open={viewCreateOpen}
+        connectionId={connectionId}
+        schema={passSchema}
+        initialView={null}
+        onClose={() => setViewCreateOpen(false)}
+        onSaved={() => {
           void loadTables(connectionId, schemaKey, passSchema);
         }}
       />
@@ -1639,6 +1675,8 @@ function Folder({
   const [copyDataTarget, setCopyDataTarget] = useState<TreeEntry | null>(null);
   const [maintenanceTarget, setMaintenanceTarget] = useState<TreeEntry | null>(null);
   const [truncateTarget, setTruncateTarget] = useState<TreeEntry | null>(null);
+  const [dataGenTarget, setDataGenTarget] = useState<TreeEntry | null>(null);
+  const [viewEditTarget, setViewEditTarget] = useState<TreeEntry | null>(null);
   // Entry name with a drop/rename/truncate in flight — its row shows a
   // spinner so slow DDL isn't silent until the refresh lands.
   const [opBusy, setOpBusy] = useState<string | null>(null);
@@ -1804,10 +1842,12 @@ function Folder({
     },
     {
       id: "design",
-      label: t("tree.design_table"),
+      label:
+        e.kind === "view" ? t("tree.design_view") : t("tree.design_table"),
       icon: Settings2,
-      disabled: e.kind !== "table",
-      onClick: () => openDesigner(e),
+      disabled: e.kind !== "table" && e.kind !== "view",
+      onClick: () =>
+        e.kind === "view" ? setViewEditTarget(e) : openDesigner(e),
     },
     {
       id: "ddl",
@@ -1861,6 +1901,13 @@ function Folder({
           icon: CopyPlus,
           disabled: !!cfg?.read_only,
           onClick: () => setCopyDataTarget(e),
+        },
+        {
+          id: "datagen",
+          label: t("tree.generate_data"),
+          icon: Wand2,
+          disabled: !!cfg?.read_only,
+          onClick: () => setDataGenTarget(e),
         },
         {
           id: "maintenance",
@@ -2023,6 +2070,23 @@ function Folder({
         table={importTarget?.name ?? ""}
         schema={schema}
         onClose={() => setImportTarget(null)}
+      />
+      <DataGeneratorDialog
+        open={!!dataGenTarget}
+        connectionId={connectionId}
+        table={dataGenTarget?.name ?? ""}
+        schema={schema}
+        onClose={() => setDataGenTarget(null)}
+      />
+      <ViewEditorDialog
+        open={!!viewEditTarget}
+        connectionId={connectionId}
+        schema={schema}
+        initialView={viewEditTarget?.name ?? null}
+        onClose={() => setViewEditTarget(null)}
+        onSaved={() => {
+          void loadTables(connectionId, cacheKey, schema);
+        }}
       />
       {copyDataTarget && <CopyTableDialog key={copyDataTarget.name} connectionId={connectionId}
         table={copyDataTarget.name} schema={schema} onClose={() => setCopyDataTarget(null)}

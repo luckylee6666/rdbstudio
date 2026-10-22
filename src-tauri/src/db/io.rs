@@ -5,7 +5,7 @@ use crate::error::{AppError, AppResult};
 use crate::model::DriverKind;
 use serde::{Deserialize, Serialize};
 use sqlx::Arguments;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -16,6 +16,18 @@ pub enum ExportFormat {
     Csv,
     Json,
     Sql,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaskKind {
+    Email,
+    Phone,
+    Name,
+    Partial,
+    Redact,
+    Null,
+    Hash,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +50,10 @@ pub struct ExportOptions {
     /// `include_ddl` is true for a structure-only export.
     #[serde(default = "default_true")]
     pub include_data: bool,
+    /// Optional per-column masking rules applied before writing CSV, JSON, or
+    /// SQL INSERT values.
+    #[serde(default)]
+    pub column_masks: HashMap<String, MaskKind>,
 }
 
 fn default_delim() -> char {
@@ -197,12 +213,28 @@ fn write_rows(
     table: &str,
     driver: DriverKind,
 ) -> AppResult<()> {
+    let col_masks: Vec<Option<MaskKind>> = r
+        .columns
+        .iter()
+        .map(|c| opts.column_masks.get(&c.name).copied())
+        .collect();
+    let masked_cell = |idx: usize, v: &serde_json::Value| -> serde_json::Value {
+        match col_masks.get(idx).copied().flatten() {
+            Some(mask) => apply_mask(v, mask),
+            None => v.clone(),
+        }
+    };
+
     match opts.format {
         ExportFormat::Csv => {
             for row in &r.rows {
                 let parts: Vec<String> = row
                     .iter()
-                    .map(|v| csv_val(v, opts.delimiter, opts.quote_all))
+                    .enumerate()
+                    .map(|(idx, v)| {
+                        let cell = masked_cell(idx, v);
+                        csv_val(&cell, opts.delimiter, opts.quote_all)
+                    })
                     .collect();
                 w.write_all(parts.join(&opts.delimiter.to_string()).as_bytes())?;
                 w.write_all(b"\n")?;
@@ -217,7 +249,8 @@ fn write_rows(
                     .columns
                     .iter()
                     .zip(row.iter())
-                    .map(|(c, v)| (c.name.clone(), v.clone()))
+                    .enumerate()
+                    .map(|(idx, (c, v))| (c.name.clone(), masked_cell(idx, v)))
                     .collect();
                 let s = serde_json::to_string(&serde_json::Value::Object(obj))?;
                 w.write_all(s.as_bytes())?;
@@ -247,7 +280,11 @@ fn write_rows(
             for row in &r.rows {
                 let vals = row
                     .iter()
-                    .map(|v| sql_literal(v, driver))
+                    .enumerate()
+                    .map(|(idx, v)| {
+                        let cell = masked_cell(idx, v);
+                        sql_literal(&cell, driver)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let line = format!("INSERT INTO {} ({}) VALUES ({});\n", target, col_list, vals);
@@ -256,6 +293,90 @@ fn write_rows(
         }
     }
     Ok(())
+}
+
+pub fn apply_mask(v: &serde_json::Value, mask: MaskKind) -> serde_json::Value {
+    if v.is_null() {
+        return serde_json::Value::Null;
+    }
+    match mask {
+        MaskKind::Null => serde_json::Value::Null,
+        MaskKind::Redact => serde_json::Value::String("[REDACTED]".into()),
+        MaskKind::Email | MaskKind::Phone | MaskKind::Name | MaskKind::Partial | MaskKind::Hash => {
+            let raw = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => {
+                    if *b {
+                        "true".into()
+                    } else {
+                        "false".into()
+                    }
+                }
+                other => other.to_string(),
+            };
+            if raw.is_empty() {
+                return serde_json::Value::String(String::new());
+            }
+            let masked = match mask {
+                MaskKind::Email => mask_email(&raw),
+                MaskKind::Phone => mask_phone(&raw),
+                MaskKind::Name => mask_name(&raw),
+                MaskKind::Partial => mask_partial(&raw),
+                MaskKind::Hash => mask_hash(&raw),
+                _ => unreachable!(),
+            };
+            serde_json::Value::String(masked)
+        }
+    }
+}
+
+fn mask_email(s: &str) -> String {
+    if let Some((local, domain)) = s.split_once('@') {
+        if let Some(first) = local.chars().next() {
+            if !domain.is_empty() {
+                return format!("{first}***@{domain}");
+            }
+        }
+    }
+    mask_partial(s)
+}
+
+fn mask_phone(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() >= 7 {
+        let prefix: String = chars[..3].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{prefix}****{suffix}")
+    } else {
+        mask_partial(s)
+    }
+}
+
+fn mask_name(s: &str) -> String {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let stars = chars.count().clamp(1, 3);
+    format!("{}{}", first, "*".repeat(stars))
+}
+
+fn mask_partial(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    match chars.len() {
+        0 => String::new(),
+        1 | 2 => format!("{}***", chars[0]),
+        n => format!("{}****{}", chars[0], chars[n - 1]),
+    }
+}
+
+fn mask_hash(s: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in s.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("mask_{h:016x}")
 }
 
 fn csv_val(v: &serde_json::Value, delim: char, quote_all: bool) -> String {
@@ -645,7 +766,7 @@ fn clear_table_sql(driver: DriverKind, target: &str) -> String {
 /// driver-appropriate placeholders (numbered for PG, `?` elsewhere). For PG,
 /// each placeholder can carry an explicit `CAST(... AS type)` so text binds
 /// reach non-text columns.
-fn multi_insert_sql(
+pub(crate) fn multi_insert_sql(
     target: &str,
     col_list: &str,
     ncols: usize,
@@ -887,5 +1008,41 @@ mod tests {
             ),
             r"'C:\name'"
         );
+    }
+
+    #[test]
+    fn apply_mask_handles_all_mask_kinds_and_preserves_null() {
+        assert_eq!(
+            apply_mask(&serde_json::Value::Null, MaskKind::Email),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            apply_mask(&serde_json::Value::String("alice@example.com".into()), MaskKind::Email),
+            serde_json::Value::String("a***@example.com".into())
+        );
+        assert_eq!(
+            apply_mask(&serde_json::Value::String("13812345678".into()), MaskKind::Phone),
+            serde_json::Value::String("138****5678".into())
+        );
+        assert_eq!(
+            apply_mask(&serde_json::Value::String("张三丰".into()), MaskKind::Name),
+            serde_json::Value::String("张**".into())
+        );
+        assert_eq!(
+            apply_mask(&serde_json::Value::String("secret123".into()), MaskKind::Partial),
+            serde_json::Value::String("s****3".into())
+        );
+        assert_eq!(
+            apply_mask(&serde_json::Value::String("secret123".into()), MaskKind::Redact),
+            serde_json::Value::String("[REDACTED]".into())
+        );
+        assert_eq!(
+            apply_mask(&serde_json::Value::String("secret123".into()), MaskKind::Null),
+            serde_json::Value::Null
+        );
+        let h1 = apply_mask(&serde_json::Value::String("user_42".into()), MaskKind::Hash);
+        let h2 = apply_mask(&serde_json::Value::String("user_42".into()), MaskKind::Hash);
+        assert_eq!(h1, h2);
+        assert!(h1.as_str().unwrap().starts_with("mask_"));
     }
 }

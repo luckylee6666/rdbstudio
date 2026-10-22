@@ -310,6 +310,7 @@ async fn export_csv_then_import_csv_round_trip() {
             batch_size: 100,
             include_ddl: false,
             include_data: true,
+            column_masks: Default::default(),
         },
     )
     .await
@@ -535,6 +536,7 @@ async fn export_pages_composite_primary_keys_without_gaps() {
         batch_size: 7,
         include_ddl: false,
         include_data: true,
+        column_masks: Default::default(),
     };
     let report = io::export_table(&pool, None, "ck", &opts)
         .await
@@ -743,4 +745,117 @@ async fn sqlite_restore_creates_missing_parent_and_replaces_target() {
         .unwrap();
     assert_eq!(value, "backup");
     restored_pool.close().await;
+}
+
+#[tokio::test]
+async fn datagen_view_editor_and_monitor_work_end_to_end() {
+    use rdbstudio_lib::db::datagen::{
+        self, ColumnGeneratorConfig, DataGenOptions, DataGenRule,
+    };
+    use rdbstudio_lib::db::monitor;
+
+    let (_dir, pool) = setup().await;
+
+    // 1. Generate 15 rows into `users` starting at id=100
+    let gen_opts = DataGenOptions {
+        schema: None,
+        table: "users".into(),
+        row_count: 15,
+        truncate_first: false,
+        seed: Some(99),
+        columns: vec![
+            ColumnGeneratorConfig {
+                column: "id".into(),
+                rule: DataGenRule::Sequence,
+                null_percent: 0,
+                start: Some(100),
+                step: Some(1),
+                min: None,
+                max: None,
+                values: None,
+            },
+            ColumnGeneratorConfig {
+                column: "name".into(),
+                rule: DataGenRule::FullName,
+                null_percent: 0,
+                start: None,
+                step: None,
+                min: None,
+                max: None,
+                values: None,
+            },
+            ColumnGeneratorConfig {
+                column: "age".into(),
+                rule: DataGenRule::RandomInt,
+                null_percent: 0,
+                start: None,
+                step: None,
+                min: Some(18.0),
+                max: Some(65.0),
+                values: None,
+            },
+            ColumnGeneratorConfig {
+                column: "email".into(),
+                rule: DataGenRule::Email,
+                null_percent: 0,
+                start: None,
+                step: None,
+                min: None,
+                max: None,
+                values: None,
+            },
+        ],
+    };
+    let report = datagen::generate_table_data(&pool, &gen_opts)
+        .await
+        .expect("generate data");
+    assert_eq!(report.rows_inserted, 15);
+
+    let count_res = exec::execute(&pool, "SELECT count(*) FROM users")
+        .await
+        .expect("count users");
+    assert_eq!(count_res.rows[0][0].as_i64(), Some(18));
+
+    // 2. Create and edit a view via design::save_view_definition & get_view_definition
+    design::save_view_definition(
+        &pool,
+        None,
+        "v_adult_users",
+        None,
+        "SELECT id, name, email FROM users WHERE age >= 21",
+    )
+    .await
+    .expect("create view");
+
+    let view_sql = design::get_view_definition(&pool, None, "v_adult_users")
+        .await
+        .expect("get view definition");
+    assert_eq!(
+        view_sql,
+        "SELECT id, name, email FROM users WHERE age >= 21"
+    );
+
+    // Rename + update view definition
+    design::save_view_definition(
+        &pool,
+        None,
+        "v_senior_users",
+        Some("v_adult_users"),
+        "SELECT id, name FROM users WHERE age >= 30",
+    )
+    .await
+    .expect("update and rename view");
+
+    let renamed_sql = design::get_view_definition(&pool, None, "v_senior_users")
+        .await
+        .expect("get renamed view definition");
+    assert_eq!(renamed_sql, "SELECT id, name FROM users WHERE age >= 30");
+
+    // 3. Server monitor snapshot on SQLite
+    let snap = monitor::server_monitor_snapshot(&pool)
+        .await
+        .expect("monitor snapshot");
+    assert_eq!(snap.driver, DriverKind::Sqlite);
+    assert!(!snap.metrics.is_empty());
+    assert!(!snap.processes.is_empty());
 }

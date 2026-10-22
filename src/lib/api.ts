@@ -5,6 +5,9 @@ import type {
   ConnectionConfig,
   ConnectionSummary,
   CsvPreview,
+  DataGenOptions,
+  DataGenPreview,
+  DataGenReport,
   DesignerChange,
   EditBatch,
   EditResult,
@@ -16,6 +19,7 @@ import type {
   McpStatus,
   NavicatImportPreview,
   ScanPage,
+  ServerMonitorSnapshot,
   Snippet,
   TableDescription,
   TableQuery,
@@ -242,6 +246,34 @@ export const api = {
     invoke<string[]>("apply_alter_ddl", { id, statements }),
   dropObject: (id: string, name: string, schema?: string, view = false) =>
     invoke<void>("drop_object", { id, name, schema: schema ?? null, view }),
+  getViewDefinition: (id: string, view: string, schema?: string) =>
+    invoke<string>("get_view_definition", {
+      id,
+      view,
+      schema: schema ?? null,
+    }),
+  saveViewDefinition: (
+    id: string,
+    name: string,
+    selectSql: string,
+    schema?: string,
+    originalName?: string
+  ) =>
+    invoke<string[]>("save_view_definition", {
+      id,
+      name,
+      selectSql,
+      schema: schema ?? null,
+      originalName: originalName ?? null,
+    }),
+  previewGeneratedData: (options: DataGenOptions, limit = 5) =>
+    invoke<DataGenPreview>("preview_generated_data", { options, limit }),
+  generateTableData: (id: string, options: DataGenOptions) =>
+    invoke<DataGenReport>("generate_table_data", { id, options }),
+  serverMonitorSnapshot: (id: string) =>
+    invoke<ServerMonitorSnapshot>("server_monitor_snapshot", { id }),
+  killServerProcess: (id: string, processId: string, cancelOnly = false) =>
+    invoke<void>("kill_server_process", { id, processId, cancelOnly }),
   describeSchema: (id: string, schema?: string, limit?: number) =>
     invoke<TableDescription[]>("describe_schema", {
       id,

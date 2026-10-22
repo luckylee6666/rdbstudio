@@ -17,6 +17,7 @@ const TOOL_TITLE_KEYS: Partial<Record<WorkspaceTab["kind"], string>> = {
   search: "tool.search.title",
   objects: "tool.objects.title",
   "redis-tools": "tool.redis.title",
+  monitor: "tool.monitor.title",
 };
 
 export function tabDisplay(tab: WorkspaceTab, t: Translate): { title: string; subtitle?: string } {

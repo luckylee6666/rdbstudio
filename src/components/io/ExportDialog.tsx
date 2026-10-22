@@ -6,13 +6,58 @@ import {
   FileDown,
   FolderOpen,
   Loader2,
+  ShieldAlert,
+  Sparkles,
 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select } from "@/components/ui/Field";
 import { api } from "@/lib/api";
-import type { ExportFormat, ExportReport } from "@/types";
+import type { ColumnInfo, ExportFormat, ExportReport, MaskKind } from "@/types";
 import { useT } from "@/store/i18n";
+
+export function autoDetectMaskKind(columnName: string): MaskKind | null {
+  const lower = columnName.toLowerCase();
+  if (lower.includes("email") || lower.endsWith("_mail") || lower === "mail") {
+    return "email";
+  }
+  if (
+    lower.includes("phone") ||
+    lower.includes("mobile") ||
+    lower === "tel" ||
+    lower.endsWith("_tel")
+  ) {
+    return "phone";
+  }
+  if (
+    lower.includes("password") ||
+    lower.includes("passwd") ||
+    lower.includes("secret") ||
+    lower.includes("token") ||
+    lower.includes("api_key")
+  ) {
+    return "redact";
+  }
+  if (
+    lower.includes("ssn") ||
+    lower.includes("id_card") ||
+    lower.includes("card_no") ||
+    lower.includes("card_number") ||
+    lower.includes("iban")
+  ) {
+    return "partial";
+  }
+  if (
+    lower === "name" ||
+    lower === "full_name" ||
+    lower === "real_name" ||
+    lower === "first_name" ||
+    lower === "last_name"
+  ) {
+    return "name";
+  }
+  return null;
+}
 
 interface Props {
   open: boolean;
@@ -37,6 +82,8 @@ export function ExportDialog({
   const [sqlContent, setSqlContent] = useState<
     "structure_data" | "structure_only" | "data_only"
   >("structure_data");
+  const [columns, setColumns] = useState<ColumnInfo[]>([]);
+  const [columnMasks, setColumnMasks] = useState<Record<string, MaskKind>>({});
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<ExportReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +94,37 @@ export function ExportDialog({
     setReport(null);
     setError(null);
     setPath("");
-  }, [open]);
+    setColumnMasks({});
+    if (connectionId && table) {
+      void api
+        .listColumns(connectionId, table, schema)
+        .then((cols) => setColumns(Array.isArray(cols) ? cols : []))
+        .catch(() => setColumns([]));
+    } else {
+      setColumns([]);
+    }
+  }, [open, connectionId, table, schema]);
+
+  const setMask = (col: string, kind: MaskKind | "") => {
+    setColumnMasks((prev) => {
+      const next = { ...prev };
+      if (!kind) {
+        delete next[col];
+      } else {
+        next[col] = kind;
+      }
+      return next;
+    });
+  };
+
+  const applyAutoDetectMasks = () => {
+    const next: Record<string, MaskKind> = { ...columnMasks };
+    for (const c of columns) {
+      const detected = autoDetectMaskKind(c.name);
+      if (detected) next[c.name] = detected;
+    }
+    setColumnMasks(next);
+  };
 
   const pickPath = async () => {
     const ext = format === "csv" ? "csv" : format === "json" ? "json" : "sql";
@@ -78,6 +155,8 @@ export function ExportDialog({
           quote_all: quoteAll,
           include_ddl: sqlContent !== "data_only",
           include_data: sqlContent !== "structure_only",
+          column_masks:
+            Object.keys(columnMasks).length > 0 ? columnMasks : undefined,
         },
         schema
       );
@@ -223,6 +302,84 @@ export function ExportDialog({
             </p>
           </div>
         )}
+
+        {columns.length > 0 &&
+          !(format === "sql" && sqlContent === "structure_only") && (
+            <div className="space-y-2.5 rounded-lg border border-border/70 bg-surface-muted/30 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
+                  <ShieldAlert className="h-3.5 w-3.5 text-brand" />
+                  <span>{t("export.mask.title")}</span>
+                  {Object.keys(columnMasks).length > 0 && (
+                    <span className="rounded bg-brand/15 px-1.5 py-0.5 text-[10.5px] font-semibold text-brand">
+                      {Object.keys(columnMasks).length}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={applyAutoDetectMasks}
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    {t("export.mask.auto_detect")}
+                  </Button>
+                  {Object.keys(columnMasks).length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setColumnMasks({})}
+                    >
+                      {t("export.mask.clear")}
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <p className="text-[11.5px] text-muted-foreground">
+                {t("export.mask.desc")}
+              </p>
+              <div className="max-h-44 space-y-1.5 overflow-y-auto pr-1">
+                {columns.map((c) => {
+                  const activeMask = columnMasks[c.name] ?? "";
+                  return (
+                    <div
+                      key={c.name}
+                      className="grid grid-cols-[1fr_190px] items-center gap-2 rounded border border-border/50 bg-surface px-2.5 py-1 text-[12px]"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate font-mono font-medium">
+                          {c.name}
+                        </span>
+                        <span className="truncate font-mono text-[10.5px] text-muted-foreground">
+                          {c.data_type}
+                        </span>
+                      </div>
+                      <Select
+                        value={activeMask}
+                        onChange={(e) =>
+                          setMask(c.name, e.target.value as MaskKind | "")
+                        }
+                      >
+                        <option value="">{t("export.mask.none")}</option>
+                        <option value="email">{t("export.mask.email")}</option>
+                        <option value="phone">{t("export.mask.phone")}</option>
+                        <option value="name">{t("export.mask.name")}</option>
+                        <option value="partial">
+                          {t("export.mask.partial")}
+                        </option>
+                        <option value="redact">
+                          {t("export.mask.redact")}
+                        </option>
+                        <option value="hash">{t("export.mask.hash")}</option>
+                        <option value="null">{t("export.mask.null")}</option>
+                      </Select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
       </div>
     </Modal>
   );

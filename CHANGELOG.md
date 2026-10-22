@@ -6,6 +6,10 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- 导出列数据脱敏（Data Masking）：单表导出（CSV / JSON / SQL INSERT）支持按列配置 `email`、`phone`、`name`、`partial`、`redact`、`hash`、`null` 7 种脱敏规则，并提供敏感列名智能识别。
+- 测试数据生成器（Test Data Generator）：表右键支持按列配置 14 类生成规则（自增序列、随机整数/浮点数、布尔、UUID v4、姓名、邮箱、手机号、随机词组、枚举列表、日期、时间戳等）与空值比例，内置种子复现预览与事务内批量写入。
+- 视图可视化设计器与 ER 图增强：数据库/Schema 右键新增「新建视图…」与视图节点「设计视图」（含实时 `SELECT` 预览、跨 SQLite/PG/MySQL 保存与改名）；ER 关系图支持节点位置本地持久化、重置布局与导出独立矢量 `.svg`。
+- 服务器实时监控与进程列表（Server Monitor）：新增监控工具页，支持查看 PostgreSQL `pg_stat_activity`、MySQL `PROCESSLIST`、Redis `INFO`/`CLIENT LIST` 与 SQLite `PRAGMA` 统计指标，并提供只读守卫下的取消查询 / 终止会话操作。
 - 同连接表复制新增默认的数据库原生模式：SQLite/PostgreSQL 在事务内复制，MySQL 使用独立暂存表并原子改名发布；支持无主键、重复行和超过 10,000 行/16 MiB 的表，行数据不经 JSON 传回应用。预览显示 SQL 与遗漏对象，执行前重查结构，提供阶段/耗时进度和提交前取消；原有主键及数据量受限的可移植模式继续保留。
 - MySQL 事件管理表单：单次/周期计划、事件体与备注、新建默认禁用、独立启停和确认删除；原地修改保留定义者、时区及 SQL 模式，不修改全局调度器。
 - PostgreSQL 序列管理表单：类型、范围、步长、缓存与循环；全部整数以字符串传输。普通保存保留当前取号值，显式重启需确认，删除保留依赖保护；对象树可直接打开对应事件或序列管理页。

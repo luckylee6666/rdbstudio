@@ -203,6 +203,15 @@ export interface AlterPlan {
 
 export type ExportFormat = "csv" | "json" | "sql";
 
+export type MaskKind =
+  | "email"
+  | "phone"
+  | "name"
+  | "partial"
+  | "redact"
+  | "null"
+  | "hash";
+
 export interface ExportOptions {
   format: ExportFormat;
   path: string;
@@ -214,6 +223,81 @@ export interface ExportOptions {
   include_ddl?: boolean;
   /** SQL format only: include INSERT statements. False produces structure-only SQL. */
   include_data?: boolean;
+  /** Optional per-column masking rules applied during export. */
+  column_masks?: Record<string, MaskKind>;
+}
+
+export type DataGenRule =
+  | "skip"
+  | "null"
+  | "sequence"
+  | "random_int"
+  | "random_float"
+  | "boolean"
+  | "uuid"
+  | "full_name"
+  | "email"
+  | "phone"
+  | "random_text"
+  | "enum_list"
+  | "date_range"
+  | "timestamp_now";
+
+export interface ColumnGeneratorConfig {
+  column: string;
+  rule: DataGenRule;
+  null_percent?: number;
+  start?: number | null;
+  step?: number | null;
+  min?: number | null;
+  max?: number | null;
+  values?: string | null;
+}
+
+export interface DataGenOptions {
+  schema?: string | null;
+  table: string;
+  row_count: number;
+  truncate_first?: boolean;
+  seed?: number | null;
+  columns: ColumnGeneratorConfig[];
+}
+
+export interface DataGenPreview {
+  columns: string[];
+  rows: unknown[][];
+}
+
+export interface DataGenReport {
+  rows_inserted: number;
+  elapsed_ms: number;
+}
+
+export interface MonitorMetric {
+  key: string;
+  label: string;
+  value: string;
+}
+
+export interface ServerProcess {
+  id: string;
+  user?: string | null;
+  database?: string | null;
+  client?: string | null;
+  state?: string | null;
+  command?: string | null;
+  duration_sec?: number | null;
+  wait_info?: string | null;
+  query?: string | null;
+  is_self: boolean;
+  killable: boolean;
+}
+
+export interface ServerMonitorSnapshot {
+  driver: DriverKind;
+  server_version: string;
+  metrics: MonitorMetric[];
+  processes: ServerProcess[];
 }
 
 export interface ExportReport {
@@ -258,7 +342,8 @@ export type TabKind =
   | "sync"
   | "search"
   | "objects"
-  | "redis-tools";
+  | "redis-tools"
+  | "monitor";
 
 export interface WorkspaceTab {
   id: string;

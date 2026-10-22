@@ -953,3 +953,283 @@ fn parse_mysql_type(t: &str) -> (Option<i64>, Option<i64>, Option<i64>) {
         (v, None, None)
     }
 }
+
+/// Extract the `SELECT ...` query body from a `CREATE ... VIEW ... AS SELECT ...`
+/// DDL statement. If the input does not contain a top-level `VIEW ... AS` header
+/// (for instance `pg_get_viewdef` output), returns the trimmed query without a
+/// trailing semicolon.
+pub fn extract_view_select_body(ddl: &str) -> String {
+    let bytes = ddl.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut depth = 0i32;
+    let mut seen_view = false;
+    let mut body_start = None;
+
+    while i < len {
+        let b = bytes[i];
+        // Line comment
+        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        // Quoted strings / identifiers
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let quote = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == quote {
+                    if i + 1 < len && bytes[i + 1] == quote {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'(' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b')' {
+            depth = (depth - 1).max(0);
+            i += 1;
+            continue;
+        }
+        if depth == 0 && (b.is_ascii_alphabetic() || b == b'_') {
+            let start = i;
+            i += 1;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &ddl[start..i];
+            if !seen_view && word.eq_ignore_ascii_case("VIEW") {
+                seen_view = true;
+            } else if seen_view && word.eq_ignore_ascii_case("AS") {
+                body_start = Some(i);
+                break;
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    let raw = match body_start {
+        Some(pos) => &ddl[pos..],
+        None => ddl,
+    };
+    raw.trim().trim_end_matches(';').trim().to_string()
+}
+
+pub async fn get_view_definition(
+    pool: &DbPool,
+    schema: Option<&str>,
+    view: &str,
+) -> AppResult<String> {
+    match pool {
+        DbPool::Redis(_) => crate::db::redis_ops::unsupported("Get view definition"),
+        DbPool::Sqlite(p) => {
+            let sql: Option<String> = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?",
+            )
+            .bind(view)
+            .fetch_optional(p)
+            .await?;
+            let ddl = sql.ok_or_else(|| AppError::msg(format!("view '{view}' not found")))?;
+            Ok(extract_view_select_body(&ddl))
+        }
+        DbPool::Postgres(p) => {
+            let schema_name = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+            let regclass = format!(
+                "{}.{}",
+                quote_ident(DriverKind::Postgres, schema_name),
+                quote_ident(DriverKind::Postgres, view)
+            );
+            let def: String = sqlx::query_scalar("SELECT pg_get_viewdef($1::regclass, true)")
+                .bind(&regclass)
+                .fetch_one(p)
+                .await?;
+            Ok(extract_view_select_body(&def))
+        }
+        DbPool::Mysql(p) => {
+            let def: Option<String> = match schema.filter(|s| !s.is_empty()) {
+                Some(s) => {
+                    sqlx::query_scalar(
+                        "SELECT VIEW_DEFINITION FROM information_schema.VIEWS \
+                         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                    )
+                    .bind(s)
+                    .bind(view)
+                    .fetch_optional(p)
+                    .await?
+                }
+                None => {
+                    sqlx::query_scalar(
+                        "SELECT VIEW_DEFINITION FROM information_schema.VIEWS \
+                         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+                    )
+                    .bind(view)
+                    .fetch_optional(p)
+                    .await?
+                }
+            };
+            if let Some(d) = def.filter(|s| !s.trim().is_empty()) {
+                return Ok(extract_view_select_body(&d));
+            }
+            let full_ddl = ddl(pool, schema, view).await?;
+            Ok(extract_view_select_body(&full_ddl))
+        }
+    }
+}
+
+pub fn build_save_view_statements(
+    driver: DriverKind,
+    schema: Option<&str>,
+    name: &str,
+    original_name: Option<&str>,
+    select_sql: &str,
+) -> AppResult<Vec<String>> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err(AppError::msg("view name is required"));
+    }
+    let clean_sql = select_sql.trim().trim_end_matches(';').trim();
+    if clean_sql.is_empty() {
+        return Err(AppError::msg("view SELECT query is required"));
+    }
+    if !crate::db::exec::is_readonly(clean_sql) {
+        return Err(AppError::msg(
+            "view definition must be a SELECT or WITH query",
+        ));
+    }
+
+    let qualify = |ident: &str| match (driver, schema.filter(|s| !s.is_empty())) {
+        (DriverKind::Sqlite, _) | (_, None) => quote_ident(driver, ident),
+        (_, Some(s)) => format!("{}.{}", quote_ident(driver, s), quote_ident(driver, ident)),
+    };
+
+    let target_qualified = qualify(trimmed_name);
+    let orig_trimmed = original_name.map(str::trim).filter(|s| !s.is_empty());
+
+    let mut stmts = Vec::new();
+    match driver {
+        DriverKind::Sqlite => {
+            if let Some(orig) = orig_trimmed {
+                stmts.push(format!("DROP VIEW IF EXISTS {}", qualify(orig)));
+            }
+            stmts.push(format!("CREATE VIEW {} AS\n{}", target_qualified, clean_sql));
+        }
+        DriverKind::Postgres | DriverKind::Mysql => {
+            if let Some(orig) = orig_trimmed {
+                if orig != trimmed_name {
+                    stmts.push(format!("DROP VIEW IF EXISTS {}", qualify(orig)));
+                }
+            }
+            stmts.push(format!(
+                "CREATE OR REPLACE VIEW {} AS\n{}",
+                target_qualified, clean_sql
+            ));
+        }
+        DriverKind::Redis => {
+            return crate::db::redis_ops::unsupported("Save view");
+        }
+    }
+    Ok(stmts)
+}
+
+pub async fn save_view_definition(
+    pool: &DbPool,
+    schema: Option<&str>,
+    name: &str,
+    original_name: Option<&str>,
+    select_sql: &str,
+) -> AppResult<Vec<String>> {
+    let stmts = build_save_view_statements(
+        pool.driver(),
+        schema,
+        name,
+        original_name,
+        select_sql,
+    )?;
+    crate::db::alter::apply_statements(pool, &stmts).await
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn extract_view_select_body_strips_create_view_header() {
+        let ddl = "CREATE VIEW \"active_users\" (id, name) AS\nSELECT id, name FROM users WHERE active = 1;";
+        assert_eq!(
+            extract_view_select_body(ddl),
+            "SELECT id, name FROM users WHERE active = 1"
+        );
+    }
+
+    #[test]
+    fn extract_view_select_body_preserves_plain_select_with_column_aliases() {
+        let raw = "SELECT id AS user_id, name AS display_name FROM users;";
+        assert_eq!(
+            extract_view_select_body(raw),
+            "SELECT id AS user_id, name AS display_name FROM users"
+        );
+    }
+
+    #[test]
+    fn build_save_view_statements_handles_sqlite_and_postgres_and_rejects_non_select() {
+        let sqlite_stmts = build_save_view_statements(
+            DriverKind::Sqlite,
+            None,
+            "v_users",
+            Some("v_old"),
+            "SELECT id, name FROM users;",
+        )
+        .unwrap();
+        assert_eq!(
+            sqlite_stmts,
+            vec![
+                "DROP VIEW IF EXISTS \"v_old\"",
+                "CREATE VIEW \"v_users\" AS\nSELECT id, name FROM users"
+            ]
+        );
+
+        let pg_stmts = build_save_view_statements(
+            DriverKind::Postgres,
+            Some("public"),
+            "v_users",
+            Some("v_users"),
+            "SELECT id FROM users",
+        )
+        .unwrap();
+        assert_eq!(
+            pg_stmts,
+            vec!["CREATE OR REPLACE VIEW \"public\".\"v_users\" AS\nSELECT id FROM users"]
+        );
+
+        assert!(build_save_view_statements(
+            DriverKind::Sqlite,
+            None,
+            "v_bad",
+            None,
+            "DELETE FROM users"
+        )
+        .is_err());
+    }
+}

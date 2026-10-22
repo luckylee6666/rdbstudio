@@ -114,3 +114,39 @@ pub async fn table_op(
     alter::apply_statements(&pool, &[sql]).await?;
     Ok(())
 }
+
+#[tauri::command]
+pub async fn get_view_definition(
+    state: State<'_, AppState>,
+    id: String,
+    schema: Option<String>,
+    view: String,
+) -> AppResult<String> {
+    let pool = state
+        .get_pool(&id)
+        .ok_or_else(|| AppError::msg("not connected"))?;
+    design::get_view_definition(&pool, schema.as_deref(), &view).await
+}
+
+#[tauri::command]
+pub async fn save_view_definition(
+    state: State<'_, AppState>,
+    id: String,
+    schema: Option<String>,
+    name: String,
+    original_name: Option<String>,
+    select_sql: String,
+) -> AppResult<Vec<String>> {
+    crate::commands::ensure_writable(&state, &id)?;
+    let pool = state
+        .get_pool(&id)
+        .ok_or_else(|| AppError::msg("not connected"))?;
+    design::save_view_definition(
+        &pool,
+        schema.as_deref(),
+        &name,
+        original_name.as_deref(),
+        &select_sql,
+    )
+    .await
+}

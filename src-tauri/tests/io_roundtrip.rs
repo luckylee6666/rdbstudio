@@ -1,8 +1,9 @@
 mod common;
 
 use rdbstudio_lib::db::io::{
-    self, ExportFormat, ExportOptions, ImportCsvOptions, ImportMode,
+    self, ExportFormat, ExportOptions, ImportCsvOptions, ImportMode, MaskKind,
 };
+use std::collections::HashMap;
 
 fn csv_opts(path: &str) -> ExportOptions {
     ExportOptions {
@@ -14,6 +15,7 @@ fn csv_opts(path: &str) -> ExportOptions {
         batch_size: 1000,
         include_ddl: false,
         include_data: true,
+        column_masks: HashMap::new(),
     }
 }
 
@@ -161,6 +163,7 @@ async fn export_json_parses_back_as_array() {
         batch_size: 1000,
         include_ddl: false,
         include_data: true,
+        column_masks: HashMap::new(),
     };
     io::export_table(&pool, None, "users", &opts)
         .await
@@ -196,6 +199,7 @@ async fn export_sql_includes_insert_into_users() {
         batch_size: 1000,
         include_ddl: true,
         include_data: true,
+        column_masks: HashMap::new(),
     };
     io::export_table(&pool, None, "users", &opts)
         .await
@@ -240,6 +244,7 @@ async fn export_sql_structure_only_omits_all_rows() {
             batch_size: 1000,
             include_ddl: true,
             include_data: false,
+            column_masks: HashMap::new(),
         },
     )
     .await
@@ -295,4 +300,46 @@ async fn import_csv_batches_and_reports_bad_rows_precisely() {
         .await
         .unwrap();
     assert_eq!(n, 3);
+}
+
+#[tokio::test]
+async fn export_table_applies_column_masks_across_formats() {
+    let pool = common::mem_pool().await;
+    common::seed_users(&pool).await;
+
+    let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+    let path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    let mut masks = HashMap::new();
+    masks.insert("email".into(), MaskKind::Email);
+    masks.insert("name".into(), MaskKind::Name);
+    masks.insert("age".into(), MaskKind::Null);
+
+    let opts = ExportOptions {
+        format: ExportFormat::Json,
+        path: path.to_string_lossy().into_owned(),
+        delimiter: ',',
+        include_header: true,
+        quote_all: false,
+        batch_size: 1000,
+        include_ddl: false,
+        include_data: true,
+        column_masks: masks,
+    };
+    io::export_table(&pool, None, "users", &opts)
+        .await
+        .expect("export masked json");
+
+    let text = std::fs::read_to_string(&path).expect("read json");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("parse json");
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 3);
+    let alice = arr
+        .iter()
+        .find(|row| row["id"] == 1)
+        .expect("alice row");
+    assert_eq!(alice["name"], "A***");
+    assert_eq!(alice["email"], "a***@example.com");
+    assert!(alice["age"].is_null());
 }
