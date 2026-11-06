@@ -27,6 +27,10 @@ on:
         description: "Existing version tag to package (for example v0.1.3)"
         required: true
         type: string
+      build_only:
+        description: "Validate the selected workflow branch without creating a release"
+        type: boolean
+        default: false
 
 jobs:
   publish-tauri:
@@ -45,15 +49,14 @@ jobs:
     permissions:
       contents: write
     strategy:
-      # Don't cancel the other build if one platform fails — we still want
-      # whichever installer succeeded to make it into the release.
+      # Keep successful installers in a draft until both platforms are verified.
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest      # GitHub-hosted macOS runners are arm64.
             rust_target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
-          - platform: windows-latest    # x64 by default.
+          - platform: windows-2022      # Pin the Windows SDK/MSVC image used for releases.
             rust_target: x86_64-pc-windows-msvc
             args: ""
 
@@ -61,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ inputs.build_only && github.ref || env.RELEASE_TAG }}
 
       - uses: pnpm/action-setup@v3
         with:
@@ -95,6 +98,9 @@ jobs:
       - name: Run frontend tests
         run: pnpm test
 
+      - name: Test release scripts
+        run: node --test .github/scripts/prepare-release.test.mjs .github/scripts/release-tauri.test.mjs
+
       - name: Verify release version
         run: pnpm check:release-version
 
@@ -111,10 +117,16 @@ jobs:
         if: hashFiles('.github/scripts/prepare-release.mjs') != ''
         run: node .github/scripts/prepare-release.mjs
 
+      - name: Validate installer build
+        if: inputs.build_only
+        run: node .github/scripts/release-tauri.mjs build ${{ matrix.args }} --config "${{ steps.release-config.outputs.config }}"
+
       - uses: tauri-apps/tauri-action@v0
+        if: ${{ !inputs.build_only }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          tauriScript: node .github/scripts/release-tauri.mjs
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "rdbstudio ${{ env.RELEASE_TAG }}"
           releaseBody: |
@@ -127,8 +139,8 @@ jobs:
             If platform signing is not configured, macOS may require System Settings →
             Privacy & Security → Open Anyway; Windows may show SmartScreen.
 
-            See [CHANGELOG.md](https://github.com/luckylee6666/rdbstudio/blob/main/CHANGELOG.md).
-          releaseDraft: false
+            See [CHANGELOG.md](https://github.com/luckylee6666/rdbstudio/blob/${{ env.RELEASE_TAG }}/CHANGELOG.md).
+          releaseDraft: true
           # Auto-detect pre-releases by tag suffix so v0.1.0-rc.1 doesn't get
           # marked as a stable release. Add more markers (-pre, -dev, ...) here
           # if we adopt them.
