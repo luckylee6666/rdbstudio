@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -24,7 +24,7 @@ export function ServerMonitorView({
 }: {
   initialConnectionId?: string;
 }) {
-  const { list, status, connect } = useConnections();
+  const { list, status } = useConnections();
   const [connId, setConnId] = useState<string>(() => {
     if (initialConnectionId) return initialConnectionId;
     const connected = list.find((c) => status[c.id] === "connected");
@@ -37,9 +37,12 @@ export function ServerMonitorView({
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(false);
   const [killTarget, setKillTarget] = useState<{
+    connectionId: string;
     proc: ServerProcess;
     cancelOnly: boolean;
   } | null>(null);
+  const activeConnectionId = useRef<string | null>(connId);
+  const snapshotRequest = useRef(0);
   const t = useT();
 
   const currentCfg = useMemo(
@@ -49,35 +52,48 @@ export function ServerMonitorView({
 
   const loadSnapshot = useCallback(
     async (targetId: string) => {
-      if (!targetId) return;
+      if (!targetId || activeConnectionId.current !== targetId) return;
+      const request = ++snapshotRequest.current;
+      const isCurrent = () =>
+        snapshotRequest.current === request && activeConnectionId.current === targetId;
       setLoading(true);
       setError(null);
       try {
-        if (status[targetId] !== "connected") {
-          await connect(targetId);
+        const connections = useConnections.getState();
+        if (connections.status[targetId] !== "connected") {
+          await connections.connect(targetId);
         }
+        if (!isCurrent()) return;
         const snap = await api.serverMonitorSnapshot(targetId);
-        setSnapshot(snap);
+        if (isCurrent()) setSnapshot(snap);
       } catch (e) {
-        setError(String(e));
+        if (isCurrent()) setError(String(e));
       } finally {
-        setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     },
-    [connect, status]
+    []
   );
 
+  const selectedId = currentCfg?.id;
   useEffect(() => {
-    if (!connId && list.length > 0) {
+    activeConnectionId.current = selectedId ?? null;
+    setSnapshot(null);
+    setError(null);
+    setKillTarget(null);
+    if (!selectedId) {
+      setLoading(false);
+      const { list, status } = useConnections.getState();
       const connected = list.find((c) => status[c.id] === "connected");
-      setConnId(connected?.id ?? list[0].id);
-      return;
-    }
-    if (connId) {
+      setConnId(connected?.id ?? list[0]?.id ?? "");
+    } else {
       void loadSnapshot(connId);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, list.length]);
+    return () => {
+      activeConnectionId.current = null;
+      snapshotRequest.current++;
+    };
+  }, [connId, selectedId, list.length, loadSnapshot]);
 
   useEffect(() => {
     if (!connId || autoRefreshSec <= 0) return;
@@ -113,17 +129,19 @@ export function ServerMonitorView({
   }, [snapshot, filter, activeOnly]);
 
   const confirmKill = async () => {
-    if (!killTarget || !connId) return;
-    const { proc, cancelOnly } = killTarget;
+    if (!killTarget) return;
+    const { connectionId, proc, cancelOnly } = killTarget;
     setKillTarget(null);
+    const config = useConnections.getState().list.find((c) => c.id === connectionId);
+    if (activeConnectionId.current !== connectionId || !config || config.read_only) return;
     try {
-      await api.killServerProcess(connId, proc.id, cancelOnly);
+      await api.killServerProcess(connectionId, proc.id, cancelOnly);
       toast.success(
         cancelOnly
           ? t("monitor.cancel_done", { id: proc.id })
           : t("monitor.kill_done", { id: proc.id })
       );
-      await loadSnapshot(connId);
+      await loadSnapshot(connectionId);
     } catch (e) {
       toast.error(t("monitor.kill_failed"), String(e));
     }
@@ -144,7 +162,11 @@ export function ServerMonitorView({
           <Select
             value={connId}
             onChange={(e) => {
+              activeConnectionId.current = e.target.value;
+              snapshotRequest.current++;
               setSnapshot(null);
+              setError(null);
+              setKillTarget(null);
               setConnId(e.target.value);
             }}
             aria-label={t("monitor.connection")}
@@ -186,6 +208,7 @@ export function ServerMonitorView({
           </span>
           <div className="w-24">
             <Select
+              aria-label={t("monitor.auto_refresh")}
               value={String(autoRefreshSec)}
               onChange={(e) => setAutoRefreshSec(Number(e.target.value) || 0)}
             >
@@ -360,7 +383,7 @@ export function ServerMonitorView({
                                   <button
                                     disabled={!!currentCfg?.read_only}
                                     onClick={() =>
-                                      setKillTarget({ proc, cancelOnly: true })
+                                      setKillTarget({ connectionId: connId, proc, cancelOnly: true })
                                     }
                                     title={t("monitor.btn.cancel_query")}
                                     className="inline-flex h-6 items-center gap-1 rounded border border-border/70 px-2 text-[11px] text-muted-foreground hover:border-warning hover:text-warning disabled:opacity-40"
@@ -373,7 +396,7 @@ export function ServerMonitorView({
                                   <button
                                     disabled={!!currentCfg?.read_only}
                                     onClick={() =>
-                                      setKillTarget({ proc, cancelOnly: false })
+                                      setKillTarget({ connectionId: connId, proc, cancelOnly: false })
                                     }
                                     title={t("monitor.btn.kill")}
                                     className="inline-flex h-6 items-center gap-1 rounded border border-danger/40 bg-danger/10 px-2 text-[11px] text-danger hover:bg-danger/20 disabled:opacity-40"

@@ -23,6 +23,63 @@ async fn cleanup(handle: &RedisHandle, keys: &[String]) {
 }
 
 #[tokio::test]
+async fn monitor_protects_its_connection_and_only_reports_success_for_a_killed_client() {
+    use rdbstudio_lib::db::{monitor, pool::DbPool};
+    let Some(handle) = handle().await else {
+        eprintln!("skipped: RDBSTUDIO_TEST_REDIS_URL is not set");
+        return;
+    };
+    let db = DbPool::Redis(handle.clone());
+    let mut conn = handle.conn();
+    let own_id: u64 = redis::cmd("CLIENT")
+        .arg("ID")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let snapshot = monitor::server_monitor_snapshot(&db).await.unwrap();
+    let own = snapshot
+        .processes
+        .iter()
+        .find(|p| p.id == own_id.to_string())
+        .unwrap();
+    assert!(own.is_self);
+    assert!(!own.killable);
+    assert!(
+        monitor::kill_server_process(&db, &own_id.to_string(), false)
+            .await
+            .is_err()
+    );
+    let unchanged_id: u64 = redis::cmd("CLIENT")
+        .arg("ID")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(unchanged_id, own_id);
+
+    let url = std::env::var("RDBSTUDIO_TEST_REDIS_URL").unwrap();
+    let mut other = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let other_id: u64 = redis::cmd("CLIENT")
+        .arg("ID")
+        .query_async(&mut other)
+        .await
+        .unwrap();
+    monitor::kill_server_process(&db, &other_id.to_string(), false)
+        .await
+        .unwrap();
+    let ping: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut other).await;
+    assert!(ping.is_err());
+    assert!(
+        monitor::kill_server_process(&db, &other_id.to_string(), false)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn hscan_and_sscan_walk_multiple_bounded_pages() {
     let Some(handle) = handle().await else {
         eprintln!("skipped: RDBSTUDIO_TEST_REDIS_URL is not set");

@@ -88,12 +88,19 @@ pub async fn kill_server_process(
         }
         DbPool::Redis(h) => {
             let mut conn = h.conn();
-            let _: redis::Value = redis::cmd("CLIENT")
+            let killed: u64 = redis::cmd("CLIENT")
                 .arg("KILL")
                 .arg("ID")
                 .arg(pid)
+                .arg("SKIPME")
+                .arg("YES")
                 .query_async(&mut conn)
                 .await?;
+            if killed == 0 {
+                return Err(AppError::msg(format!(
+                    "server did not terminate client {pid} (already exited or current connection)"
+                )));
+            }
             Ok(())
         }
         DbPool::Sqlite(_) => Err(AppError::msg(
@@ -295,7 +302,7 @@ async fn snapshot_mysql(
     })
 }
 
-pub fn parse_redis_client_list(raw: &str) -> Vec<ServerProcess> {
+pub fn parse_redis_client_list(raw: &str, current_id: u64) -> Vec<ServerProcess> {
     let mut out = Vec::new();
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -330,6 +337,7 @@ pub fn parse_redis_client_list(raw: &str) -> Vec<ServerProcess> {
             (None, Some(n)) => Some(n),
             (None, None) => None,
         };
+        let is_self = id.parse::<u64>().ok() == Some(current_id);
         out.push(ServerProcess {
             id: id.to_string(),
             user,
@@ -340,8 +348,8 @@ pub fn parse_redis_client_list(raw: &str) -> Vec<ServerProcess> {
             duration_sec: age,
             wait_info: Some(format!("idle {idle}s")),
             query: cmd,
-            is_self: false,
-            killable: true,
+            is_self,
+            killable: !is_self,
         });
     }
     out
@@ -352,10 +360,12 @@ async fn snapshot_redis(
     server_version: String,
 ) -> AppResult<ServerMonitorSnapshot> {
     let mut conn = h.conn();
-    let (info_raw, client_raw): (String, String) = redis::pipe()
+    let (info_raw, client_raw, current_id): (String, String, u64) = redis::pipe()
         .cmd("INFO")
         .cmd("CLIENT")
         .arg("LIST")
+        .cmd("CLIENT")
+        .arg("ID")
         .query_async(&mut conn)
         .await?;
 
@@ -370,7 +380,7 @@ async fn snapshot_redis(
         }
     }
 
-    let processes = parse_redis_client_list(&client_raw);
+    let processes = parse_redis_client_list(&client_raw, current_id);
     let mut metrics = Vec::new();
     for (key, label) in [
         ("connected_clients", "Connected Clients"),
@@ -497,9 +507,11 @@ mod tests {
     fn parse_redis_client_list_extracts_fields_and_state() {
         let sample = "id=14 addr=127.0.0.1:52144 laddr=127.0.0.1:6379 fd=8 name=app-worker age=120 idle=0 flags=N db=2 sub=0 psub=0 ssub=0 multi=-1 qbuf=26 qbuf-free=20448 argv-mem=10 multi-mem=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=22298 events=r cmd=get user=default redir=-1 resp=2\n\
                       id=15 addr=127.0.0.1:52145 fd=9 name= age=45 idle=12 db=0 cmd=ping user=default\n";
-        let list = parse_redis_client_list(sample);
+        let list = parse_redis_client_list(sample, 14);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "14");
+        assert!(list[0].is_self);
+        assert!(!list[0].killable);
         assert_eq!(list[0].database.as_deref(), Some("db2"));
         assert_eq!(list[0].state.as_deref(), Some("active"));
         assert_eq!(
@@ -507,6 +519,8 @@ mod tests {
             Some("127.0.0.1:52144 (app-worker)")
         );
         assert_eq!(list[1].id, "15");
+        assert!(!list[1].is_self);
+        assert!(list[1].killable);
         assert_eq!(list[1].state.as_deref(), Some("idle"));
         assert_eq!(list[1].wait_info.as_deref(), Some("idle 12s"));
     }

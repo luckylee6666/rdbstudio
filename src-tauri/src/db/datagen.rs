@@ -99,8 +99,10 @@ impl SplitMix64 {
 
     fn next_i64_range(&mut self, min: i64, max: i64) -> i64 {
         let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
-        let span = (hi as i128 - lo as i128 + 1).max(1) as u64;
-        lo.saturating_add((self.next_u64() % span) as i64)
+        // The inclusive i64 range contains 2^64 values. Keep both the span and
+        // addition widened so that it neither wraps to zero nor saturates.
+        let span = hi as i128 - lo as i128 + 1;
+        (lo as i128 + self.next_u64() as i128 % span) as i64
     }
 
     fn next_f64_range(&mut self, min: f64, max: f64) -> f64 {
@@ -191,7 +193,7 @@ fn generate_cell(cfg: &ColumnGeneratorConfig, row_idx: usize, rng: &mut SplitMix
             let f = FIRST_NAMES[rng.next_usize(FIRST_NAMES.len())].to_ascii_lowercase();
             let l = LAST_NAMES[rng.next_usize(LAST_NAMES.len())].to_ascii_lowercase();
             let dom = EMAIL_DOMAINS[rng.next_usize(EMAIL_DOMAINS.len())];
-            let suffix = (row_idx + 1) % 10_000;
+            let suffix = row_idx + 1;
             json!(format!("{f}.{l}{suffix}@{dom}"))
         }
         DataGenRule::Phone => {
@@ -380,9 +382,12 @@ pub async fn generate_table_data(
         DbPool::Postgres(p) => {
             let mut tx = p.begin().await?;
             if opts.truncate_first {
-                sqlx::query(&format!("TRUNCATE TABLE {} RESTART IDENTITY CASCADE", target))
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(&format!(
+                    "TRUNCATE TABLE {} RESTART IDENTITY RESTRICT",
+                    target
+                ))
+                .execute(&mut *tx)
+                .await?;
             }
             let mut row_idx = 0usize;
             while row_idx < opts.row_count {
@@ -450,6 +455,39 @@ pub async fn generate_table_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_integers_cover_wide_signed_ranges_without_panicking_or_saturating() {
+        for (min, max) in [
+            (i64::MIN, i64::MAX),
+            (i64::MAX, i64::MIN),
+            (-1, i64::MAX),
+            (i64::MIN, 0),
+            (i64::MIN, i64::MIN),
+            (i64::MAX, i64::MAX),
+        ] {
+            let mut rng = SplitMix64::new(42);
+            let mut values = std::collections::HashSet::new();
+            for _ in 0..100 {
+                let value = rng.next_i64_range(min, max);
+                assert!((min.min(max)..=min.max(max)).contains(&value));
+                values.insert(value);
+            }
+            if min == max {
+                assert_eq!(values.len(), 1);
+            } else {
+                assert_eq!(
+                    values.len(),
+                    100,
+                    "wide ranges must not collapse to a boundary"
+                );
+            }
+            if min.min(max) == i64::MIN && min.max(max) == i64::MAX {
+                assert!(values.iter().any(|&value| value < 0));
+                assert!(values.iter().any(|&value| value > 0));
+            }
+        }
+    }
 
     #[test]
     fn preview_generated_data_is_deterministic_with_seed_and_skips_ignored_columns() {
