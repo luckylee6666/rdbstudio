@@ -6,7 +6,7 @@
 
 - 本机已生成更新签名密钥：`.release/updater.key` 与 `.release/updater.key.pub`。目录被 Git 忽略，私钥权限为 0600，未写入日志或提交。不要删除/轮换这对密钥后继续使用已分发客户端的旧公钥。
 - 仓库目前没有签名 Secrets，本机没有可用 Developer ID 签名身份。正式原生签名、公证和签名更新发布不能仅靠修改代码完成。
-- 本次没有同步远端 Secrets，也未触发新版本发布。后续明确安排发布配置时，再将对应材料写入仓库 Secrets。
+- 未配置签名 Secrets 时发布手动下载安装包，不提供签名自动更新产物。后续明确安排发布配置时，再将对应材料写入仓库 Secrets。
 
 ## GitHub Actions Secrets
 
@@ -25,6 +25,12 @@
 ## 流程与校验
 
 `.github/scripts/prepare-release.mjs` 生成临时配置 overlay，不把密码或私钥写入该文件。选择平台的原生签名材料不完整时会在打包前失败；未配置原生证书时仍可按既有流程生成未签名包，并在 Release 文案中说明。
+
+`.github/scripts/release-tauri.mjs` 在调用 Tauri CLI 前移除空的签名环境变量，避免 bundler 把空证书当作已配置证书导入；有证书时保留合法的空密码。Windows 构建环境固定为 `windows-2022`。
+
+从 `develop` 创建 `feature/*` 完成开发与审查后，可运行 `gh workflow run release.yml --ref <功能分支> -f tag=vX.Y.Z -f build_only=true`：它构建所选分支、校验版本并运行双平台测试和打包，不创建 Release。通过后将功能分支分别合入 `develop` 和 `master`，在 `master` 上创建带中文 Markdown 无序列表说明的附注版本标签，再推送标签。
+
+标签构建只创建草稿 Release。必须确认该标签的 macOS、Windows 作业全部成功，草稿中包含版本匹配的 arm64 DMG、x64 MSI 和 NSIS EXE，且安装包验证通过，再运行 `gh release edit vX.Y.Z --draft=false --latest` 公开。任一平台失败时保留草稿并修复，不公开缺少平台的版本。发布验证成功且功能分支已包含在 `develop` 和 `master` 后，才删除该功能分支。
 
 配置更新私钥后，overlay 开启 `createUpdaterArtifacts`，Tauri action 生成签名和更新清单。必须先发布包含 updater 的新版本，且随后的更新包使用与客户端公钥匹配的私钥。HTTP 或未签名清单不能作为回退渠道。
 

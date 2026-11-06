@@ -17,7 +17,7 @@
 
 <p align="center"><strong>Modern cross-platform database GUI</strong> — A Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis, built with Tauri 2 + React + sqlx.</p>
 
-> Status: **v0.1.0** — first stable release. macOS (Apple Silicon) and Windows x64 installers on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page.
+> Version: **v0.2.1**. macOS (Apple Silicon) and Windows x64 installers on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page.
 
 ## Features
 
