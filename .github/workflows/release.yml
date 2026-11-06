@@ -107,6 +107,11 @@ jobs:
       - name: Run Rust tests
         run: cd src-tauri && cargo test --no-default-features
 
+      - name: Diagnose Windows loader failures
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/diagnose-windows-imports.ps1
+
       - name: Import Windows signing certificate
         if: runner.os == 'Windows' && hashFiles('.github/scripts/import-windows-certificate.ps1') != ''
         shell: pwsh
