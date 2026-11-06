@@ -151,3 +151,8 @@ jobs:
           # if we adopt them.
           prerelease: ${{ contains(env.RELEASE_TAG, '-rc') || contains(env.RELEASE_TAG, '-beta') || contains(env.RELEASE_TAG, '-alpha') }}
           args: ${{ matrix.args }} ${{ steps.release-config.outputs.config != '' && format('--config "{0}"', steps.release-config.outputs.config) || '' }}
+
+      - name: Verify Windows manifests and application startup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/verify-windows-build.ps1
