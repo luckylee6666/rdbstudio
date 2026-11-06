@@ -8,6 +8,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.2.1] — 2026-11-05
 
 ### Fixed
+- Windows 测试与应用统一嵌入 Common Controls v6 清单，修复测试程序因缺少 TaskDialogIndirect 入口点而无法启动。
 - 修复未配置 macOS 证书时空环境变量导致的打包失败；双平台安装包先进入草稿，验证完整后公开发布。
 - 服务器监控忽略切换连接、卸载及自动刷新乱序返回的旧响应；终止操作绑定原连接，确认时再次检查只读状态，避免错连操作。
 - Redis 监控正确标记自身连接并禁用终止入口，终止未找到的客户端不再误报成功。

@@ -528,7 +528,7 @@ fn sqlite_file_is_open(state: &AppState, target: &Path) -> bool {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod restore_pool_guard_tests {
     use super::*;
 

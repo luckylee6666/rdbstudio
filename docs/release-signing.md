@@ -28,6 +28,8 @@
 
 `.github/scripts/release-tauri.mjs` 在调用 Tauri CLI 前移除空的签名环境变量，避免 bundler 把空证书当作已配置证书导入；有证书时保留合法的空密码。Windows 构建环境固定为 `windows-2022`。
 
+Windows MSVC 的 `build.rs` 通过链接器统一嵌入 `windows-app-manifest.xml`，让应用与 Rust 单元/集成测试都声明 Common Controls v6。仅 Tauri 的默认资源清单无法覆盖库单元测试，会导致 `TaskDialogIndirect` 入口点缺失（`0xc0000139`）。失败时 CI 保留导入符号诊断输出。
+
 从 `develop` 创建 `feature/*` 完成开发与审查后，可运行 `gh workflow run release.yml --ref <功能分支> -f tag=vX.Y.Z -f build_only=true`：它构建所选分支、校验版本并运行双平台测试和打包，不创建 Release。通过后将功能分支分别合入 `develop` 和 `master`，在 `master` 上创建带中文 Markdown 无序列表说明的附注版本标签，再推送标签。
 
 标签构建只创建草稿 Release。必须确认该标签的 macOS、Windows 作业全部成功，草稿中包含版本匹配的 arm64 DMG、x64 MSI 和 NSIS EXE，且安装包验证通过，再运行 `gh release edit vX.Y.Z --draft=false --latest` 公开。任一平台失败时保留草稿并修复，不公开缺少平台的版本。发布验证成功且功能分支已包含在 `develop` 和 `master` 后，才删除该功能分支。
