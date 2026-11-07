@@ -3,20 +3,30 @@ import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useLayout } from "@/store/layout";
 import { useT } from "@/store/i18n";
 import { enterKey, modKey } from "@/lib/platform";
+import { useState } from "react";
+import { ConnectionDialog } from "@/components/connection/ConnectionDialog";
+import { version } from "../../../package.json";
 
 export function Welcome() {
   const openTab = useWorkspace((s) => s.openTab);
   const setActivity = useLayout((s) => s.setActivity);
-  const openPalette = useLayout((s) => s.openPalette);
+  const [connectionOpen, setConnectionOpen] = useState(false);
   const t = useT();
 
   const actions = [
+    {
+      icon: Workflow,
+      titleKey: "builder.title",
+      descKey: "builder.description",
+      accent: "from-indigo-500/20 to-indigo-500/0 text-indigo-700 dark:text-indigo-300",
+      run: () => openTab({ id: `builder:${crypto.randomUUID()}`, kind: "query-builder", title: "Query builder" }),
+    },
     {
       icon: Database,
       titleKey: "welcome.action.new_connection",
       descKey: "welcome.action.new_connection.desc",
       accent: "from-sky-500/20 to-sky-500/0 text-sky-700 dark:text-sky-300",
-      run: () => setActivity("connections"),
+      run: () => setConnectionOpen(true),
     },
     {
       icon: Terminal,
@@ -35,7 +45,7 @@ export function Welcome() {
       titleKey: "welcome.action.new_er",
       descKey: "welcome.action.new_er.desc",
       accent: "from-violet-500/20 to-violet-500/0 text-violet-700 dark:text-violet-300",
-      run: () => openPalette(),
+      run: () => setActivity("models"),
     },
     {
       icon: FileDown,
@@ -48,11 +58,11 @@ export function Welcome() {
 
   return (
     <div className="h-full overflow-auto">
-      <div className="mx-auto flex h-full max-w-4xl flex-col justify-center gap-10 px-10 py-12">
+      <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-center gap-8 px-5 py-8">
         <div>
           <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-border/80 bg-surface-elevated/60 px-3 py-1 text-[11px] uppercase tracking-wider text-muted-foreground">
             <span className="h-1.5 w-1.5 rounded-full bg-success" />
-            {t("welcome.badge")}
+            {t("welcome.badge", { version })}
           </div>
           <h1 className="text-4xl font-semibold tracking-tight">
             {t("welcome.headline")}
@@ -62,7 +72,7 @@ export function Welcome() {
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3">
           {actions.map((a) => (
             <button
               key={a.titleKey}
@@ -94,7 +104,7 @@ export function Welcome() {
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
             {t("welcome.shortcuts")}
           </div>
-          <div className="grid grid-cols-3 gap-y-2 text-[13px] text-muted-foreground">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-2 text-[13px] text-muted-foreground">
             <Shortcut keys={[modKey, "K"]} label={t("welcome.shortcut.palette")} />
             <Shortcut keys={[modKey, "T"]} label={t("welcome.shortcut.new_query")} />
             <Shortcut keys={[modKey, enterKey]} label={t("welcome.shortcut.run")} />
@@ -104,6 +114,7 @@ export function Welcome() {
           </div>
         </div>
       </div>
+      <ConnectionDialog open={connectionOpen} onClose={() => setConnectionOpen(false)} />
     </div>
   );
 }

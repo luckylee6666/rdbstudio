@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -8,11 +9,15 @@ import {
   ReactFlow,
   type Edge,
   type Node,
+  type NodeChange,
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import dagre from "dagre";
 import { AlertTriangle, Flame, Loader2, RefreshCw } from "lucide-react";
+import { QueryParametersDialog } from "@/components/editor/QueryParametersDialog";
+import { mergeParameterDefaults, type QueryParameter } from "@/lib/queryParameters";
+import { useWorkspace } from "@/store/workspace";
 import type { WorkspaceTab } from "@/types";
 import { api } from "@/lib/api";
 import {
@@ -24,14 +29,18 @@ import {
   stripLeadingExplain,
   type PlanNode,
 } from "@/lib/explain";
-import { explainWrap } from "@/lib/sql";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { explainWrap, isReadOnlyStatement } from "@/lib/sql";
 import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/components/theme/ThemeProvider";
+import { FitVisibleGraph } from "@/components/er/FitVisibleGraph";
 
 type LoadState =
   | { kind: "loading" }
+  | { kind: "parameters" }
+  | { kind: "ready" }
   | { kind: "error"; message: string; hint?: boolean }
   | { kind: "ok"; roots: PlanNode[] };
 
@@ -59,13 +68,24 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
     [connections, connectionId]
   );
   const driver = cfg?.driver;
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const analyze = tab.id.startsWith("explain-analyze:");
+  const sourceQueryId = tab.sourceQueryId;
+  const sourceSessionIdentity = tab.sourceSessionIdentity;
+  const active = useWorkspace(workspace => workspace.activeTabId === tab.id);
+  const graphContainer = useRef<HTMLDivElement>(null);
+  const sourceName = useWorkspace(workspace => workspace.tabs.find(item => item.id === sourceQueryId)?.title);
+  const matchesSnapshot = (snapshot: WorkspaceTab["explainSnapshot"]) => snapshot?.connectionId === connectionId && snapshot?.sql === sql && snapshot?.analyze === analyze && snapshot?.sourceSessionIdentity === sourceSessionIdentity;
+  const [state, setState] = useState<LoadState>(() => matchesSnapshot(tab.explainSnapshot) ? { kind: "ok", roots: tab.explainSnapshot!.roots } : { kind: "loading" });
+  const [confirmAnalyze, setConfirmAnalyze] = useState(false);
   const t = useT();
+  const request = useRef<string | null>(null);
+  const [pending, setPending] = useState<{ names: string[]; generation: number } | null>(null);
+  const values = useRef<QueryParameter[]>([]);
   // Analyze plans are opened with an `explain-analyze:` tab id; only
   // PostgreSQL re-runs the statement for real, other drivers ignore the flag.
-  const analyze = tab.id.startsWith("explain-analyze:");
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (parameters?: QueryParameter[], generation?: number) => {
+    if (request.current) return;
     if (!connectionId || !sql.trim()) {
       setState({ kind: "error", message: t("explain.no_sql") });
       return;
@@ -78,46 +98,100 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
       setState({ kind: "error", message: t("explain.unsupported") });
       return;
     }
+    const qid = crypto.randomUUID();
+    request.current = qid;
+    const owns = () => request.current === qid;
     setState({ kind: "loading" });
+    useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, explainRunning: true, explainSnapshot: undefined } : item) }));
     try {
-      // Re-wrap in the driver's EXPLAIN form; strip any EXPLAIN the user
-      // already typed (and a trailing `;`) to avoid double-wrapping.
-      const body = stripLeadingExplain(sql).replace(/;\s*$/, "");
-      if (driver === "postgres") {
-        const res = await api.executeQuery(
-          connectionId,
-          explainWrap(body, "postgres", { analyze, format: "json" })
-        );
-        const cell = res.rows[0]?.[0];
-        if (cell == null) throw new Error(t("explain.empty"));
-        setState({ kind: "ok", roots: [parsePgPlan(cell)] });
-      } else if (driver === "mysql") {
-        const res = await api.executeQuery(
-          connectionId,
-          explainWrap(body, "mysql", { format: "json" })
-        );
-        const cell = res.rows[0]?.[0];
-        if (cell == null) throw new Error(t("explain.empty"));
-        // FORMAT=JSON is MySQL 5.6.5+; older servers (or MariaDB variants)
-        // reject it and the error panel explains what happened.
-        setState({ kind: "ok", roots: [parseMysqlPlan(cell)] });
-      } else {
-        const res = await api.executeQuery(
-          connectionId,
-          explainWrap(body, "sqlite")
-        );
-        setState({ kind: "ok", roots: parseSqliteQueryPlan(res.rows) });
+      if (!sourceQueryId || !sourceSessionIdentity) throw new Error(t("explain.source_closed"));
+      {
+        if (!useWorkspace.getState().tabs.some(item => item.id === sourceQueryId && item.kind === "query")) throw new Error(t("explain.source_closed"));
+        await api.attachEditorPlan(connectionId, sourceQueryId, tab.id, sourceSessionIdentity);
+        if (!owns()) {
+          if (!useWorkspace.getState().tabs.some(item => item.id === tab.id)) void api.closeEditorSession(tab.id).catch(() => {});
+          return;
+        }
       }
+      const body = stripLeadingExplain(sql).replace(/;\s*$/, "");
+      const wrapped = explainWrap(body, driver, { analyze, format: "json" });
+      if (!parameters && /:[A-Za-z_]/.test(body)) {
+        const analysis = await api.queryParameterNames(connectionId, [wrapped], tab.id, qid);
+        if (!owns()) return;
+        if (analysis.names.length) {
+          setPending(analysis);
+          setState({ kind: "parameters" });
+          return;
+        }
+      }
+      let res;
+      if (parameters) {
+        const outcome = await api.executeParameterQuery(connectionId, { sqls: [wrapped], parameters, generation, sessionId: tab.id, queryId: qid, atomic: false });
+        if (!owns()) return;
+        if (outcome.status === "failed") throw new Error(outcome.error);
+        res = outcome.result;
+      } else {
+        res = await api.executeQuery(connectionId, wrapped, qid, tab.id);
+      }
+      if (!owns()) return;
+      let roots: PlanNode[];
+      if (driver === "sqlite") roots = parseSqliteQueryPlan(res.rows);
+      else {
+        const cell = res.rows[0]?.[0];
+        if (cell == null) throw new Error(t("explain.empty"));
+        roots = [driver === "postgres" ? parsePgPlan(cell) : parseMysqlPlan(cell)];
+      }
+      setState({ kind: "ok", roots });
+      useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, explainSnapshot: { sourceSessionIdentity, connectionId, sql, analyze, roots } } : item) }));
     } catch (e) {
-      setState({ kind: "error", message: String(e), hint: true });
+      if (owns()) setState({ kind: "error", message: String(e), hint: true });
+    } finally {
+      if (owns()) {
+        request.current = null;
+        useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, explainRunning: false } : item) }));
+      }
+      if (sourceQueryId) void api.editorSessionStatus(sourceQueryId).then(status => {
+        if (status) window.dispatchEvent(new CustomEvent("editor-session-updated", { detail: { sessionId: sourceQueryId, status } }));
+      }).catch(() => {});
     }
-    // t changes identity every render; the effect below keys on real inputs.
+    // t changes identity every render; inputs below identify the request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionId, sql, driver, cfg, analyze]);
+  }, [connectionId, sql, driver, cfg, analyze, tab.id, sourceQueryId, sourceSessionIdentity]);
 
   useEffect(() => {
-    void load();
+    let active = true;
+    setPending(null);
+    // Defer the initial request so StrictMode's setup/cleanup rehearsal cannot
+    // execute ANALYZE twice. Consume explicit intent once, before any IPC.
+    queueMicrotask(() => {
+      if (!active) return;
+      const current = useWorkspace.getState().tabs.find(item => item.id === tab.id) ?? tab;
+      if (matchesSnapshot(current.explainSnapshot)) {
+        setState({ kind: "ok", roots: current.explainSnapshot!.roots });
+        return;
+      }
+      if (analyze && !current.explainRequested) {
+        setState({ kind: "ready" });
+        return;
+      }
+      if (cfg) useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, explainRequested: false } : item) }));
+      void load();
+    });
+    return () => {
+      active = false;
+      const qid = request.current;
+      request.current = null;
+      if (qid) void api.cancelQuery(qid).catch(() => {});
+      useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, explainRunning: false } : item) }));
+    };
+    // Runtime snapshots and consumed request flags must not retrigger loading.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
+
+  const refresh = () => {
+    if (analyze && !isReadOnlyStatement(sql)) setConfirmAnalyze(true);
+    else void load();
+  };
 
   // Hotspot detection (PG only): highlight the node(s) whose SELF cost —
   // Total Cost minus the children's totals — is the maximum of the plan.
@@ -151,16 +225,8 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
   useEffect(() => {
     setLocalNodes(graph.nodes);
   }, [graph.nodes]);
-  const onNodesChange = useCallback((changes: any) => {
-    setLocalNodes((nds) =>
-      nds.map((n) => {
-        const ch = changes.find((c: any) => c.id === n.id);
-        if (ch?.type === "position" && ch.position) {
-          return { ...n, position: ch.position };
-        }
-        return n;
-      })
-    );
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    setLocalNodes((nds) => applyNodeChanges(changes, nds));
   }, []);
 
   const rootCost =
@@ -173,8 +239,22 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-border/70 bg-surface/30 px-3 text-[11.5px] text-muted-foreground">
+      <ConfirmDialog open={confirmAnalyze && active} title={t("explain.analyze.warning_title")} message={t("explain.analyze.warning")}
+        confirmLabel={t("explain.analyze.proceed")} cancelLabel={t("common.cancel")} danger onConfirm={() => void load()} onClose={() => setConfirmAnalyze(false)} />
+      {pending && active && <QueryParametersDialog names={pending.names} previous={values.current} defaults={tab.queryParameterDefaults ?? []} connectionName={cfg?.name ?? ""}
+        driver={cfg?.driver}
+        onClose={() => { setPending(null); setState({ kind: "error", message: t("query.err.cancelled") }); }}
+        onRun={(parameters, inputs) => {
+          const generation = pending.generation;
+          values.current = parameters;
+          useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, queryParameterDefaults: mergeParameterDefaults(item.queryParameterDefaults ?? [], inputs) } : item) }));
+          setPending(null);
+          void load(parameters, generation);
+        }}
+      />}
+      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-3 py-1 border-b border-border/70 bg-surface/30 px-3 text-[11.5px] text-muted-foreground">
         <span className="text-foreground/90">{cfg?.name ?? tab.subtitle}</span>
+        {cfg?.read_only ? <span>{t("explain.readonly_session")}</span> : sourceQueryId && <span className="max-w-48 truncate" title={sourceName ?? t("explain.source_closed")}>{t("explain.source", { name: sourceName ?? "—" })}</span>}
         {driver && (
           <span className="rounded bg-surface-muted/70 px-1.5 py-0.5 text-[9.5px] uppercase tracking-wider">
             {driver}
@@ -230,16 +310,21 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
         </span>
         <div className="flex-1" />
         <button
-          onClick={() => void load()}
-          disabled={state.kind === "loading"}
+          onClick={refresh}
+          disabled={state.kind === "loading" || !!pending}
           className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-50"
         >
           <RefreshCw className="h-3 w-3" />
-          {t("explain.refresh")}
+          {t(analyze ? "explain.analyze.run_again" : "explain.refresh")}
         </button>
       </div>
-      <div className="min-h-0 flex-1">
-        {state.kind === "error" ? (
+      <div ref={graphContainer} className="min-h-0 flex-1">
+        {state.kind === "ready" ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground">
+            <p>{t("explain.analyze.ready")}</p>
+            <button className="rounded-md bg-brand px-3 py-2 text-brand-foreground" onClick={refresh}>{t("explain.analyze.run_again")}</button>
+          </div>
+        ) : state.kind === "error" ? (
           <div className="flex h-full items-start justify-center p-6">
             <div className="max-w-lg rounded-lg border border-danger/40 bg-danger/10 p-4 text-[12.5px]">
               <div className="mb-1 flex items-center gap-2 font-medium text-danger">
@@ -256,7 +341,7 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
               )}
             </div>
           </div>
-        ) : state.kind === "loading" ? (
+        ) : state.kind === "loading" || state.kind === "parameters" ? (
           <div className="flex h-full items-center justify-center gap-2 text-[12.5px] text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             {t("explain.loading")}
@@ -272,13 +357,13 @@ export function ExplainView({ tab }: { tab: WorkspaceTab }) {
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
             nodesConnectable={false}
+            deleteKeyCode={null}
             colorMode={theme}
-            fitView
-            fitViewOptions={{ padding: 0.25, minZoom: 0.6, maxZoom: 1.1 }}
             proOptions={{ hideAttribution: true }}
             minZoom={0.25}
             maxZoom={1.75}
           >
+            <FitVisibleGraph active={active} container={graphContainer} revision={graph.nodes} />
             <Background
               variant={BackgroundVariant.Dots}
               color="hsl(var(--border))"
@@ -308,11 +393,12 @@ const nodeTypes = {
 function PlanNodeCard({ data }: NodeProps<Node<PlanNodeData>>) {
   const t = useT();
   const { plan, hot } = data;
-  const meta: string[] = [];
+  const estimate: string[] = [];
   if (plan.cost) {
-    meta.push(`cost ${fmt(plan.cost.startup)}..${fmt(plan.cost.total)}`);
+    estimate.push(`cost ${fmt(plan.cost.startup)}..${fmt(plan.cost.total)}`);
   }
-  if (plan.rows != null) meta.push(`rows ${fmt(plan.rows)}`);
+  if (plan.rows != null) estimate.push(`rows ${fmt(plan.rows)}`);
+  const meta = estimate.length ? [estimate.join(" · ")] : [];
   if (plan.actual) {
     const actual: string[] = [];
     if (plan.actual.time != null) actual.push(`${fmt(plan.actual.time)} ms`);
@@ -354,11 +440,11 @@ function PlanNodeCard({ data }: NodeProps<Node<PlanNodeData>>) {
           {plan.detail}
         </div>
       )}
-      {meta.length > 0 && (
-        <div className="truncate font-mono text-[10px] leading-[14px] text-muted-foreground">
-          {meta.join(" · ")}
+      {meta.map((line, index) => (
+        <div key={index} className="truncate font-mono text-[10px] leading-[14px] text-muted-foreground">
+          {line}
         </div>
-      )}
+      ))}
       <Handle
         type="source"
         position={Position.Bottom}

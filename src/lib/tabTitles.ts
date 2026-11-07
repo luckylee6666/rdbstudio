@@ -13,6 +13,8 @@ const SUBTITLE_KEYS: Record<string, string> = {
   Diagram: "tabs.sub.diagram",
 };
 const TOOL_TITLE_KEYS: Partial<Record<WorkspaceTab["kind"], string>> = {
+  model: "model.title",
+  "query-builder": "builder.title",
   sync: "tool.sync.title",
   search: "tool.search.title",
   objects: "tool.objects.title",

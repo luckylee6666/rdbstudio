@@ -27,64 +27,63 @@ export function StatusBar() {
   const color = connColorValue(cfg?.color);
 
   return (
-    <footer className="flex h-6 shrink-0 items-center gap-3 border-t border-border/70 bg-surface/60 px-3 text-[11px] text-muted-foreground">
+    <footer className="flex h-6 shrink-0 items-center overflow-hidden whitespace-nowrap gap-3 border-t border-border/70 bg-surface/60 px-3 text-[11px] text-muted-foreground">
       {cfg ? (
         <>
-          <span className="flex items-center gap-1">
+          <span className="flex min-w-0 max-w-[24%] shrink-0 items-center gap-1" title={cfg.name}>
             {color && (
               <span
-                className="h-2 w-2 rounded-full"
+                className="h-2 w-2 shrink-0 rounded-full"
                 style={{ background: color }}
               />
             )}
-            <Plug className="h-3 w-3" />
-            {cfg.name}
+            <Plug className="h-3 w-3 shrink-0" />
+            <span className="truncate">{cfg.name}</span>
           </span>
           {cfg.read_only && (
-            <span className="flex items-center gap-1 text-warning">
+            <span className="flex shrink-0 items-center gap-1 text-warning">
               <Lock className="h-3 w-3" />
               {t("conn.badge.read_only")}
             </span>
           )}
           {activeTab?.schema && (
-            <span className="flex items-center gap-1">
-              <GitBranch className="h-3 w-3" />
-              {activeTab.schema}
+            <span className="flex min-w-0 max-w-[16%] items-center gap-1" title={activeTab.schema}>
+              <GitBranch className="h-3 w-3 shrink-0" />
+              <span className="truncate">{activeTab.schema}</span>
             </span>
           )}
-          <span className="flex items-center gap-1">
+          <span className="flex min-w-0 flex-1 items-center gap-1">
             {status === "connected" ? (
-              <Wifi className="h-3 w-3 text-success" />
+              <Wifi className="h-3 w-3 shrink-0 text-success" />
             ) : (
               <WifiOff
                 className={cn(
-                  "h-3 w-3",
+                  "h-3 w-3 shrink-0",
                   status === "error" ? "text-danger" : "text-muted-foreground"
                 )}
               />
             )}
-            {status === "connected"
+            <span className="shrink-0">{status === "connected"
               ? t("status.connected")
               : status === "connecting"
               ? t("status.connecting")
               : status === "error"
               ? t("status.error")
-              : t("status.disconnected")}
-            {status === "connected" && version ? ` · ${version}` : ""}
+              : t("status.disconnected")}</span>
+            {status === "connected" && version && <span className="truncate" title={version}>· {version}</span>}
           </span>
         </>
       ) : (
-        <span className="flex items-center gap-1">
+        <span className="flex min-w-0 flex-1 items-center gap-1">
           <WifiOff className="h-3 w-3" />
           {t("status.no_connection")}
         </span>
       )}
-      <div className="flex-1" />
-      {cfg && <span className="uppercase">{cfg.driver}</span>}
+      {cfg && <span className="shrink-0 uppercase">{cfg.driver}</span>}
       {activeTab && (
         <>
           <span>·</span>
-          <span className="max-w-[240px] truncate">{tabDisplay(activeTab, t).title}</span>
+          <span className="max-w-[16%] shrink-0 truncate">{tabDisplay(activeTab, t).title}</span>
         </>
       )}
     </footer>

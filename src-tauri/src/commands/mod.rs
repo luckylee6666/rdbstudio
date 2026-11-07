@@ -9,6 +9,9 @@ pub mod maintenance;
 pub mod native_copy;
 pub mod navicat;
 pub mod query;
+pub mod parameters;
+pub mod parameter_presets;
+pub mod analysis_presets;
 pub mod schema;
 pub mod schema_objects;
 pub mod event_tools;
@@ -50,3 +53,5 @@ pub mod monitor;
 pub fn restart_application<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     app.restart();
 }
+
+pub mod offline_models;

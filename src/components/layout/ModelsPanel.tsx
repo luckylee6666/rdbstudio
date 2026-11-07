@@ -47,6 +47,7 @@ export function ModelsPanel() {
         {t("models.panel.title")}
       </div>
 
+      <div className="px-2 pb-2"><button className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-sm hover:bg-accent" onClick={() => openTab({ id: "offline-models", kind: "model", title: "Offline models" })}><Plus className="h-4 w-4" />{t("model.title")}</button></div>
       <div className="flex-1 overflow-auto px-2 pb-3">
         {erTabs.length > 0 && (
           <div className="mb-3">

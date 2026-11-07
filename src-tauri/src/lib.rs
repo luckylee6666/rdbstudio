@@ -7,6 +7,11 @@ mod secret;
 mod state;
 mod storage;
 mod store;
+mod named_presets;
+mod parameter_presets;
+mod analysis_presets;
+mod offline_models;
+mod model_reverse;
 #[cfg(feature = "web-bridge")]
 pub mod web_bridge;
 
@@ -24,6 +29,22 @@ pub use commands::dump::restore_sqlite_file;
 /// the bridge can drive it through Tauri's mock runtime.
 fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        commands::parameter_presets::list_parameter_presets,
+        commands::parameter_presets::get_parameter_preset,
+        commands::parameter_presets::save_parameter_preset,
+        commands::parameter_presets::rename_parameter_preset,
+        commands::parameter_presets::delete_parameter_preset,
+        commands::offline_models::list_offline_models,
+        commands::offline_models::get_offline_model,
+        commands::offline_models::save_offline_model,
+        commands::offline_models::rename_offline_model,
+        commands::offline_models::delete_offline_model,
+        commands::offline_models::preview_reverse_model,
+        commands::analysis_presets::list_analysis_presets,
+        commands::analysis_presets::get_analysis_preset,
+        commands::analysis_presets::save_analysis_preset,
+        commands::analysis_presets::rename_analysis_preset,
+        commands::analysis_presets::delete_analysis_preset,
         commands::native_copy::preview_native_copy,
         commands::native_copy::apply_native_copy,
         commands::native_copy::native_copy_progress,
@@ -89,8 +110,13 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         commands::mcp::revoke_mcp_authorizations,
         commands::query::execute_query,
         commands::query::execute_script,
+        commands::parameters::query_parameter_names,
+        commands::parameters::execute_parameter_query,
+        commands::parameters::execute_parameter_batch,
         commands::query::close_editor_session,
         commands::query::editor_session_status,
+        commands::query::attach_editor_plan,
+        commands::query::editor_session_identity,
         commands::query::redis_rename_member,
         commands::query::redis_create_key,
         commands::query::redis_rename_key,

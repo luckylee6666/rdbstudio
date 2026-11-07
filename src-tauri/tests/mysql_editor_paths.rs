@@ -229,8 +229,12 @@ async fn read_only_connections_are_enforced_by_the_server() {
         .await
         .expect("seed table");
 
+    // A SELECT calling a mutating function passes lexical classification. Only
+    // the native READ ONLY transaction can prevent this hidden table write.
+    sqlx::raw_sql("CREATE FUNCTION write_probe() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO t VALUES(1); RETURN 1; END")
+        .execute(&pool).await.expect("create side-effecting function");
     let db = DbPool::Mysql(pool.clone());
-    let refused = exec::execute_readonly(&db, "INSERT INTO t VALUES (1)").await;
+    let refused = exec::execute_readonly(&db, "SELECT write_probe()").await;
     let read_back = exec::execute_readonly(&db, "SELECT COUNT(*) AS n FROM t").await;
     let rows_after = count(&pool, "SELECT COUNT(*) FROM t").await;
 

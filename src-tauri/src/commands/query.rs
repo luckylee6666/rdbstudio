@@ -129,7 +129,14 @@ pub async fn execute_script(
     // False when the script drives its own BEGIN/COMMIT: it still runs on one
     // connection, but rdbstudio must not wrap (or roll back) it.
     atomic: bool,
+    source_script: Option<bool>,
 ) -> AppResult<ScriptOutcome> {
+    if source_script.unwrap_or(false) {
+        return crate::commands::parameters::execute_parameter_query(state, id,
+            crate::commands::parameters::ParameterRequest {
+                sqls, parameters: vec![], query_id, session_id, atomic, generation: None, source_script: true,
+            }).await;
+    }
     if sqls.is_empty() || sqls.len() > 128 { return Err(AppError::msg("scripts must contain 1 to 128 statements")); }
     let generation = session_id.as_ref().map(|_| state.sessions.lease(&id)).transpose()?;
     let pool = state
@@ -390,4 +397,18 @@ pub async fn close_editor_session(state: State<'_, AppState>, session_id: String
 #[tauri::command]
 pub async fn editor_session_status(state: State<'_, AppState>, session_id: String) -> AppResult<crate::db::sessions::SessionStatus> {
     Ok(state.sessions.status(&session_id).await)
+}
+
+#[tauri::command]
+pub fn attach_editor_plan(state: State<'_, AppState>, id: String, source_session_id: String, plan_session_id: String, source_identity: String) -> AppResult<()> {
+    let generation = state.sessions.lease(&id)?;
+    state.get_pool(&id).ok_or_else(|| AppError::msg("not connected"))?;
+    state.sessions.attach_plan(&id, &source_session_id, &plan_session_id, generation, &source_identity)
+}
+
+#[tauri::command]
+pub fn editor_session_identity(state: State<'_, AppState>, id: String, session_id: String) -> AppResult<String> {
+    let generation = state.sessions.lease(&id)?;
+    state.get_pool(&id).ok_or_else(|| AppError::msg("not connected"))?;
+    state.sessions.identity(&id, &session_id, generation)
 }

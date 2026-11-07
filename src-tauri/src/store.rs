@@ -51,6 +51,9 @@ pub struct ConnectionStore {
 }
 
 impl ConnectionStore {
+    pub(crate) fn data_dir(&self) -> &Path {
+        self.path.parent().expect("connection store has a parent")
+    }
     pub fn load(app_data: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(app_data)?;
         let path = app_data.join("connections.json");

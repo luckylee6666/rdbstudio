@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -9,6 +10,7 @@ import {
   ReactFlow,
   type Edge,
   type Node,
+  type NodeChange,
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -222,27 +224,19 @@ export function ERDiagram({
   }, [nodes, onPositionsChange]);
 
   const onNodesChange = useCallback(
-    (changes: any) => {
-      setLocalNodes((nds) => {
-        let mutated = false;
-        const next = nds.map((n) => {
-          const ch = changes.find((c: any) => c.id === n.id);
-          if (ch?.type === "position" && ch.position) {
-            mutated = true;
-            return { ...n, position: ch.position };
-          }
-          return n;
-        });
-        if (mutated) {
-          const saved = loadErPositions(layoutKey);
-          for (const n of next) {
-            saved[n.id] = n.position;
-          }
-          saveErPositions(layoutKey, saved);
-          onPositionsChange?.(saved);
+    (changes: NodeChange[]) => {
+      // Keep measured dimensions and selection as well as positions. Dropping
+      // measurements makes controlled nodes disappear after a later render.
+      setLocalNodes((nds) => applyNodeChanges(changes, nds));
+      const moved = changes.filter((change) => change.type === "position" && change.position);
+      if (moved.length) {
+        const saved = loadErPositions(layoutKey);
+        for (const change of moved) {
+          if (change.type === "position" && change.position) saved[change.id] = change.position;
         }
-        return next;
-      });
+        saveErPositions(layoutKey, saved);
+        onPositionsChange?.(saved);
+      }
     },
     [layoutKey, onPositionsChange]
   );
@@ -285,6 +279,7 @@ export function ERDiagram({
         onNodesChange={onNodesChange}
         colorMode={theme}
         nodesConnectable={false}
+        deleteKeyCode={null}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}

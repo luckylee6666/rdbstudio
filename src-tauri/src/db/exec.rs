@@ -3,7 +3,7 @@ use crate::db::redis_ops;
 use crate::error::{AppError, AppResult};
 use serde::Serialize;
 use serde_json::Value as Json;
-use sqlx::{Column, Row, TypeInfo};
+use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize)]
@@ -284,6 +284,12 @@ pub fn is_readonly(sql: &str) -> bool {
         "WITH" => !writes_via_dml_or_into(sql),
         _ => false,
     }
+}
+
+/// Result shape is independent of permission: EXPLAIN ANALYZE can write,
+/// but always returns a plan. Never use this helper as a read-only guard.
+pub(crate) fn returns_rows(sql: &str) -> bool {
+    first_keyword(sql) == "EXPLAIN" || is_readonly(sql) || has_returning(sql)
 }
 
 /// True when a DML statement carries a RETURNING clause (PG/SQLite). Those
@@ -629,7 +635,7 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
         return redis_ops::execute(h, sql).await;
     }
     let start = Instant::now();
-    if is_readonly(sql) || has_returning(sql) {
+    if returns_rows(sql) {
         match pool {
             DbPool::Sqlite(p) => sqlite_select(p, sql, start).await,
             DbPool::Postgres(p) => pg_select(p, sql, start).await,
@@ -652,6 +658,12 @@ pub async fn execute(pool: &DbPool, sql: &str) -> AppResult<QueryResult> {
             truncated: false,
         })
     }
+}
+
+pub(crate) async fn check_mysql_readonly(connection: &mut sqlx::MySqlConnection, sql: &str) -> AppResult<()> {
+    let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(connection).await?;
+    crate::db::sql_script::check_mysql_readonly(sql,
+        crate::db::parameters::Syntax::from_setting(crate::model::DriverKind::Mysql, &mode))
 }
 
 /// Execute one statement with the database's own read-only mode switched on,
@@ -713,6 +725,7 @@ pub async fn execute_readonly(pool: &DbPool, sql: &str) -> AppResult<QueryResult
         }
         DbPool::Mysql(pool) => {
             let mut conn = GuardedConnection::new(pool.acquire().await?);
+            check_mysql_readonly(&mut conn.inner, sql).await?;
             // Text protocol for the guard itself: MySQL rejects
             // `START TRANSACTION` over the prepared protocol with error 1295,
             // which would fail the query instead of protecting it.
@@ -836,6 +849,7 @@ pub async fn execute_mcp_readonly(
         }
         DbPool::Mysql(pool) => {
             let mut conn = GuardedConnection::new(pool.acquire().await?);
+            check_mysql_readonly(&mut conn.inner, sql).await?;
             // The guard has to travel over the text protocol: MySQL refuses
             // `START TRANSACTION` in the prepared protocol (error 1295), so
             // preparing it failed every MySQL query this bridge ever ran.
@@ -1024,7 +1038,7 @@ macro_rules! run_statements {
         let mut budget = crate::db::limits::ResultBudget::default();
         let mut failure: Option<(usize, String)> = None;
         for (i, sql) in $stmts.iter().enumerate() {
-            let one: AppResult<QueryResult> = if is_readonly(sql) || has_returning(sql) {
+            let one: AppResult<QueryResult> = if returns_rows(sql) {
                 let stmt_start = Instant::now();
                 match fetch_capped(script_fetch!($proto, &mut *$holder, sql)).await {
                     Ok((rows, truncated)) => {
@@ -1179,9 +1193,16 @@ pub fn decode_sqlite(rows: Vec<sqlx::sqlite::SqliteRow>, start: Instant) -> Quer
         .map(|r| {
             r.columns()
                 .iter()
-                .map(|c| ColumnMeta {
-                    name: c.name().to_string(),
-                    data_type: c.type_info().name().to_string(),
+                .enumerate()
+                .map(|(index, c)| {
+                    let declared = c.type_info().name();
+                    let data_type = if matches!(declared, "" | "NULL") {
+                        rows.iter().find_map(|row| {
+                            let value = row.try_get_raw(index).ok()?;
+                            (!value.is_null()).then(|| value.type_info().name().to_owned())
+                        }).unwrap_or_else(|| declared.to_owned())
+                    } else { declared.to_owned() };
+                    ColumnMeta { name: c.name().to_owned(), data_type }
                 })
                 .collect()
         })
@@ -1204,9 +1225,13 @@ pub fn decode_sqlite(rows: Vec<sqlx::sqlite::SqliteRow>, start: Instant) -> Quer
 }
 
 fn sqlite_val(r: &sqlx::sqlite::SqliteRow, i: usize) -> Json {
-    let col = &r.columns()[i];
-    let ty = col.type_info().name();
-    match ty {
+    let Ok(value) = r.try_get_raw(i) else { return Json::Null };
+    if value.is_null() { return Json::Null; }
+    // SQLite expressions and bound placeholders need the row's storage type;
+    // the prepared column metadata can remain NULL even for non-NULL values.
+    // Inspect each row so mixed SQLite storage classes also remain intact.
+    let info = value.type_info();
+    match info.name() {
         "INTEGER" | "INT" | "BIGINT" | "INT8" => try_i64(r, i)
             .or_else(|| try_bool(r, i))
             .unwrap_or(Json::Null),
@@ -1222,6 +1247,7 @@ fn sqlite_val(r: &sqlx::sqlite::SqliteRow, i: usize) -> Json {
             .or_else(|| try_f64(r, i))
             .or_else(|| try_str(r, i))
             .or_else(|| try_bool(r, i))
+            .or_else(|| try_bytes_b64(r, i))
             .unwrap_or(Json::Null),
         _ => try_str(r, i)
             .or_else(|| try_i64(r, i))
@@ -1710,8 +1736,9 @@ pub(crate) async fn execute_readonly_text_bind(pool: &DbPool, sql: &str, value: 
     if !is_single_statement(sql) || !is_readonly(sql) { return Err(AppError::msg("expected one read-only statement")); }
     let start = Instant::now();
     macro_rules! read {
-        ($pool:expr, $begin:expr, $end:expr, $decode:ident) => {{
+        ($pool:expr, $begin:expr, $end:expr, $decode:ident, $check:expr) => {{
             let mut conn = GuardedConnection::new($pool.acquire().await?);
+            ($check)(&mut *conn.inner, sql).await?;
             sqlx::Executor::execute(&mut *conn.inner, $begin).await?;
             let fetched = fetch_capped(sqlx::query(sql).bind(value).fetch(&mut *conn.inner)).await;
             let columns = if fetched.as_ref().is_ok_and(|(rows, _)| rows.is_empty()) { describe_columns(&mut *conn.inner, sql).await } else { vec![] };
@@ -1726,9 +1753,9 @@ pub(crate) async fn execute_readonly_text_bind(pool: &DbPool, sql: &str, value: 
         }};
     }
     match pool {
-        DbPool::Sqlite(p) => read!(p, "PRAGMA query_only = ON", "PRAGMA query_only = OFF", decode_sqlite),
-        DbPool::Postgres(p) => read!(p, "BEGIN READ ONLY", "ROLLBACK", decode_postgres),
-        DbPool::Mysql(p) => read!(p, "START TRANSACTION READ ONLY", "ROLLBACK", decode_mysql),
+        DbPool::Sqlite(p) => read!(p, "PRAGMA query_only = ON", "PRAGMA query_only = OFF", decode_sqlite, |_, _| std::future::ready(Ok::<_, AppError>(()))),
+        DbPool::Postgres(p) => read!(p, "BEGIN READ ONLY", "ROLLBACK", decode_postgres, |_, _| std::future::ready(Ok::<_, AppError>(()))),
+        DbPool::Mysql(p) => read!(p, "START TRANSACTION READ ONLY", "ROLLBACK", decode_mysql, check_mysql_readonly),
         DbPool::Redis(_) => Err(AppError::msg("relational search is not supported for Redis")),
     }
 }
@@ -2001,6 +2028,9 @@ mod tests {
 
     #[test]
     fn is_readonly_rejects_explain_analyze_writes() {
+        assert!(returns_rows("/* plan */ EXPLAIN (ANALYZE, FORMAT JSON) INSERT INTO t VALUES (1)"));
+        assert!(returns_rows("EXPLAIN ANALYZE DELETE FROM t"));
+        assert!(!returns_rows("INSERT INTO t VALUES (1)"));
         assert!(!is_readonly("EXPLAIN ANALYZE INSERT INTO t VALUES (1)"));
         assert!(!is_readonly(
             "EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t WHERE id = 1"

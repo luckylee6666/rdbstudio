@@ -1,8 +1,21 @@
+import { offlineModelEn, offlineModelZh } from "./offlineModel";
+import { queryBuilderEn, queryBuilderZh } from "./queryBuilder";
+import { queryParametersEn, queryParametersZh } from "./queryParameters";
+
+import { resultAnalysisEn, resultAnalysisZh } from "./resultAnalysis";
+
 export type Lang = "en" | "zh";
 
 type Dict = Record<string, string>;
 
 const en: Dict = {
+  ...offlineModelEn,
+  ...queryBuilderEn,
+  ...queryParametersEn,
+  ...resultAnalysisEn,
+  "workspace.loading": "Opening view…",
+  "workspace.load_failed": "Unable to open this view. Retry or close this tab. If this continues, reopen the application.",
+  "workspace.retry": "Retry opening view",
   // common
   "common.save": "Save",
   "common.saving": "Saving…",
@@ -26,6 +39,8 @@ const en: Dict = {
   "common.ok": "OK",
   "common.failed": "Failed",
   "common.revert": "Revert",
+  "common.prev": "Previous page",
+  "common.next": "Next page",
   "common.preview": "Preview",
   "common.new": "New",
   "common.search": "Search",
@@ -508,7 +523,7 @@ const en: Dict = {
   "create.table.err.duplicate_column": "Duplicate column: {{name}}",
 
   // welcome
-  "welcome.badge": "rdbstudio 0.1 · preview",
+  "welcome.badge": "rdbstudio {{version}}",
   "welcome.headline": "A modern database workspace.",
   "welcome.subhead":
     "Manage connections, write queries, explore data, and design schemas — all in one calm, keyboard-first interface.",
@@ -691,6 +706,9 @@ const en: Dict = {
     "Statement {{n}} of {{m}} failed. MySQL commits DDL implicitly, so schema changes made earlier in this script are already applied — check the objects it touched before re-running:",
   "query.err.statement_self_managed":
     "Statement {{n}} of {{m}} failed. This script manages its own transaction, so whether the earlier statements stand is up to your own BEGIN / COMMIT / ROLLBACK:",
+  "query.err.source_rolled_back": "Statement {{n}} failed — the whole script was rolled back:",
+  "query.err.source_partial_rollback": "Statement {{n}} failed. Some changes may already be committed; check affected data and objects before re-running:",
+  "query.err.source_self_managed": "Statement {{n}} failed. The session or script manages its own transaction; inspect its state before committing or rolling back:",
   "query.err.export": "Export failed: {{error}}",
 
   // visual explain plan
@@ -712,6 +730,11 @@ const en: Dict = {
     "Connection not found — it may have been removed.",
   "explain.analyze.title": "Explain Analyze",
   "explain.analyze.badge": "ANALYZE",
+  "explain.source": "Query session: {{name}}",
+  "explain.readonly_session": "Read-only connection · isolated protected execution",
+  "explain.source_closed": "The source query session is unavailable or was restored after restart. Open a new plan from the query tab.",
+  "explain.analyze.run_again": "Run Analyze",
+  "explain.analyze.ready": "Analyze executes SQL. Restoring this tab does not run it again. Choose Run Analyze to execute explicitly.",
   "explain.analyze.warning_title": "Run this statement for real?",
   "explain.analyze.warning":
     "EXPLAIN ANALYZE executes the statement instead of only planning it. This statement does not look like a read-only query (SELECT / WITH / VALUES / TABLE), so it may modify data. Run it anyway?",
@@ -876,9 +899,9 @@ const en: Dict = {
   "tabs.sub.view": "View",
   "tabs.sub.design": "Design",
   "tabs.sub.diagram": "Diagram",
-  "tabs.close_tx.title": "Close uncommitted transaction",
-  "tabs.close_tx.message": "These query tabs contain open transactions. Closing rolls back uncommitted work and clears session state.",
-  "tabs.close_tx.confirm": "Roll back & close",
+  "tabs.close_tx.title": "Close active sessions",
+  "tabs.close_tx.message": "These tabs have open transactions or running plans. Closing cancels their work and may roll back uncommitted changes in the source query session.",
+  "tabs.close_tx.confirm": "Cancel work & close",
   "tool.sync.title": "Structure / data sync",
   "tool.search.title": "Database-wide search",
   "tool.objects.title": "Objects / users & privileges",
@@ -1112,6 +1135,13 @@ const en: Dict = {
 };
 
 const zh: Dict = {
+  "workspace.loading": "正在打开页面…",
+  "workspace.load_failed": "无法打开此页面，请重试或关闭该标签。若仍然失败，请重新打开应用。",
+  "workspace.retry": "重试打开页面",
+  ...offlineModelZh,
+  ...queryBuilderZh,
+  ...queryParametersZh,
+  ...resultAnalysisZh,
   // common
   "common.save": "保存",
   "common.saving": "保存中…",
@@ -1135,6 +1165,8 @@ const zh: Dict = {
   "common.ok": "确定",
   "common.failed": "失败",
   "common.revert": "撤销",
+  "common.prev": "上一页",
+  "common.next": "下一页",
   "common.preview": "预览",
   "common.new": "新建",
   "common.search": "搜索",
@@ -1611,7 +1643,7 @@ const zh: Dict = {
   "create.table.err.duplicate_column": "列名重复：{{name}}",
 
   // welcome
-  "welcome.badge": "rdbstudio 0.1 · 预览",
+  "welcome.badge": "rdbstudio {{version}}",
   "welcome.headline": "现代化的数据库工作台。",
   "welcome.subhead":
     "在一个安静、键盘优先的界面里管理连接、书写查询、浏览数据、设计结构。",
@@ -1789,6 +1821,9 @@ const zh: Dict = {
     "第 {{n}}/{{m}} 条语句失败。MySQL 的 DDL 会隐式提交，脚本中之前的结构变更已经生效——重跑前请先核对相关对象：",
   "query.err.statement_self_managed":
     "第 {{n}}/{{m}} 条语句失败。脚本自行管理事务，之前的语句是否生效取决于你写的 BEGIN / COMMIT / ROLLBACK：",
+  "query.err.source_rolled_back": "第 {{n}} 条语句失败——已整体回滚：",
+  "query.err.source_partial_rollback": "第 {{n}} 条语句失败。部分数据或结构变更已经生效，重跑前请先核对相关数据和对象：",
+  "query.err.source_self_managed": "第 {{n}} 条语句失败。会话或脚本自行管理事务，请先检查状态，再决定提交或回滚：",
   "query.err.export": "导出失败：{{error}}",
 
   // visual explain plan
@@ -1806,6 +1841,11 @@ const zh: Dict = {
   "explain.err.no_connection": "找不到该连接——可能已被删除。",
   "explain.analyze.title": "执行计划（Analyze）",
   "explain.analyze.badge": "ANALYZE",
+  "explain.source": "查询会话：{{name}}",
+  "explain.readonly_session": "只读连接 · 独立受保护执行",
+  "explain.source_closed": "来源查询会话已失效或已重启恢复，请从查询标签页重新生成计划。",
+  "explain.analyze.run_again": "执行 Analyze",
+  "explain.analyze.ready": "Analyze 会真实执行 SQL，恢复此标签页不会自动重跑。点击“执行 Analyze”后再执行。",
   "explain.analyze.warning_title": "将真实执行该语句？",
   "explain.analyze.warning":
     "EXPLAIN ANALYZE 会真实执行该语句，而不仅是生成执行计划。这条语句不像是只读查询（SELECT / WITH / VALUES / TABLE），可能会修改数据。仍要执行吗？",
@@ -1965,9 +2005,9 @@ const zh: Dict = {
   "tabs.sub.view": "视图",
   "tabs.sub.design": "设计",
   "tabs.sub.diagram": "关系图",
-  "tabs.close_tx.title": "关闭未提交事务",
-  "tabs.close_tx.message": "这些查询标签页包含未提交的事务。关闭会回滚这些改动并清除会话状态。",
-  "tabs.close_tx.confirm": "回滚并关闭",
+  "tabs.close_tx.title": "关闭活动会话",
+  "tabs.close_tx.message": "这些标签页包含未提交事务或正在运行的执行计划。关闭会取消执行，并可能回滚来源查询会话中未提交的改动。",
+  "tabs.close_tx.confirm": "取消执行并关闭",
   "tool.sync.title": "结构比较 / 数据同步",
   "tool.search.title": "全库数据搜索",
   "tool.objects.title": "对象 / 用户权限",

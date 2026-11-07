@@ -1,4 +1,9 @@
+import type { ModelReversePreview, ModelSourceTable } from "./modelReverse";
+import type { ModelRecord, ModelSummary, SaveModel } from "./offlineModel";
+import type { AnalysisPreset, AnalysisPresetSummary, SaveAnalysisPreset } from "./analysisPresets";
 import { invoke } from "@tauri-apps/api/core";
+import type { QueryParameter } from "./queryParameters";
+import type { ParameterPreset, ParameterPresetSummary, SaveParameterPreset } from "./parameterPresets";
 import type {
   AlterPlan,
   ColumnInfo,
@@ -39,6 +44,9 @@ export interface QueryResult {
   /** SELECT produced more rows than the backend cap; the tail was dropped. */
   truncated: boolean;
 }
+
+export interface ParameterSetSummary { index: number; first_result: number; result_count: number; statements: number; affected: number }
+export type ParameterBatchOutcome = ScriptOutcome & { sets: ParameterSetSummary[]; failed_set: number | null };
 
 /** Result of an atomic multi-statement run — mirrors Rust's ScriptOutcome. */
 export type ScriptOutcome =
@@ -85,6 +93,13 @@ export interface HistoryEntry {
 }
 
 export const api = {
+  previewReverseModel: (id: string, tables: ModelSourceTable[]) => invoke<ModelReversePreview>("preview_reverse_model", { id, tables }),
+  listOfflineModels: () => invoke<ModelSummary[]>("list_offline_models"),
+  getOfflineModel: (id: string) => invoke<ModelRecord>("get_offline_model", { id }),
+  saveOfflineModel: (request: SaveModel) => invoke<ModelRecord>("save_offline_model", { request }),
+  renameOfflineModel: (id: string, revision: string, name: string) => invoke<ModelRecord>("rename_offline_model", { id, revision, name }),
+  deleteOfflineModel: (id: string, revision: string) => invoke<void>("delete_offline_model", { id, revision }),
+
   appVersion: () => invoke<string>("app_version"),
 
   listConnections: () => invoke<ConnectionConfig[]>("list_connections"),
@@ -138,6 +153,12 @@ export const api = {
       ...(sessionId ? { sessionId } : {}),
       ...(opts?.recordHistory === false ? { recordHistory: false } : {}),
     }),
+  queryParameterNames: (id: string, sqls: string[], sessionId: string, queryId: string, sourceScript = false, futureSets = false) =>
+    invoke<{ names: string[]; generation: number }>("query_parameter_names", { id, sqls, sessionId, queryId, ...(sourceScript ? { sourceScript: true } : {}), ...(futureSets ? { futureSets: true } : {}) }),
+  executeParameterBatch: (id: string, request: { source: string; sets: QueryParameter[][]; sessionId: string; queryId: string; atomic: boolean; generation?: number }) =>
+    invoke<ParameterBatchOutcome>("execute_parameter_batch", { id, request }),
+  executeParameterQuery: (id: string, request: { sqls: string[]; parameters: QueryParameter[]; sessionId: string; queryId: string; atomic: boolean; generation?: number; sourceScript?: boolean }) =>
+    invoke<ScriptOutcome>("execute_parameter_query", { id, request }),
   /**
    * Runs every statement on one connection. `atomic` wraps them in a
    * transaction; pass false when the script has its own BEGIN/COMMIT.
@@ -147,16 +168,20 @@ export const api = {
     sqls: string[],
     queryId?: string,
     atomic = true,
-    sessionId?: string
+    sessionId?: string,
+    sourceScript = false
   ) =>
     invoke<ScriptOutcome>("execute_script", {
       id,
       sqls,
       queryId: queryId ?? null,
       atomic,
+      ...(sourceScript ? { sourceScript: true } : {}),
       ...(sessionId ? { sessionId } : {}),
     }),
   closeEditorSession: (sessionId: string) => invoke<void>("close_editor_session", { sessionId }),
+  attachEditorPlan: (id: string, sourceSessionId: string, planSessionId: string, sourceIdentity: string) => invoke<void>("attach_editor_plan", { id, sourceSessionId, planSessionId, sourceIdentity }),
+  editorSessionIdentity: (id: string, sessionId: string) => invoke<string>("editor_session_identity", { id, sessionId }),
   editorSessionStatus: (sessionId: string) => invoke<{ connected: boolean; in_transaction: boolean; needs_reset?: boolean }>("editor_session_status", { sessionId }),
   redisRenameMember: (
     id: string,
@@ -324,6 +349,16 @@ export const api = {
     invoke<void>("write_text_file", { path, contents }),
 
   listSnippets: () => invoke<Snippet[]>("list_snippets"),
+  listAnalysisPresets: () => invoke<AnalysisPresetSummary[]>("list_analysis_presets"),
+  getAnalysisPreset: (id: string) => invoke<AnalysisPreset>("get_analysis_preset", { id }),
+  saveAnalysisPreset: (request: SaveAnalysisPreset) => invoke<AnalysisPreset>("save_analysis_preset", { request }),
+  renameAnalysisPreset: (id: string, revision: string, name: string) => invoke<AnalysisPreset>("rename_analysis_preset", { id, revision, name }),
+  deleteAnalysisPreset: (id: string, revision: string) => invoke<void>("delete_analysis_preset", { id, revision }),
+  listParameterPresets: () => invoke<ParameterPresetSummary[]>("list_parameter_presets"),
+  getParameterPreset: (id: string) => invoke<ParameterPreset>("get_parameter_preset", { id }),
+  saveParameterPreset: (request: SaveParameterPreset) => invoke<ParameterPreset>("save_parameter_preset", { request }),
+  renameParameterPreset: (id: string, revision: string, name: string) => invoke<ParameterPreset>("rename_parameter_preset", { id, revision, name }),
+  deleteParameterPreset: (id: string, revision: string) => invoke<void>("delete_parameter_preset", { id, revision }),
   saveSnippet: (snippet: Snippet) =>
     invoke<Snippet>("save_snippet", { snippet }),
   deleteSnippet: (id: string) =>

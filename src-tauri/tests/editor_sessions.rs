@@ -297,3 +297,173 @@ async fn releasing_the_outer_sqlite_savepoint_restores_atomic_script_execution()
     );
     sessions.close_connection("connection").await;
 }
+
+#[tokio::test]
+async fn plan_shares_temp_objects_and_transaction_but_idle_close_preserves_source() {
+    let pool = common::mem_pool().await;
+    let sessions = EditorSessions::default();
+    let generation = sessions.mark_connected("connection");
+    run(&sessions, &pool, "source", "CREATE TEMP TABLE private(value INTEGER)").await;
+    run(&sessions, &pool, "source", "BEGIN").await;
+    run(&sessions, &pool, "source", "INSERT INTO private VALUES (42)").await;
+    let identity = sessions.identity("connection", "source", generation).unwrap();
+    sessions.attach_plan("connection", "source", "explain:plan", generation, &identity).unwrap();
+    assert_eq!(run(&sessions, &pool, "explain:plan", "SELECT value FROM private").await, 42);
+    assert!(sessions.status("explain:plan").await.in_transaction);
+    let plan = sessions.execute("connection", "explain:plan", generation, &pool, &["EXPLAIN QUERY PLAN SELECT * FROM private".into()], false).await.unwrap();
+    assert!(matches!(plan, ScriptOutcome::Ok { .. }));
+    sessions.close("explain:plan").await;
+    assert!(sessions.status("source").await.connected);
+    assert!(sessions.status("source").await.in_transaction);
+    assert_eq!(run(&sessions, &pool, "source", "SELECT min(value) FROM private").await, 42);
+    run(&sessions, &pool, "source", "ROLLBACK").await;
+    assert_eq!(run(&sessions, &pool, "source", "SELECT count(*) FROM private").await, 0);
+    // A closed alias must not be silently recreated as an unrelated session.
+    assert!(sessions.execute("connection", "explain:plan", generation, &pool, &["SELECT 1".into()], false).await.is_err());
+    sessions.close_connection("connection").await;
+}
+
+#[tokio::test]
+async fn plan_identity_rejects_closed_reset_and_reconnected_sources() {
+    let pool = common::mem_pool().await;
+    let sessions = EditorSessions::default();
+    let generation = sessions.mark_connected("connection");
+    let identity = sessions.identity("connection", "source", generation).unwrap();
+    sessions.attach_plan("connection", "source", "explain:old", generation, &identity).unwrap();
+    sessions.close("source").await;
+    // Closing before the first attachment must not create a ghost source.
+    assert!(sessions.attach_plan("connection", "source", "explain:late", generation, &identity).is_err());
+    let replacement = sessions.identity("connection", "source", generation).unwrap();
+    assert_ne!(identity, replacement);
+    assert!(sessions.attach_plan("connection", "source", "explain:late", generation, &identity).is_err());
+    assert!(sessions.attach_plan("connection", "source", "explain:old", generation, &replacement).is_err());
+    assert!(sessions.execute("connection", "explain:old", generation, &pool, &["SELECT 1".into()], false).await.is_err());
+    sessions.attach_plan("connection", "source", "explain:new", generation, &replacement).unwrap();
+    assert_eq!(run(&sessions, &pool, "explain:new", "SELECT 42").await, 42);
+    sessions.close_connection("connection").await;
+    let next_generation = sessions.mark_connected("connection");
+    assert_ne!(next_generation, generation);
+    assert!(sessions.attach_plan("connection", "source", "explain:new", generation, &replacement).is_err());
+    assert!(sessions.execute("connection", "explain:new", next_generation, &pool, &["SELECT 1".into()], false).await.is_err());
+    sessions.close_connection("connection").await;
+}
+
+#[tokio::test]
+async fn plan_attachment_rejects_wrong_source_connection_collisions_and_limits() {
+    let sessions = EditorSessions::default();
+    let generation = sessions.mark_connected("connection");
+    let identity = sessions.identity("connection", "source", generation).unwrap();
+    sessions.identity("connection", "other", generation).unwrap();
+    assert!(sessions.attach_plan("connection", "source", "other", generation, &identity).is_err());
+    assert!(sessions.attach_plan("connection", "source", "source", generation, &identity).is_err());
+    assert!(sessions.attach_plan("different", "source", "explain:wrong", generation, &identity).is_err());
+    for n in 0..128 {
+        sessions.attach_plan("connection", "source", &format!("explain:{n}"), generation, &identity).unwrap();
+    }
+    // Revalidating an existing plan does not consume another slot.
+    sessions.attach_plan("connection", "source", "explain:0", generation, &identity).unwrap();
+    assert!(sessions.attach_plan("connection", "source", "explain:extra", generation, &identity).is_err());
+    sessions.close("explain:0").await;
+    sessions.attach_plan("connection", "source", "explain:extra", generation, &identity).unwrap();
+    sessions.close_connection("connection").await;
+}
+
+#[tokio::test]
+async fn cancelling_an_active_shared_plan_marks_source_for_reset() {
+    use std::sync::Arc;
+    let pool = Arc::new(common::mem_pool().await);
+    let sessions = Arc::new(EditorSessions::default());
+    let generation = sessions.mark_connected("connection");
+    run(&sessions, &pool, "source", "CREATE TABLE saved(value INTEGER)").await;
+    run(&sessions, &pool, "source", "BEGIN").await;
+    run(&sessions, &pool, "source", "INSERT INTO saved VALUES(42)").await;
+    let identity = sessions.identity("connection", "source", generation).unwrap();
+    sessions.attach_plan("connection", "source", "explain:slow", generation, &identity).unwrap();
+    let worker = {
+        let sessions = Arc::clone(&sessions);
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            sessions.execute("connection", "explain:slow", generation, &pool,
+                &["WITH RECURSIVE counter(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM counter WHERE x<1000000000) SELECT sum(x) FROM counter".into()], false).await
+        })
+    };
+    // A blocked status confirms that the worker owns the shared connection.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), sessions.status("source")).await.is_err());
+    sessions.close("explain:slow").await;
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap();
+    assert!(outcome.is_err() || matches!(outcome, Ok(ScriptOutcome::Failed { .. })));
+    let status = sessions.status("source").await;
+    assert!(!status.connected);
+    assert!(status.needs_reset);
+    sessions.close("source").await;
+    assert_eq!(run(&sessions, &pool, "source", "SELECT count(*) FROM saved").await, 0);
+    sessions.close_connection("connection").await;
+}
+
+#[tokio::test]
+async fn postgres_analyze_writes_stay_in_source_transaction_and_rollback() {
+    let Ok(url) = std::env::var("RDBSTUDIO_TEST_PG_URL") else { return; };
+    let pool = rdbstudio_lib::db::pool::DbPool::Postgres(sqlx::PgPool::connect(&url).await.unwrap());
+    let sessions = EditorSessions::default();
+    let generation = sessions.mark_connected("connection");
+    run(&sessions, &pool, "source", "CREATE TEMP TABLE private(value INTEGER)").await;
+    run(&sessions, &pool, "source", "BEGIN").await;
+    let identity = sessions.identity("connection", "source", generation).unwrap();
+    sessions.attach_plan("connection", "source", "explain-analyze:write", generation, &identity).unwrap();
+    let outcome = sessions.execute_parameterized("connection", "explain-analyze:write", generation, &pool,
+        &["EXPLAIN (ANALYZE, FORMAT JSON) INSERT INTO private VALUES (:value)".into()],
+        rdbstudio_lib::db::sessions::ParameterExecution {
+            parameters: &[rdbstudio_lib::db::parameters::QueryParameter {
+                name: "value".into(), kind: rdbstudio_lib::db::parameters::ParameterKind::Integer, value: Some("42".into()),
+            }], atomic: false,
+        }).await.unwrap();
+    match outcome {
+        ScriptOutcome::Ok { result, .. } => assert!(result.rows[0][0].to_string().contains("Actual Loops")),
+        ScriptOutcome::Failed { error, .. } => panic!("{error}"),
+    }
+    let plain_plan = run(&sessions, &pool, "explain-analyze:write", "EXPLAIN (ANALYZE, FORMAT JSON) INSERT INTO private VALUES(43)").await;
+    assert!(plain_plan.to_string().contains("Actual Loops"));
+    assert_eq!(run(&sessions, &pool, "source", "SELECT count(*)::int FROM private").await, 2);
+    sessions.close("explain-analyze:write").await;
+    assert!(sessions.status("source").await.in_transaction);
+    assert_eq!(run(&sessions, &pool, "source", "SELECT min(value) FROM private").await, 42);
+    run(&sessions, &pool, "source", "ROLLBACK").await;
+    assert_eq!(run(&sessions, &pool, "source", "SELECT count(*)::int FROM private").await, 0);
+    sessions.close_connection("connection").await;
+}
+
+#[tokio::test]
+async fn closing_a_queued_plan_does_not_wait_for_or_cancel_the_source_query() {
+    use std::sync::Arc;
+    let pool = Arc::new(common::mem_pool().await);
+    let sessions = Arc::new(EditorSessions::default());
+    let generation = sessions.mark_connected("connection");
+    run(&sessions, &pool, "source", "SELECT 1").await;
+    let identity = sessions.identity("connection", "source", generation).unwrap();
+    sessions.attach_plan("connection", "source", "explain:queued", generation, &identity).unwrap();
+    let source = {
+        let sessions = Arc::clone(&sessions);
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            sessions.execute("connection", "source", generation, &pool,
+                &["WITH RECURSIVE counter(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM counter WHERE x<1000000000) SELECT sum(x) FROM counter".into()], false).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), sessions.status("source")).await.is_err());
+    let plan = {
+        let sessions = Arc::clone(&sessions);
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            sessions.execute("connection", "explain:queued", generation, &pool, &["SELECT 1".into()], false).await
+        })
+    };
+    tokio::task::yield_now().await;
+    sessions.close("explain:queued").await;
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(1), plan).await.unwrap().unwrap().is_err());
+    assert!(!source.is_finished());
+    source.abort();
+    let _ = source.await;
+    sessions.close_connection("connection").await;
+}

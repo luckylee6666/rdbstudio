@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   FileDown,
@@ -30,10 +30,12 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
   const [positions, setPositions] = useState<ErPositions>({});
   const [resetVersion, setResetVersion] = useState(0);
   const t = useT();
+  const loadGeneration = useRef(0);
 
   const ER_LIMIT = 80;
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     setLoading(true);
     setError(null);
     try {
@@ -41,19 +43,20 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
         api.listTables(connectionId, schema),
         api.describeSchema(connectionId, schema, ER_LIMIT),
       ]);
+      if (generation !== loadGeneration.current) return;
       setTotalTables(entries.filter((e) => e.kind === "table").length);
       setTables(described);
     } catch (e) {
-      setError(String(e));
+      if (generation === loadGeneration.current) setError(String(e));
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
-  };
+  }, [connectionId, schema]);
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionId, schema]);
+    return () => { loadGeneration.current += 1; };
+  }, [load]);
 
   const fkCount = tables.reduce((n, t) => n + t.foreign_keys.length, 0);
 
@@ -80,8 +83,8 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-border/70 bg-surface/30 px-3 text-[11.5px] text-muted-foreground">
-        <span className="text-foreground/90">
+      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/70 bg-surface/30 px-3 py-1.5 text-[11.5px] text-muted-foreground">
+        <span className="min-w-0 basis-full truncate text-foreground/90" title={schema ? `${tab.title} · ${schema}` : tab.title}>
           {tab.title}
           {schema ? ` · ${schema}` : ""}
         </span>
@@ -105,7 +108,7 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
         <button
           onClick={resetLayout}
           disabled={tables.length === 0}
-          className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
+          className="flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
         >
           <RotateCcw className="h-3 w-3" />
           {t("er.reset_layout")}
@@ -113,14 +116,15 @@ export function ERView({ tab }: { tab: WorkspaceTab }) {
         <button
           onClick={() => void exportSvg()}
           disabled={tables.length === 0}
-          className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
+          className="flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
         >
           <FileDown className="h-3 w-3" />
           {t("er.export_svg")}
         </button>
         <button
           onClick={() => void load()}
-          className="flex h-6 items-center gap-1 rounded px-1.5 hover:bg-accent hover:text-foreground"
+          disabled={loading}
+          className="flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 hover:bg-accent hover:text-foreground disabled:opacity-40"
         >
           <RefreshCw className="h-3 w-3" />
           {t("common.refresh")}

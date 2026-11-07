@@ -16,6 +16,20 @@ function cleanupTabStorage(ids: string[]) {
   }
 }
 
+function persistedTab(tab: WorkspaceTab): WorkspaceTab {
+  const saved = { ...tab };
+  delete saved.transactionOpen;
+  delete saved.explainRequested;
+  delete saved.explainSnapshot;
+  delete saved.sourceSessionIdentity;
+  delete saved.explainRunning;
+  return saved;
+}
+
+function needsCloseConfirmation(tab: WorkspaceTab): boolean {
+  return !!(tab.transactionOpen || tab.explainRunning);
+}
+
 interface WorkspaceState {
   tabs: WorkspaceTab[];
   activeTabId: string | null;
@@ -70,7 +84,7 @@ export const useWorkspace = create<WorkspaceState>()(
         set({ tabs: [...get().tabs, tab], activeTabId: tab.id });
       },
       closeTab: (id, force = false) => {
-        if (!force && get().tabs.some((tab) => tab.id === id && tab.transactionOpen)) { set({pendingClose: () => get().closeTab(id, true)}); return; }
+        if (!force && get().tabs.some((tab) => tab.id === id && needsCloseConfirmation(tab))) { set({pendingClose: () => get().closeTab(id, true)}); return; }
         cleanupTabStorage([id]);
         const tabs = get().tabs.filter((t) => t.id !== id);
         const activeTabId =
@@ -80,7 +94,7 @@ export const useWorkspace = create<WorkspaceState>()(
         set({ tabs, activeTabId });
       },
       closeOthers: (id, force = false) => {
-        if (!force && get().tabs.some((tab) => tab.id !== id && tab.transactionOpen)) { set({pendingClose: () => get().closeOthers(id, true)}); return; }
+        if (!force && get().tabs.some((tab) => tab.id !== id && needsCloseConfirmation(tab))) { set({pendingClose: () => get().closeOthers(id, true)}); return; }
         const kept = get().tabs.filter((t) => t.id === id);
         if (kept.length === 0) return;
         cleanupTabStorage(
@@ -94,7 +108,7 @@ export const useWorkspace = create<WorkspaceState>()(
         const tabs = get().tabs;
         const idx = tabs.findIndex((t) => t.id === id);
         if (idx < 0) return;
-        if (!force && tabs.slice(idx + 1).some((tab) => tab.transactionOpen)) { set({pendingClose: () => get().closeToRight(id, true)}); return; }
+        if (!force && tabs.slice(idx + 1).some((tab) => needsCloseConfirmation(tab))) { set({pendingClose: () => get().closeToRight(id, true)}); return; }
         cleanupTabStorage(tabs.slice(idx + 1).map((t) => t.id));
         const kept = tabs.slice(0, idx + 1);
         const active = get().activeTabId;
@@ -104,7 +118,7 @@ export const useWorkspace = create<WorkspaceState>()(
         });
       },
       closeAll: (force = false) => {
-        if (!force && get().tabs.some((tab) => tab.transactionOpen)) { set({pendingClose: () => get().closeAll(true)}); return; }
+        if (!force && get().tabs.some((tab) => needsCloseConfirmation(tab))) { set({pendingClose: () => get().closeAll(true)}); return; }
         cleanupTabStorage(get().tabs.map((t) => t.id));
         set({ tabs: [], activeTabId: null });
       },
@@ -114,12 +128,12 @@ export const useWorkspace = create<WorkspaceState>()(
       // Restores the open workspace across restarts. Editor buffers are
       // restored separately by QueryEditorView from rdb:buf:<tabId>.
       name: "rdb:workspace",
-      partialize: (s) => ({ tabs: s.tabs.map((tab) => { const saved = {...tab}; delete saved.transactionOpen; return saved; }), activeTabId: s.activeTabId }),
+      partialize: (s) => ({ tabs: s.tabs.map(persistedTab), activeTabId: s.activeTabId }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<
           Pick<WorkspaceState, "tabs" | "activeTabId">
         >;
-        const tabs = p.tabs && p.tabs.length > 0 ? p.tabs : current.tabs;
+        const tabs = p.tabs && p.tabs.length > 0 ? p.tabs.map(persistedTab) : current.tabs;
         const activeTabId =
           p.activeTabId && tabs.some((t) => t.id === p.activeTabId)
             ? p.activeTabId

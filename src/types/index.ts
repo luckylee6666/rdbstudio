@@ -1,3 +1,6 @@
+import type { BuilderDraft } from "@/lib/queryBuilder";
+import type { ParameterDefault } from "@/lib/queryParameters";
+
 export type DriverKind = "sqlite" | "postgres" | "mysql" | "redis";
 
 export interface ConnectionConfig {
@@ -335,6 +338,8 @@ export interface CsvPreview {
 
 export type TabKind =
   | "query"
+  | "query-builder"
+  | "model"
   | "table-data"
   | "designer"
   | "welcome"
@@ -360,8 +365,21 @@ export interface WorkspaceTab {
   transactionOpen?: boolean;
   /** Pre-applied filters for table-data tabs (e.g. FK jumps). */
   initialFilters?: Filter[];
-  /** Explain tabs: the SQL whose plan is visualized (persisted with the tab). */
+  /** Explain SQL or the initial buffer for a new query tab. */
   sql?: string;
+  /** Visual query drafts survive tab switches and application restarts. */
+  builder?: BuilderDraft;
+  modelId?: string;
+  queryParameterDefaults?: ParameterDefault[];
+  /** Plan's source query; the backend binds a shared connection reference. */
+  sourceQueryId?: string;
+  /** Runtime source identity; old plans cannot bind a replacement session. */
+  sourceSessionIdentity?: string;
+  explainRunning?: boolean;
+  /** Runtime only: one explicitly requested initial plan execution. */
+  explainRequested?: boolean;
+  /** Runtime only: plans can echo bound values and must never be persisted. */
+  explainSnapshot?: { sourceSessionIdentity?: string; connectionId: string; sql: string; analyze: boolean; roots: import("@/lib/explain").PlanNode[] };
   // Set when kind === "redis-key": the raw key name and its Redis value type
   // (string/hash/list/set/zset/stream/ReJSON-RL/...).
   redisKey?: string;

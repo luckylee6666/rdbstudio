@@ -13,6 +13,7 @@ import {
   Sparkles,
   Table2,
   Terminal,
+  Workflow,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { anyModalOpen } from "@/components/ui/Modal";
@@ -52,7 +53,13 @@ export function CommandPalette() {
   }, [paletteOpen]);
 
   const items: Item[] = useMemo(() => {
-    const out: Item[] = [];
+    const out: Item[] = [{
+      id: "query-builder",
+      group: "Queries",
+      icon: Workflow,
+      label: t("builder.title"),
+      run: () => openTab({ id: `builder:${crypto.randomUUID()}`, kind: "query-builder", title: "Query builder" }),
+    }];
 
     for (const c of list) {
       const s = status[c.id] ?? "disconnected";

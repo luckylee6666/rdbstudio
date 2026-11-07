@@ -20,6 +20,7 @@ import type {
   TableQuery,
   WorkspaceTab,
 } from "@/types";
+import { ResultAnalysisButton } from "@/components/analysis/ResultAnalysisButton";
 import { api } from "@/lib/api";
 import {
   TableDataGrid,
@@ -80,6 +81,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
   const [columns, setColumns] = useState<ColumnInfo[]>([]);
   const [rows, setRows] = useState<unknown[][]>([]);
   const [rowCount, setRowCount] = useState<number | null>(null);
+  const [countRevision, setCountRevision] = useState(0);
   const [page, setPage] = useState(0);
   const [order, setOrder] = useState<OrderBy | undefined>();
   const [filters, setFilters] = useState<Filter[]>(tab.initialFilters ?? []);
@@ -209,7 +211,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
           forceCols ||
           columns.length === 0 ||
           loadedColumnsForRef.current !== viewIdentity;
-        const [pkInfo, result, total] = await Promise.all([
+        const [pkInfo, result] = await Promise.all([
           needCols
             ? api
                 .listColumns(connectionId, table, schema)
@@ -225,12 +227,6 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
                 })
             : Promise.resolve([] as ColumnInfo[]),
           api.fetchTableData(connectionId, makeQuery(nextPage * pageSize)),
-          api.countTableRows(connectionId, makeQuery(0)).catch((e) => {
-            // Row count is informational; surface the failure as a toast but
-            // don't block the data fetch.
-            toast.error(t("table.err.count"), String(e));
-            return null;
-          }),
         ]);
         if (loadGen.current !== gen) return;
         // The grid MUST use the columns that came back with SELECT * so the
@@ -256,7 +252,6 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
         }
         setRows(result.rows);
         setElapsed(result.elapsed_ms);
-        setRowCount(total);
         setPage(nextPage);
       } catch (e) {
         if (loadGen.current !== gen) return;
@@ -269,13 +264,35 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
   );
 
   const hardRefresh = useCallback(() => {
+    setCountRevision((revision) => revision + 1);
     void load(page, true);
   }, [load, page]);
 
+  // Counting may scan the entire table. Keep it independent from page loading
+  // and reuse it across page/sort changes; filters, explicit refresh and writes
+  // invalidate it. Ignore results from superseded filters or unmounted views.
+  const filterKey = JSON.stringify(filters);
+  useEffect(() => {
+    let current = true;
+    setRowCount(null);
+    void api.countTableRows(connectionId, {
+      schema, table, filters: JSON.parse(filterKey) as Filter[],
+      where_raw: whereRaw || undefined, limit: 1, offset: 0,
+    }).then((total) => {
+      if (current) setRowCount(total);
+    }).catch((e) => {
+      if (current) toast.error(t("table.err.count"), String(e));
+    });
+    return () => { current = false; };
+    // The translated toast does not change the database count identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId, schema, table, filterKey, whereRaw, countRevision]);
+
   useEffect(() => {
     void load(0);
+    return () => { loadGen.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionId, table, schema, order, JSON.stringify(filters), whereRaw]);
+  }, [connectionId, table, schema, order, filterKey, whereRaw, pageSize]);
 
   const gridRows: GridRow[] = useMemo(() => {
     const base: GridRow[] = rows.map((vals, idx) => {
@@ -341,8 +358,8 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
 
   const onCellEdit = (rowKey: string, colIndex: number, value: unknown) => {
     const col = columns[colIndex];
-    if (isBinaryType(col.data_type) && typeof value === "string") value = { $binary: value };
     if (!col) return;
+    if (isBinaryType(col.data_type) && typeof value === "string") value = { $binary: value };
     setPending((prev) => {
       const next = new Map(prev);
       const existing = next.get(rowKey);
@@ -474,6 +491,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
       }
       setPending(new Map());
       setPreviewOpen(false);
+      setCountRevision((revision) => revision + 1);
       await load(page);
     } catch (e) {
       setApplyError(String(e));
@@ -487,7 +505,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/70 bg-surface/30 px-3">
+      <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-1 border-b border-border/70 bg-surface/30 px-3 py-1">
         <ToolbarBtn onClick={hardRefresh} icon={RefreshCw} label={t("table.toolbar.refresh")} />
         <ToolbarBtn
           onClick={() => setShowFilter((v) => !v)}
@@ -510,6 +528,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
             {t("table.toolbar.no_pk")}
           </span>
         )}
+        <ResultAnalysisButton columns={columns} rows={rows} scope="page" label={tab.title} disabled={loading || applying || !!error} />
         <div className="flex-1" />
         <div className="mr-2 flex items-center gap-0.5 rounded-lg border border-border/60 bg-background/40 p-0.5">
           {([
@@ -532,7 +551,7 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
             </button>
           ))}
         </div>
-        <div className="text-[12px] text-muted-foreground">
+        <div className="min-w-0 truncate text-[12px] text-muted-foreground" title={tab.title}>
           {tab.title}
           {order && (
             <>
@@ -595,12 +614,14 @@ function TableDataViewContent({ tab }: { tab: WorkspaceTab }) {
         )}
       </div>
 
-      <footer className="flex h-9 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap border-t border-border/70 bg-surface/50 px-3 text-[11.5px] text-muted-foreground">
+      <footer className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/70 bg-surface/50 px-3 py-1 text-[11.5px] text-muted-foreground">
         <Pager
           pageSize={pageSize}
           page={page}
           totalPages={totalPages}
           rowCount={rowCount}
+          loadedRows={rows.length}
+          loading={loading}
           onPrev={() => page > 0 && void load(page - 1)}
           onNext={() => (totalPages == null || page < totalPages - 1) && void load(page + 1)}
         />
@@ -712,7 +733,7 @@ function ToolbarBtn({
       disabled={disabled}
       title={title}
       className={cn(
-        "flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]",
+        "flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px]",
         disabled
           ? "text-muted-foreground/40"
           : active
@@ -731,6 +752,8 @@ function Pager({
   totalPages,
   rowCount,
   pageSize,
+  loadedRows,
+  loading,
   onPrev,
   onNext,
 }: {
@@ -738,28 +761,31 @@ function Pager({
   pageSize: number;
   totalPages: number | null;
   rowCount: number | null;
+  loadedRows: number;
+  loading: boolean;
   onPrev: () => void;
   onNext: () => void;
 }) {
   const t = useT();
   const start = page * pageSize + 1;
-  const end = rowCount != null ? Math.min((page + 1) * pageSize, rowCount) : "?";
+  const end = page * pageSize + loadedRows;
   return (
     <div className="flex items-center gap-2">
       <button
         onClick={onPrev}
-        disabled={page === 0}
+        disabled={page === 0 || loading}
+        aria-label={t("common.prev")}
         className="grid h-6 w-6 place-items-center rounded hover:bg-accent disabled:opacity-40"
       >
         <ChevronLeft className="h-3.5 w-3.5" />
       </button>
       <span>
-        {rowCount != null && rowCount > 0 ? (
+        {loadedRows > 0 ? (
           <span className="tabular-nums">
             {t("table.pager.range", {
               start,
               end,
-              total: rowCount.toLocaleString(),
+              total: rowCount?.toLocaleString() ?? "…",
             })}
           </span>
         ) : (
@@ -768,7 +794,8 @@ function Pager({
       </span>
       <button
         onClick={onNext}
-        disabled={totalPages != null && page >= totalPages - 1}
+        disabled={loading || (totalPages != null ? page >= totalPages - 1 : loadedRows < pageSize)}
+        aria-label={t("common.next")}
         className="grid h-6 w-6 place-items-center rounded hover:bg-accent disabled:opacity-40"
       >
         <ChevronRight className="h-3.5 w-3.5" />

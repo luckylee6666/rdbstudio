@@ -1,5 +1,6 @@
 //! Query tabs own their SQL connection until reset, close or disconnect.
 use crate::db::exec::{self, QueryResult, RollbackState, ScriptOutcome};
+use crate::db::parameters::QueryParameter;
 use crate::db::pool::DbPool;
 use crate::error::{AppError, AppResult};
 use parking_lot::Mutex;
@@ -13,6 +14,24 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_SESSIONS: usize = 32;
 const MAX_STATEMENTS: usize = 128;
+
+pub struct ParameterExecution<'a> {
+    pub parameters: &'a [QueryParameter],
+    pub atomic: bool,
+}
+
+pub struct ParameterBatchExecution<'a> {
+    pub sets: &'a [Vec<QueryParameter>],
+    pub atomic: bool,
+}
+
+pub(crate) struct ExecutionOptions<'a> {
+    pub parameters: Option<&'a [QueryParameter]>,
+    pub atomic: bool,
+    pub readonly: bool,
+    pub source: bool,
+    pub batch: Option<crate::db::parameter_batch::Execution<'a>>,
+}
 
 pub enum EditorConnection {
     Sqlite(sqlx::SqliteConnection),
@@ -59,14 +78,16 @@ struct Slot {
     manual_commit_mode: bool,
 }
 struct Session {
+    identity: String,
     connection_id: String,
-    slot: AsyncMutex<Slot>,
+    slot: Arc<AsyncMutex<Slot>>,
     cancel: CancellationToken,
 }
 
 #[derive(Default)]
 struct Registry {
     sessions: HashMap<String, Arc<Session>>,
+    plan_sessions: HashMap<String, Arc<Session>>,
     closed_connections: HashSet<String>,
     generations: HashMap<String, u64>,
 }
@@ -180,6 +201,14 @@ impl EditorSessions {
                 "connection changed while starting this query; run it again",
             ));
         }
+        if let Some(session) = registry.plan_sessions.get(session_id) {
+            if session.connection_id != id || session.cancel.is_cancelled() {
+                return Err(AppError::msg(
+                    "source query session changed or closed; open a new plan from the query tab",
+                ));
+            }
+            return Ok(Arc::clone(session));
+        }
         if let Some(session) = registry.sessions.get(session_id) {
             if session.connection_id != id {
                 return Err(AppError::msg(
@@ -188,20 +217,96 @@ impl EditorSessions {
             }
             return Ok(Arc::clone(session));
         }
+        if session_id.starts_with("explain:") || session_id.starts_with("explain-analyze:") {
+            return Err(AppError::msg(
+                "source query session changed or closed; open a new plan from the query tab",
+            ));
+        }
         if registry.sessions.len() >= MAX_SESSIONS {
             return Err(AppError::msg(
                 "32 editor sessions are open; close or reset an unused query tab",
             ));
         }
         let session = Arc::new(Session {
+            identity: uuid::Uuid::new_v4().to_string(),
             connection_id: id.to_owned(),
-            slot: AsyncMutex::new(Slot::default()),
+            slot: Arc::new(AsyncMutex::new(Slot::default())),
             cancel: CancellationToken::new(),
         });
         registry
             .sessions
             .insert(session_id.to_owned(), Arc::clone(&session));
         Ok(session)
+    }
+
+    /// Capture a particular source session at the explicit query-tab action.
+    /// Attaching later never creates a replacement for a closed/reset source.
+    pub fn identity(&self, id: &str, source_id: &str, generation: u64) -> AppResult<String> {
+        Ok(self
+            .get_or_create(id, source_id, generation)?
+            .identity
+            .clone())
+    }
+
+    /// A plan shares the query connection while owning only a child cancel
+    /// token. Closing an idle plan must never close or roll back its source.
+    pub fn attach_plan(
+        &self,
+        id: &str,
+        source_id: &str,
+        plan_id: &str,
+        generation: u64,
+        identity: &str,
+    ) -> AppResult<()> {
+        if plan_id.is_empty() || plan_id.len() > 256 || plan_id == source_id {
+            return Err(AppError::msg("invalid plan session id"));
+        }
+        let mut registry = self.registry.lock();
+        let source = registry.sessions.get(source_id).cloned().ok_or_else(|| {
+            AppError::msg(
+                "source query session changed or closed; open a new plan from the query tab",
+            )
+        })?;
+        if source.identity != identity
+            || source.connection_id != id
+            || source.cancel.is_cancelled()
+            || registry.closed_connections.contains(id)
+            || registry.generations.get(id).copied().unwrap_or(1) != generation
+            || !registry
+                .sessions
+                .get(source_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &source))
+        {
+            return Err(AppError::msg(
+                "source query session changed or closed; open a new plan from the query tab",
+            ));
+        }
+        if registry.sessions.contains_key(plan_id) {
+            return Err(AppError::msg("plan id belongs to another editor session"));
+        }
+        if let Some(existing) = registry.plan_sessions.get(plan_id) {
+            if existing.cancel.is_cancelled() || !Arc::ptr_eq(&existing.slot, &source.slot) {
+                return Err(AppError::msg(
+                    "source query session changed or closed; open a new plan from the query tab",
+                ));
+            }
+            return Ok(());
+        }
+        if registry.plan_sessions.len() >= 128 {
+            return Err(AppError::msg(
+                "128 plans are open; close an unused plan tab",
+            ));
+        }
+        registry.plan_sessions.insert(
+            plan_id.to_owned(),
+            Arc::new(Session {
+                identity: uuid::Uuid::new_v4().to_string(),
+                connection_id: id.to_owned(),
+                slot: Arc::clone(&source.slot),
+                cancel: source.cancel.child_token(),
+            }),
+        );
+        Ok(())
     }
 
     pub async fn execute(
@@ -213,18 +318,155 @@ impl EditorSessions {
         statements: &[String],
         atomic: bool,
     ) -> AppResult<ScriptOutcome> {
+        self.execute_with_options(
+            id,
+            session_id,
+            generation,
+            pool,
+            statements,
+            ExecutionOptions {
+                parameters: None,
+                atomic,
+                readonly: false,
+                source: false,
+                batch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn execute_parameterized(
+        &self,
+        id: &str,
+        session_id: &str,
+        generation: u64,
+        pool: &DbPool,
+        statements: &[String],
+        options: ParameterExecution<'_>,
+    ) -> AppResult<ScriptOutcome> {
+        self.execute_with_options(
+            id,
+            session_id,
+            generation,
+            pool,
+            statements,
+            ExecutionOptions {
+                parameters: Some(options.parameters),
+                atomic: options.atomic,
+                readonly: false,
+                source: false,
+                batch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn execute_source(
+        &self,
+        id: &str,
+        session_id: &str,
+        generation: u64,
+        pool: &DbPool,
+        source: &str,
+        options: ParameterExecution<'_>,
+    ) -> AppResult<ScriptOutcome> {
+        crate::db::sql_script::validate_source(source)?;
+        self.execute_with_options(
+            id,
+            session_id,
+            generation,
+            pool,
+            &[source.to_owned()],
+            ExecutionOptions {
+                parameters: Some(options.parameters),
+                atomic: options.atomic,
+                readonly: false,
+                source: true,
+                batch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn execute_batch(
+        &self,
+        id: &str,
+        session_id: &str,
+        generation: u64,
+        pool: &DbPool,
+        source: &str,
+        options: ParameterBatchExecution<'_>,
+    ) -> AppResult<crate::db::parameter_batch::Outcome> {
+        let ParameterBatchExecution { sets, atomic } = options;
+        let mut progress = crate::db::parameter_batch::Progress::default();
+        let outcome = self
+            .execute_with_options(
+                id,
+                session_id,
+                generation,
+                pool,
+                &[source.to_owned()],
+                ExecutionOptions {
+                    parameters: None,
+                    atomic,
+                    readonly: false,
+                    source: true,
+                    batch: Some(crate::db::parameter_batch::Execution {
+                        sets,
+                        progress: &mut progress,
+                    }),
+                },
+            )
+            .await?;
+        Ok(crate::db::parameter_batch::Outcome { outcome, progress })
+    }
+
+    pub(crate) async fn execute_with_options(
+        &self,
+        id: &str,
+        session_id: &str,
+        generation: u64,
+        pool: &DbPool,
+        statements: &[String],
+        options: ExecutionOptions<'_>,
+    ) -> AppResult<ScriptOutcome> {
         if statements.is_empty() || statements.len() > MAX_STATEMENTS {
             return Err(AppError::msg(
                 "scripts must contain between 1 and 128 statements",
             ));
         }
-        if statements.iter().any(|s| !exec::is_single_statement(s)) {
+        if !options.source && statements.iter().any(|s| !exec::is_single_statement(s)) {
             return Err(AppError::msg(
                 "each script item must contain one SQL statement",
             ));
         }
+        if !options.source
+            && options.readonly
+            && options.parameters.is_none()
+            && statements.iter().any(|s| !exec::is_readonly(s))
+        {
+            return Err(AppError::msg(
+                "connection is read-only — write statements are blocked",
+            ));
+        }
+        if let Some(parameters) = options.parameters {
+            crate::db::parameters::validate_values(
+                parameters,
+                crate::db::parameters::driver_of(pool),
+            )?;
+        }
+        if let Some(batch) = &options.batch {
+            crate::db::parameter_batch::validate(
+                &statements[0],
+                batch.sets,
+                crate::db::parameters::driver_of(pool),
+            )?;
+        }
         let session = self.get_or_create(id, session_id, generation)?;
-        let mut slot = session.slot.lock().await;
+        let mut slot = tokio::select! {
+            _ = session.cancel.cancelled() => return Err(AppError::msg("editor session closed")),
+            slot = session.slot.lock() => slot,
+        };
         if session.cancel.is_cancelled() {
             return Err(AppError::msg("editor session closed"));
         }
@@ -264,7 +506,32 @@ impl EditorSessions {
         // aborted query drops it instead of keeping a potentially dirty session.
         let result = tokio::select! {
             _ = session.cancel.cancelled() => Err(AppError::msg("editor session closed")),
-            r = run(&mut connection, statements, atomic && !in_transaction && !manual_commit_mode, &mut in_transaction, &mut manual_commit_mode) => r,
+            r = async {
+                if options.readonly {
+                    let guard = match connection {
+                        EditorConnection::Sqlite(_) => "PRAGMA query_only = ON",
+                        EditorConnection::Postgres(_) => "BEGIN READ ONLY",
+                        EditorConnection::Mysql(_) => "START TRANSACTION READ ONLY",
+                    };
+                    one(&mut connection, guard).await?;
+                }
+                let atomic = options.atomic && !options.readonly && !in_transaction && !manual_commit_mode;
+                let result = if let Some(batch) = options.batch {
+                    crate::db::parameter_batch::run(&mut connection, &statements[0], atomic,
+                        &mut in_transaction, &mut manual_commit_mode, options.readonly, batch).await
+                } else if options.source {
+                    run_source(&mut connection, &statements[0], &mut in_transaction, &mut manual_commit_mode,
+                        SourceExecution { atomic, parameters: options.parameters.unwrap_or(&[]), readonly: options.readonly, preflight: None }).await
+                } else {
+                    run(&mut connection, statements, atomic, &mut in_transaction, &mut manual_commit_mode,
+                        StatementExecution { parameters: options.parameters, readonly: options.readonly, syntax: None }).await
+                };
+                if options.readonly {
+                    let cleanup = if matches!(connection, EditorConnection::Sqlite(_)) { "PRAGMA query_only = OFF" } else { "ROLLBACK" };
+                    one(&mut connection, cleanup).await?;
+                }
+                result
+            } => r,
         };
         let healthy = if matches!(&result, Err(_) | Ok(ScriptOutcome::Failed { .. })) {
             tokio::select! {
@@ -286,7 +553,14 @@ impl EditorSessions {
     }
 
     pub async fn status(&self, session_id: &str) -> SessionStatus {
-        let session = self.registry.lock().sessions.get(session_id).cloned();
+        let session = {
+            let registry = self.registry.lock();
+            registry
+                .sessions
+                .get(session_id)
+                .or_else(|| registry.plan_sessions.get(session_id))
+                .cloned()
+        };
         match session {
             Some(s) => {
                 let slot = s.slot.lock().await;
@@ -305,7 +579,14 @@ impl EditorSessions {
     }
 
     pub async fn close(&self, session_id: &str) {
-        let session = self.registry.lock().sessions.remove(session_id);
+        let session = {
+            let mut registry = self.registry.lock();
+            if let Some(plan) = registry.plan_sessions.remove(session_id) {
+                plan.cancel.cancel();
+                return;
+            }
+            registry.sessions.remove(session_id)
+        };
         if let Some(s) = session {
             s.cancel.cancel();
             if let Some(connection) = s.slot.lock().await.connection.take() {
@@ -323,6 +604,7 @@ impl EditorSessions {
             registry
                 .sessions
                 .iter()
+                .chain(registry.plan_sessions.iter())
                 .filter(|(_, s)| s.connection_id == id)
                 .map(|(k, session)| {
                     session.cancel.cancel();
@@ -418,9 +700,9 @@ fn leading_sql_words(sql: &str, limit: usize) -> Vec<String> {
 }
 
 macro_rules! query_connection {
-    ($conn:expr, $sql:expr, $decode:ident, $protocol:ident) => {{
+    ($conn:expr, $sql:expr, $decode:ident, $protocol:ident, $returns_rows:expr) => {{
         let start = Instant::now();
-        if exec::is_readonly($sql) || exec::has_returning($sql) {
+        if $returns_rows {
             let (rows, truncated) = exec::fetch_capped(fetch!($protocol, $conn, $sql)).await?;
             let mut result = exec::$decode(rows, start);
             result.truncated = truncated;
@@ -457,12 +739,30 @@ macro_rules! execute {
     };
 }
 
-async fn one(connection: &mut EditorConnection, sql: &str) -> AppResult<QueryResult> {
+pub(crate) async fn one(connection: &mut EditorConnection, sql: &str) -> AppResult<QueryResult> {
+    one_classified(connection, sql, exec::returns_rows(sql)).await
+}
+
+pub(crate) async fn one_classified(
+    connection: &mut EditorConnection,
+    sql: &str,
+    returns_rows: bool,
+) -> AppResult<QueryResult> {
     match connection {
-        EditorConnection::Sqlite(c) => query_connection!(c, sql, decode_sqlite, prepared),
-        EditorConnection::Postgres(c) => query_connection!(c, sql, decode_postgres, prepared),
-        EditorConnection::Mysql(c) => query_connection!(c, sql, decode_mysql, text),
+        EditorConnection::Sqlite(c) => {
+            query_connection!(c, sql, decode_sqlite, prepared, returns_rows)
+        }
+        EditorConnection::Postgres(c) => {
+            query_connection!(c, sql, decode_postgres, prepared, returns_rows)
+        }
+        EditorConnection::Mysql(c) => query_connection!(c, sql, decode_mysql, text, returns_rows),
     }
+}
+
+struct StatementExecution<'a> {
+    parameters: Option<&'a [QueryParameter]>,
+    readonly: bool,
+    syntax: Option<crate::db::parameters::Syntax>,
 }
 
 async fn run(
@@ -471,8 +771,26 @@ async fn run(
     atomic: bool,
     in_transaction: &mut bool,
     manual_commit_mode: &mut bool,
+    options: StatementExecution<'_>,
 ) -> AppResult<ScriptOutcome> {
+    let StatementExecution {
+        parameters,
+        readonly,
+        syntax,
+    } = options;
     let start = Instant::now();
+    let initial_syntax = if let Some(parameters) = parameters {
+        let syntax = match syntax {
+            Some(syntax) => syntax,
+            None => {
+                crate::db::parameters::inspect_statement_syntax(connection, &statements[0]).await?
+            }
+        };
+        crate::db::parameters::validate_bindings(statements, syntax, parameters)?;
+        Some(syntax)
+    } else {
+        None
+    };
     let wrapped = atomic && statements.len() > 1;
     if wrapped {
         one(connection, "BEGIN").await?;
@@ -481,8 +799,39 @@ async fn run(
     let mut total_affected = 0;
     let mut budget = crate::db::limits::ResultBudget::default();
     for (index, sql) in statements.iter().enumerate() {
-        match one(connection, sql).await {
+        // Any preceding statement can change the mode, including CALL and rollback.
+        let syntax = match (index, initial_syntax) {
+            (0, Some(syntax)) => Ok(syntax),
+            _ => crate::db::parameters::inspect_statement_syntax(connection, sql).await,
+        };
+        let executed = match parameters {
+            Some(parameters) => match &syntax {
+                Ok(syntax) => {
+                    crate::db::parameters::execute_on(
+                        connection, sql, parameters, readonly, *syntax,
+                    )
+                    .await
+                }
+                Err(error) => Err(AppError::msg(error.to_string())),
+            },
+            None => match &syntax {
+                Ok(syntax) => {
+                    async {
+                        if readonly && matches!(connection, EditorConnection::Mysql(_)) {
+                            crate::db::sql_script::check_mysql_readonly(sql, *syntax)?;
+                        }
+                        let effective = crate::db::sql_script::mysql_effective_sql(sql, *syntax)?;
+                        one_classified(connection, sql, exec::returns_rows(&effective)).await
+                    }
+                    .await
+                }
+                Err(error) => Err(AppError::msg(error.to_string())),
+            },
+        };
+        match executed {
             Ok(mut result) => {
+                let effective = crate::db::sql_script::mysql_effective_sql(sql, syntax?)?;
+                let sql = effective.as_ref();
                 budget.retain(&mut result);
                 total_affected += result.rows_affected.unwrap_or(0);
                 if !wrapped {
@@ -573,4 +922,156 @@ async fn run(
         total_affected,
         statements: statements.len(),
     })
+}
+
+pub(crate) struct SourceExecution<'a> {
+    pub atomic: bool,
+    pub parameters: &'a [QueryParameter],
+    pub readonly: bool,
+    // Batch preflight already covered the source, bindings and all future modes.
+    pub preflight: Option<&'a crate::db::sql_script::Analysis>,
+}
+
+pub(crate) async fn run_source(
+    connection: &mut EditorConnection,
+    source: &str,
+    in_transaction: &mut bool,
+    manual_commit_mode: &mut bool,
+    execution: SourceExecution<'_>,
+) -> AppResult<ScriptOutcome> {
+    use crate::db::{parameters as binding, sql_script};
+    let SourceExecution {
+        atomic,
+        parameters,
+        readonly,
+        preflight,
+    } = execution;
+    let start = Instant::now();
+    let initial = binding::inspect_statement_syntax(connection, source).await?;
+    let checked;
+    let analysis = if let Some(analysis) = preflight {
+        analysis
+    } else {
+        checked = sql_script::analyze(source, initial, Some(parameters))?;
+        &checked
+    };
+    let wrapped = atomic && analysis.max_statements > 1 && !analysis.manages_transaction;
+    if wrapped {
+        one(connection, "BEGIN").await?;
+    }
+    let mut cursor = sql_script::Cursor::default();
+    let mut results = Vec::new();
+    let mut executed = Vec::<String>::new();
+    let mut total_affected = 0;
+    let mut budget = crate::db::limits::ResultBudget::default();
+    loop {
+        let next: AppResult<_> = async {
+            let syntax = if executed.is_empty() {
+                initial
+            } else {
+                binding::inspect_statement_syntax(connection, &source[cursor.offset..]).await?
+            };
+            Ok((cursor.next(source, syntax)?, syntax))
+        }
+        .await;
+        let (statement, syntax) = match next {
+            Ok((None, _)) => break,
+            Ok((Some(statement), syntax)) => (statement, syntax),
+            Err(error) => {
+                let rollback =
+                    rollback_source(connection, wrapped, &executed, in_transaction).await;
+                return Ok(ScriptOutcome::Failed {
+                    failed_index: executed.len(),
+                    statements: executed.len() + 1,
+                    error: error.to_string(),
+                    rollback,
+                });
+            }
+        };
+        let sql = source[statement.range].to_owned();
+        executed.push(sql.clone());
+        let outcome = if executed.len() > sql_script::MAX_STATEMENTS {
+            Err(AppError::msg("scripts may contain at most 128 statements"))
+        } else {
+            // Reuse transaction-state tracking and per-statement native binding;
+            // the outer loop owns the whole script's atomicity and result budget.
+            run(
+                connection,
+                &[sql],
+                false,
+                in_transaction,
+                manual_commit_mode,
+                StatementExecution {
+                    parameters: Some(parameters),
+                    readonly,
+                    syntax: Some(syntax),
+                },
+            )
+            .await
+        };
+        match outcome {
+            Ok(ScriptOutcome::Ok {
+                mut result,
+                total_affected: affected,
+                ..
+            }) => {
+                budget.retain(&mut result);
+                results.push(result);
+                total_affected += affected;
+            }
+            failed => {
+                let error = match failed {
+                    Ok(ScriptOutcome::Failed { error, .. }) => error,
+                    Err(error) => error.to_string(),
+                    _ => unreachable!(),
+                };
+                let rollback =
+                    rollback_source(connection, wrapped, &executed, in_transaction).await;
+                return Ok(ScriptOutcome::Failed {
+                    failed_index: executed.len() - 1,
+                    statements: executed.len(),
+                    error,
+                    rollback,
+                });
+            }
+        }
+    }
+    if wrapped {
+        one(connection, "COMMIT").await?;
+        *in_transaction = false;
+    }
+    let mut result = results.last().cloned().unwrap_or(QueryResult {
+        columns: vec![],
+        rows: vec![],
+        rows_affected: None,
+        elapsed_ms: 0,
+        truncated: false,
+    });
+    result.elapsed_ms = start.elapsed().as_millis() as u64;
+    Ok(ScriptOutcome::Ok {
+        result,
+        results,
+        statements: executed.len(),
+        total_affected,
+    })
+}
+
+async fn rollback_source(
+    connection: &mut EditorConnection,
+    wrapped: bool,
+    executed: &[String],
+    in_transaction: &mut bool,
+) -> RollbackState {
+    if !wrapped {
+        return RollbackState::SelfManaged;
+    }
+    if one(connection, "ROLLBACK").await.is_err() {
+        return RollbackState::Partial;
+    }
+    *in_transaction = false;
+    if matches!(connection, EditorConnection::Mysql(_)) {
+        exec::mysql_rollback_state(executed)
+    } else {
+        RollbackState::Complete
+    }
 }

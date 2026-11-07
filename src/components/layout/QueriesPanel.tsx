@@ -1,10 +1,11 @@
 import { useMemo } from "react";
-import { Plus, Terminal, Database } from "lucide-react";
+import { Plus, Terminal, Database, Workflow } from "lucide-react";
 import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useConnections } from "@/store/connections";
 import { useT } from "@/store/i18n";
 import { cn } from "@/lib/cn";
 import { DriverBadge } from "@/components/connection/driverIcon";
+import { tabDisplay } from "@/lib/tabTitles";
 
 export function QueriesPanel() {
   const tabs = useWorkspace((s) => s.tabs);
@@ -16,7 +17,7 @@ export function QueriesPanel() {
   const t = useT();
 
   const queryTabs = useMemo(
-    () => tabs.filter((x) => x.kind === "query"),
+    () => tabs.filter((x) => x.kind === "query" || x.kind === "query-builder"),
     [tabs]
   );
 
@@ -61,7 +62,12 @@ export function QueriesPanel() {
         </button>
       </div>
 
-      <div className="flex-1 overflow-auto px-2 pb-3">
+      <div className="px-2 pb-2">
+        <button className="flex w-full items-center gap-2 rounded-md border border-border/70 bg-surface px-2 py-2 text-left text-xs hover:bg-accent" onClick={() => openTab({ id: `builder:${crypto.randomUUID()}`, kind: "query-builder", title: "Query builder", connectionId: connected.find(c => c.driver !== "redis")?.id })}>
+          <Workflow className="h-4 w-4 shrink-0 text-brand" />{t("builder.title")}
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-3">
         {queryTabs.length === 0 ? (
           <Empty onNew={() => newQuery()} />
         ) : (
@@ -108,7 +114,7 @@ export function QueriesPanel() {
                         )}
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="truncate">{tb.title}</div>
+                        <div className="truncate">{tabDisplay(tb, t).title}</div>
                         {tb.subtitle && (
                           <div className="truncate text-[11px] text-muted-foreground">
                             {tb.subtitle}

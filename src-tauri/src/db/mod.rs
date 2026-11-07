@@ -1,3 +1,4 @@
+pub mod parameter_batch;
 pub mod alter;
 pub mod data;
 pub mod design;
@@ -8,6 +9,7 @@ pub mod meta;
 pub mod maintenance;
 pub mod native_copy;
 pub mod pool;
+pub mod parameters;
 pub mod redis_ops;
 pub mod redis_tools;
 pub mod ssh;
@@ -491,3 +493,5 @@ pub mod limits;
 pub mod datagen;
 
 pub mod monitor;
+
+pub mod sql_script;

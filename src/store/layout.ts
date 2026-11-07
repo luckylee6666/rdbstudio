@@ -30,7 +30,7 @@ export const useLayout = create<LayoutState>((set, get) => ({
   paletteOpen: false,
   sidebarVisible: true,
   inspectorVisible: loadInspectorVisible(),
-  setActivity: (a) => set({ activity: a }),
+  setActivity: (a) => set({ activity: a, sidebarVisible: true }),
   openPalette: () => set({ paletteOpen: true }),
   closePalette: () => set({ paletteOpen: false }),
   togglePalette: () => set({ paletteOpen: !get().paletteOpen }),

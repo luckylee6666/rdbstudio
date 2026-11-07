@@ -45,51 +45,55 @@ export function ActivityBar() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   return (
-    <nav className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-border/70 bg-surface/40 py-2">
-      {items.map((it) => (
-        <button
-          key={it.id}
-          onClick={() => setActivity(it.id)}
-          title={t(it.labelKey)}
-          className={cn(
-            "relative grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition-colors",
-            "hover:bg-accent hover:text-foreground",
-            activity === it.id && "bg-accent text-foreground"
-          )}
-        >
-          {activity === it.id && (
-            <span className="absolute left-0 h-5 w-0.5 rounded-r-full bg-brand" />
-          )}
-          <it.icon className="h-[18px] w-[18px]" />
-        </button>
-      ))}
-      <div className="my-2 h-px w-6 bg-border" />
-      {tools.map((item) => {
-        const active = activeKind === item.kind;
-        return (
+    <nav className="flex min-h-0 w-12 shrink-0 flex-col items-center border-r border-border/70 bg-surface/40 py-2">
+      <div className="scrollbar-none flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto">
+        {items.map((it) => (
           <button
-            key={item.kind}
-            title={t(item.labelKey)}
-            aria-label={t(item.labelKey)}
-            onClick={() =>
-              openTab({ id: `tool:${item.kind}`, kind: item.kind, title: t(item.labelKey) })
-            }
+            key={it.id}
+            onClick={() => setActivity(it.id)}
+            title={t(it.labelKey)}
+            aria-label={t(it.labelKey)}
+            aria-pressed={activity === it.id}
             className={cn(
-              "relative grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition-colors",
+              "relative grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors",
               "hover:bg-accent hover:text-foreground",
-              active && "bg-accent text-foreground"
+              activity === it.id && "bg-accent text-foreground"
             )}
           >
-            {active && <span className="absolute left-0 h-5 w-0.5 rounded-r-full bg-brand" />}
-            <item.icon className="h-[18px] w-[18px]" />
+            {activity === it.id && (
+              <span className="absolute left-0 h-5 w-0.5 rounded-r-full bg-brand" />
+            )}
+            <it.icon className="h-[18px] w-[18px]" />
           </button>
-        );
-      })}
-      <div className="flex-1" />
+        ))}
+        <div className="my-2 h-px w-6 shrink-0 bg-border" />
+        {tools.map((item) => {
+          const active = activeKind === item.kind;
+          return (
+            <button
+              key={item.kind}
+              title={t(item.labelKey)}
+              aria-label={t(item.labelKey)}
+              onClick={() =>
+                openTab({ id: `tool:${item.kind}`, kind: item.kind, title: t(item.labelKey) })
+              }
+              className={cn(
+                "relative grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors",
+                "hover:bg-accent hover:text-foreground",
+                active && "bg-accent text-foreground"
+              )}
+            >
+              {active && <span className="absolute left-0 h-5 w-0.5 rounded-r-full bg-brand" />}
+              <item.icon className="h-[18px] w-[18px]" />
+            </button>
+          );
+        })}
+      </div>
       <button
         onClick={() => setSettingsOpen(true)}
         title={t("activity.settings")}
-        className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
+        aria-label={t("activity.settings")}
+        className="mt-2 grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
       >
         <Settings className="h-[18px] w-[18px]" />
       </button>

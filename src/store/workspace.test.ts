@@ -80,3 +80,27 @@ describe("useWorkspace store", () => {
     expect(useWorkspace.getState().activeTabId).toBe("welcome");
   });
 });
+
+describe("plan runtime persistence and closing", () => {
+  it("does not persist execution intent, source identity, result values or running state", () => {
+    useWorkspace.setState({ tabs: [{ id: "explain:p", kind: "explain", title: "Plan", connectionId: "c", sourceQueryId: "query:q", sourceSessionIdentity: "runtime-session", explainRequested: true, explainRunning: true, transactionOpen: true, explainSnapshot: { connectionId: "c", sql: "SELECT :secret", analyze: true, roots: [{ id: "p", label: "sensitive-result", children: [] }] } }] });
+    const stored = localStorage.getItem("rdb:workspace")!;
+    expect(stored).not.toMatch(/runtime-session|sensitive-result|explainSnapshot|explainRequested|explainRunning|transactionOpen/);
+    expect(JSON.parse(stored).state.tabs[0].sourceQueryId).toBe("query:q");
+  });
+  it("discards runtime fields supplied by old or edited persisted state", async () => {
+    localStorage.setItem("rdb:workspace", JSON.stringify({ version: 0, state: { tabs: [{ id: "explain:p", kind: "explain", title: "Plan", sourceSessionIdentity: "old", explainRequested: true, explainRunning: true, transactionOpen: true, explainSnapshot: { roots: [] } }], activeTabId: "explain:p" } }));
+    await useWorkspace.persist.rehydrate();
+    expect(useWorkspace.getState().tabs[0]).toEqual({ id: "explain:p", kind: "explain", title: "Plan" });
+  });
+  it("asks before closing a running plan but closes an idle plan immediately", () => {
+    useWorkspace.setState({ tabs: [{ id: "explain:p", kind: "explain", title: "Plan", explainRunning: true }], activeTabId: "explain:p", pendingClose: null });
+    useWorkspace.getState().closeTab("explain:p");
+    expect(useWorkspace.getState().tabs).toHaveLength(1);
+    expect(useWorkspace.getState().pendingClose).not.toBeNull();
+    useWorkspace.getState().cancelClose();
+    useWorkspace.setState({ tabs: [{ id: "explain:p", kind: "explain", title: "Plan", explainRunning: false }] });
+    useWorkspace.getState().closeTab("explain:p");
+    expect(useWorkspace.getState().tabs).toHaveLength(0);
+  });
+});

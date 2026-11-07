@@ -17,21 +17,26 @@
 
 <p align="center"><strong>Modern cross-platform database GUI</strong> — A Navicat-style SQL workbench for SQLite, PostgreSQL, MySQL, and Redis, built with Tauri 2 + React + sqlx.</p>
 
-> Version: **v0.2.1**. macOS (Apple Silicon) and Windows x64 installers on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page.
+> Version: **v0.3.0**. macOS (Apple Silicon) and Windows x64 installers on the [Releases](https://github.com/luckylee6666/rdbstudio/releases) page.
 
 ## Features
 
 **Query & analyze**
 - SQL editor (CodeMirror 6): column-aware autocomplete, SQL formatting, snippets library
-- Multi-statement scripts run **atomically in one transaction** — any failure rolls the whole script back with the failing statement pinpointed
+- Multi-statement scripts use a transaction by default, with failing statements pinpointed; explicit transaction control is preserved and MySQL implicit commits are reported
+- Visual query builder for SQLite / PostgreSQL / MySQL: joins, nested filters, grouping/HAVING, sorting, pagination and SQL-editor handoff
+- Typed named parameters, batch parameter sets and a reusable local parameter library, with native database binding
 - Query cancellation mid-flight; results capped at 10k rows with an explicit truncation banner (no more frozen UI on `SELECT *`)
-- **Visual EXPLAIN**: PostgreSQL / SQLite query plans rendered as an auto-laid-out node graph, with cost hotspots highlighted by *self* cost
+- **Visual EXPLAIN**: PostgreSQL / MySQL / SQLite query plans rendered as an auto-laid-out node graph, sharing the source query session
 - Query history with re-run, result export as CSV / JSON / SQL INSERT
+- Loaded-result profiling, pivot tables, 20 chart types, exact decimal aggregates, continuous numeric/UTC axes and calculated fields; reusable analysis configurations with explicit field mapping
 
 **Data & schema**
 - Virtualized data grid: inline editing (multi-row-match writes are rejected server-side), FK value jump, copy row as INSERT / CSV / JSON, pretty JSON cell viewer
 - Table designer with live DDL preview; create table / schema, rename, truncate, duplicate structure
 - ER diagram with automatic layout
+- Offline relational models with ordered composite keys, named unique constraints, foreign-key actions, undo/redo and JSON interchange
+- Model-to-DDL preview/export and connected-database metadata import with explicit omission review; see [model scope and limits](docs/offline-models.md)
 - CSV import (batched multi-row INSERTs with per-row error reporting) and table export
 - **Whole-database dump & restore**: SQLite via `VACUUM INTO`, PostgreSQL via `pg_dump`/`psql`, MySQL via `mysqldump`/`mysql` — client binaries auto-discovered, passwords never touch the command line. Failed or cancelled exports preserve existing backups. MySQL includes routines/events and hex-encoded binary values, and omits global GTID state for ordinary data restores (not replication provisioning).
 
@@ -48,6 +53,7 @@
 
 **Workspace**
 - Tabs, editor buffers, and layout persist across restarts
+- Heavy workspace panels and analysis tools load on demand while preserving query sessions and tab state
 - Command palette (open any table / key / action), sidebar live filter for large schemas
 - Bilingual UI (中文 / English), dark & light themes
 
@@ -99,7 +105,7 @@ pnpm tauri build   # release bundle in src-tauri/target/release/bundle/
 
 See **Settings → Shortcuts** in-app for the full list.
 
-## Development changes (Unreleased)
+## Additional workbench capabilities
 
 Query-tab sessions and transaction controls, multiple/pinned results, index and foreign-key editing, database objects and privileges, bounded schema/data synchronization and transfer, global data search, Excel/JSON/XML imports, form and binary editing, Redis pagination/Pub/Sub/Streams/cluster status, backup progress, and an in-app updater client.
 

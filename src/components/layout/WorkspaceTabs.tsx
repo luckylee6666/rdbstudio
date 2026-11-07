@@ -24,19 +24,17 @@ import { tabDisplay } from "@/lib/tabTitles";
 import type { TabKind } from "@/types";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Welcome } from "./Welcome";
-import { TableDataView } from "./TableDataView";
-import { QueryEditorView } from "./QueryEditorView";
-import { DesignerView } from "./DesignerView";
-import { ERView } from "./ERView";
-import { ExplainView } from "./ExplainView";
-import { ConnectionToolsView } from "./ConnectionToolsView";
-import { GlobalSearchView } from "./GlobalSearchView";
-import { SyncView } from "./SyncView";
-import { RedisKeyView } from "./RedisKeyView";
-import { ServerMonitorView } from "./ServerMonitorView";
+import {
+  OfflineModelView, TableDataView, QueryEditorView, DesignerView, ERView, ExplainView,
+  ConnectionToolsView, GlobalSearchView, SyncView, RedisKeyView,
+  ServerMonitorView, QueryBuilderView,
+} from "./workspacePanels";
 
 function tabIcon(kind: TabKind) {
   switch (kind) {
+    case "model":
+    case "query-builder":
+      return Workflow;
     case "query":
       return Terminal;
     case "table-data":
@@ -114,11 +112,10 @@ export function WorkspaceTabs() {
             const isActive = tab.id === activeTabId;
             const { title, subtitle } = tabDisplay(tab, t);
             return (
-              <button
+              <div
                 key={tab.id}
                 data-tab-id={tab.id}
                 title={subtitle ? `${title} — ${subtitle}` : title}
-                onClick={() => setActive(tab.id)}
                 onAuxClick={(e) => {
                   // Middle-click closes, matching every browser/IDE tab strip.
                   if (e.button === 1) {
@@ -131,7 +128,7 @@ export function WorkspaceTabs() {
                   setCtx({ x: e.clientX, y: e.clientY, id: tab.id });
                 }}
                 className={cn(
-                  "group relative flex h-10 min-w-[104px] max-w-[240px] shrink-0 items-center gap-2 border-r border-border/70 pl-3 pr-2 text-[12.5px] transition-colors",
+                  "group relative flex h-10 min-w-[104px] max-w-[240px] shrink-0 items-center border-r border-border/70 pr-2 text-[12.5px] transition-colors",
                   isActive
                     ? "bg-background text-foreground"
                     : "text-muted-foreground hover:bg-surface/60 hover:text-foreground"
@@ -140,34 +137,42 @@ export function WorkspaceTabs() {
                 {isActive && (
                   <span className="absolute inset-x-0 top-0 h-[2px] bg-brand" />
                 )}
-                <Icon className={cn("h-3.5 w-3.5 shrink-0", isActive && "text-brand")} />
-                <span className="min-w-0 truncate">{title}</span>
-                {subtitle && (
-                  <span className="min-w-0 max-w-[96px] shrink truncate text-[11px] text-muted-foreground/80">
-                    {subtitle}
-                  </span>
-                )}
-                {tab.transactionOpen && (
-                  <span
-                    title={t("query.tx.open")}
-                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
-                  />
-                )}
-                <span
-                  role="button"
+                <button
+                  type="button"
+                  aria-pressed={isActive}
+                  onClick={() => setActive(tab.id)}
+                  className="flex h-full min-w-0 flex-1 items-center gap-2 pl-3 pr-1 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"
+                >
+                  <Icon className={cn("h-3.5 w-3.5 shrink-0", isActive && "text-brand")} />
+                  <span className="min-w-0 truncate">{title}</span>
+                  {subtitle && (
+                    <span className="min-w-0 max-w-[96px] shrink truncate text-[11px] text-muted-foreground/80">
+                      {subtitle}
+                    </span>
+                  )}
+                  {tab.transactionOpen && (
+                    <span
+                      title={t("query.tx.open")}
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
+                    />
+                  )}
+                </button>
+                <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     closeTab(tab.id);
                   }}
-                  aria-label={t("tabs.close")}
+                  aria-label={`${t("tabs.close")}: ${title}`}
+                  title={t("tabs.close")}
                   className={cn(
-                    "ml-auto grid h-5 w-5 shrink-0 place-items-center rounded opacity-0 hover:bg-accent group-hover:opacity-100",
+                    "ml-auto grid h-5 w-5 shrink-0 place-items-center rounded opacity-0 hover:bg-accent group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100",
                     isActive && "opacity-60"
                   )}
                 >
                   <X className="h-3 w-3" />
-                </span>
-              </button>
+                </button>
+              </div>
             );
           })}
         </div>
@@ -200,10 +205,14 @@ export function WorkspaceTabs() {
         {active?.kind === "designer" && (
           <DesignerView key={active.id} tab={active} />
         )}
+        {tabs.filter(tab => tab.kind === "model").map(tab => <div key={tab.id} hidden={tab.id !== activeTabId} className="h-full"><OfflineModelView tab={tab} /></div>)}
         {active?.kind === "er" && <ERView key={active.id} tab={active} />}
-        {active?.kind === "explain" && (
-          <ExplainView key={active.id} tab={active} />
-        )}
+        {active?.kind === "query-builder" && <QueryBuilderView key={active.id} tab={active} />}
+        {tabs.filter((tab) => tab.kind === "explain").map((tab) => (
+          <div key={tab.id} hidden={tab.id !== activeTabId} className="h-full">
+            <ExplainView tab={tab} />
+          </div>
+        ))}
         {active?.kind === "search" && <GlobalSearchView key={active.id} />}
         {active?.kind === "sync" && <SyncView key={active.id} />}
         {(active?.kind === "objects" || active?.kind === "redis-tools") && <ConnectionToolsView key={active.id} kind={active.kind}

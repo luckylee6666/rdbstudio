@@ -1,0 +1,41 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { expect, it, vi } from "vitest";
+import { TableModelEditor, RelationModelEditor } from "./ModelEditors";
+import { newModel, parseModel, type OfflineModel } from "@/lib/offlineModel";
+import { useI18n } from "@/store/i18n";
+const fixture = (): OfflineModel => ({ ...newModel(), tables: [{ id: "t", name: "items", schema: "main", comment: "", position: { x: 0, y: 0 }, columns: ["a", "b"].map(id => ({ id, name: id, type: "INTEGER", nullable: false, primaryKey: true, unique: false, comment: "" })) }], relations: [] });
+it("saves independent primary order and ordered named uniqueness from the table editor", async () => {
+  useI18n.setState({ lang: "en" }); const model = fixture(); model.version = 1;
+  const save = vi.fn(async (m: OfflineModel) => { parseModel(m); return true; }), close = vi.fn();
+  render(<TableModelEditor model={model} initial={model.tables[0]} busy={false} visible onSave={save} onClose={close} />);
+  fireEvent.click(screen.getByRole("button", { name: "Move field down 1" }));
+  fireEvent.click(screen.getByRole("button", { name: "Keys & constraints" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move primary key field down 1" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add unique constraint" }));
+  fireEvent.change(screen.getByLabelText("Constraint name 1"), { target: { value: "uq_pair" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add key field" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move unique field down 1.1" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply & save" }));
+  await waitFor(() => expect(close).toHaveBeenCalled());
+  const saved = save.mock.calls[0][0]; expect(saved.version).toBe(2);
+  expect(saved.tables[0].columns.map(c => c.id)).toEqual(["b", "a"]);
+  expect(saved.tables[0].primaryKey).toEqual(["b", "a"]);
+  expect(saved.tables[0].uniqueKeys?.[0]).toMatchObject({ name: "uq_pair", columns: ["a", "b"] });
+});
+it("preserves drafts and rejects deleting a field still referenced by a unique constraint", async () => {
+  useI18n.setState({ lang: "en" }); const model = fixture(); model.tables[0].uniqueKeys = [{ id: "uq", name: "pair", columns: ["a", "b"] }];
+  const save = vi.fn(async () => true);
+  render(<TableModelEditor model={model} initial={model.tables[0]} busy={false} visible onSave={save} onClose={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Remove field 2" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply & save" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("references missing"); expect(save).not.toHaveBeenCalled();
+});
+it("stores whitelisted delete/update actions and upgrades a legacy document on apply", async () => {
+  useI18n.setState({ lang: "en" }); const model = fixture(); model.version = 1;
+  const relation = { id: "fk", name: "self", fromTable: "t", toTable: "t", fromColumns: ["a"], toColumns: ["a"], cardinality: "one-many" as const, identifying: false };
+  const save = vi.fn(async (m: OfflineModel) => { parseModel(m); return true; });
+  render(<RelationModelEditor model={model} initial={relation} busy={false} visible onSave={save} onClose={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText("On delete"), { target: { value: "CASCADE" } }); fireEvent.change(screen.getByLabelText("On update"), { target: { value: "RESTRICT" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply & save" }));
+  await waitFor(() => expect(save).toHaveBeenCalled()); expect(save.mock.calls[0][0].relations[0]).toMatchObject({ onDelete: "CASCADE", onUpdate: "RESTRICT" }); expect(save.mock.calls[0][0].version).toBe(2);
+});

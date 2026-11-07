@@ -26,10 +26,11 @@ import {
 } from "lucide-react";
 import { format as formatSql } from "sql-formatter";
 import type { WorkspaceTab } from "@/types";
-import { api, type QueryResult } from "@/lib/api";
+import { api, type QueryResult, type ParameterSetSummary, type ParameterBatchOutcome } from "@/lib/api";
 import { useConnections } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
 import { CodeMirrorEditor } from "@/components/editor/CodeMirror";
+import { ResultAnalysisButton } from "@/components/analysis/ResultAnalysisButton";
 import { DataGrid, type GridColumn } from "@/components/grid/DataGrid";
 import { ContextMenu, type MenuEntry } from "@/components/ui/ContextMenu";
 import { saveTextFile, toCSV } from "@/lib/csv";
@@ -38,8 +39,6 @@ import {
   explainWrap,
   isReadOnlyStatement,
   splitRedisCommands,
-  splitStatements,
-  stripLeadingComments,
 } from "@/lib/sql";
 import { getSchemaColumns, setSchemaColumns } from "@/lib/schemaCache";
 import { cn } from "@/lib/cn";
@@ -52,6 +51,9 @@ import { modKey } from "@/lib/platform";
 import { useElementWidth } from "@/lib/useElementWidth";
 import { openSqlFile } from "@/lib/sqlFile";
 import { toast } from "@/store/toasts";
+import { QueryParametersDialog } from "@/components/editor/QueryParametersDialog";
+import { parameterSets, type ParameterBatchDraft } from "@/lib/parameterBatch";
+import { mergeParameterDefaults, type QueryParameter } from "@/lib/queryParameters";
 
 type RunState =
   | { kind: "idle" }
@@ -60,6 +62,7 @@ type RunState =
       kind: "ok";
       result: QueryResult;
       results?: QueryResult[];
+      batchSets?: ParameterSetSummary[];
       // For multi-statement scripts: how many statements ran in total, and a summary.
       statements?: { count: number; affected_total: number };
     }
@@ -104,8 +107,12 @@ function persistBuffer(tabId: string, sql: string) {
 
 export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const [sql, setSql] = useState(
-    () => primedFor(tab.id) ?? savedBuffer(tab.id) ?? INITIAL
+    () => primedFor(tab.id) ?? savedBuffer(tab.id) ?? tab.sql ?? INITIAL
   );
+  const [pendingParameters, setPendingParameters] = useState<{ source: string; buffer: string; targetId: string; names: string[]; generation: number; explain?: boolean } | null>(null);
+  const parameterValues = useRef<QueryParameter[]>([]);
+  const parameterBatch = useRef<{ source: string; targetId: string; draft: ParameterBatchDraft } | null>(null);
+  const activeTabId = useWorkspace(s => s.activeTabId);
   const latestSqlRef = useRef(sql);
   latestSqlRef.current = sql;
 
@@ -135,6 +142,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const [pins, setPins] = useState<Array<{ id: string; result: QueryResult; label: string }>>([]);
   const [comparePins, setComparePins] = useState(false);
   const sessionTarget = useRef<string>();
+  const openingPlan = useRef(false);
   useEffect(() => {
     useWorkspace.setState((workspace) => ({tabs: workspace.tabs.map((item) => item.id === tab.id && item.transactionOpen !== sessionStatus.in_transaction ? {...item, transactionOpen: sessionStatus.in_transaction} : item)}));
   }, [tab.id, sessionStatus.in_transaction]);
@@ -159,6 +167,17 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       setSessionStatus((old) => old.connected ? {...old, connected: false} : old);
     }
   }, [statusMap, sessionStatus.in_transaction]);
+  useEffect(() => {
+    const updated = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId: string; status: { connected: boolean; in_transaction: boolean; needs_reset?: boolean } }>).detail;
+      if (detail?.sessionId !== tab.id) return;
+      setSessionStatus(detail.status);
+      if (detail.status.needs_reset) setBackendNeedsReset(true);
+    };
+    window.addEventListener("editor-session-updated", updated);
+    return () => window.removeEventListener("editor-session-updated", updated);
+  }, [tab.id]);
+
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(
     null
   );
@@ -321,30 +340,34 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
     }
   }, [targetId, state, t]);
 
+  useEffect(() => {
+    if (pendingParameters && (pendingParameters.buffer !== sql || pendingParameters.targetId !== targetId)) {
+      setPendingParameters(null);
+      setState({ kind: "error", message: t("parameters.query_changed") });
+    }
+  }, [pendingParameters, sql, targetId, t]);
+
   const run = useCallback(
-    async (opts?: { selection?: string; explain?: boolean }) => {
+    async (opts?: { selection?: string; explain?: boolean; parameters?: QueryParameter[]; batch?: ParameterBatchDraft; expectedTargetId?: string; generation?: number }) => {
       // One run at a time. The Run→Stop button swap doesn't stop the ⌘↵
       // CodeMirror binding from re-invoking this mid-flight; without the
       // guard, whichever run settled LAST would own the result display.
-      if (runSessionRef.current) return;
+      if (openingPlan.current || runSessionRef.current || (pendingParameters && !opts?.parameters && !opts?.batch)) return;
+      if (opts?.expectedTargetId && targetId !== opts.expectedTargetId) {
+        setState({ kind: "error", message: t("parameters.target_changed") });
+        return;
+      }
       if (!targetId) {
         setState({ kind: "error", message: t("query.placeholder") });
         return;
       }
       const sessionChanged = sessionTarget.current !== targetId;
-      if (sessionTarget.current && sessionTarget.current !== targetId) {
-        await api.closeEditorSession(tab.id);
-        setBackendNeedsReset(false);
-        setSessionStatus({ connected: false, in_transaction: false });
-      }
       const now = Date.now();
-      if (!sessionChanged && now - lastRunRef.current < 150) return;
+      if (!opts?.parameters && !opts?.batch && !sessionChanged && now - lastRunRef.current < 150) return;
       lastRunRef.current = now;
 
       const source = (opts?.selection ?? sql).trim();
       if (!source) return;
-      sessionTarget.current = targetId;
-
       // Redis runs each line as one command; never split by `;`.
       const isRedis = targetCfg?.driver === "redis";
 
@@ -355,8 +378,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         statements = splitRedisCommands(source);
         if (statements.length === 0) statements = [source];
       } else {
-        statements = splitStatements(source);
-        if (statements.length === 0) statements = [source];
+        statements = [source];
       }
 
       const session = { qid: crypto.randomUUID(), cancelled: false };
@@ -365,46 +387,58 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       // the session that still owns the ref may touch the result display.
       const owns = () => runSessionRef.current === session;
 
-      // Multi-statement batches always go to the backend as one script so
-      // they share a single connection: a per-statement loop over the pool can
-      // land BEGIN and COMMIT on different connections, which silently
-      // autocommits the writes in between. `atomic` decides whether rdbstudio
-      // wraps them in its own transaction — a script with its own BEGIN/COMMIT
-      // manages that itself.
-      const managesOwnTxn = statements.some((s) =>
-        /^(begin|commit|rollback|start\s+transaction|end)\b/i.test(stripLeadingComments(s))
-      );
-      const asScript = statements.length > 1 && !isRedis;
+      // The backend splits SQL on its actual session, re-reading quoting rules
+      // after each statement. It also detects explicit transaction controls.
+      const asScript = !isRedis;
 
       setState({ kind: "running" });
       try {
-        if (asScript) {
-          const outcome = await api.executeScript(
-            targetId,
-            statements,
-            session.qid,
-            !managesOwnTxn,
-            tab.id
-          );
+        if (sessionTarget.current && sessionTarget.current !== targetId) {
+          await api.closeEditorSession(tab.id);
+          setBackendNeedsReset(false);
+          setSessionStatus({ connected: false, in_transaction: false });
+        }
+        if (!owns() || session.cancelled) throw new Error(t("query.err.cancelled"));
+        sessionTarget.current = targetId;
+        if (!isRedis && !opts?.parameters && !opts?.batch && /:[A-Za-z_]/.test(source)) {
+          const analysis = await api.queryParameterNames(targetId, statements, tab.id, session.qid, true);
+          if (!owns() || session.cancelled) throw new Error(t("query.err.cancelled"));
+          if (analysis.names.length) {
+            setPendingParameters({ source, buffer: sql, targetId, names: analysis.names, generation: analysis.generation, explain: opts?.explain });
+            setState({ kind: "idle" });
+            return;
+          }
+        }
+        if (asScript || opts?.parameters) {
+          const outcome = opts?.batch
+            ? await api.executeParameterBatch(targetId, { source, sets: parameterSets(opts.batch.rows, opts.batch.types), sessionId: tab.id, queryId: session.qid, atomic: opts.batch.atomic, generation: opts.generation })
+            : opts?.parameters
+            ? await api.executeParameterQuery(targetId, { sqls: statements, parameters: opts.parameters, sessionId: tab.id, queryId: session.qid, atomic: true, generation: opts.generation, sourceScript: true })
+            : await api.executeScript(targetId, statements, session.qid, true, tab.id, true);
           if (!owns()) return;
           if (outcome.status === "failed") {
             // "The whole script was rolled back" is a promise only the
             // backend can make: MySQL commits DDL implicitly, and a script
             // with its own BEGIN/COMMIT was never ours to roll back.
             const heading = {
-              complete: "query.err.statement_rolled_back",
-              partial: "query.err.statement_partial_rollback",
-              self_managed: "query.err.statement_self_managed",
+              complete: "query.err.source_rolled_back",
+              partial: "query.err.source_partial_rollback",
+              self_managed: "query.err.source_self_managed",
             }[outcome.rollback];
+            const batchOutcome = opts?.batch ? outcome as ParameterBatchOutcome : undefined;
+            const failureMessage = batchOutcome
+              ? [
+                  batchOutcome.failed_set == null
+                    ? t("parameters.batch.commit_failed")
+                    : t("parameters.batch.failed", { set: batchOutcome.failed_set + 1, n: outcome.failed_index + 1 }),
+                  t("parameters.batch.summary", { n: batchOutcome.sets.length }),
+                  t(`parameters.batch.rollback.${outcome.rollback}`),
+                  outcome.error,
+                ].join("\n")
+              : `${t(heading, { n: outcome.failed_index + 1, m: outcome.statements })}\n${outcome.error}`;
             setState({
               kind: "error",
-              message:
-                t(heading, {
-                  n: outcome.failed_index + 1,
-                  m: outcome.statements,
-                }) +
-                "\n" +
-                outcome.error,
+              message: failureMessage,
               failedAt: outcome.failed_index,
             });
             return;
@@ -413,6 +447,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
             kind: "ok",
             result: outcome.results?.at(-1) ?? outcome.result,
             results: outcome.results ?? [outcome.result],
+            batchSets: opts?.batch ? (outcome as ParameterBatchOutcome).sets : undefined,
             statements: {
               count: outcome.statements,
               affected_total: outcome.total_affected,
@@ -477,28 +512,52 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         void api.editorSessionStatus(tab.id).then((next) => { if (next) { setSessionStatus(next); if (next.needs_reset) setBackendNeedsReset(true); } }).catch(() => {});
       }
     },
-    [sql, targetId, targetCfg, t, tab.id]
+    [sql, targetId, targetCfg, t, tab.id, pendingParameters]
   );
 
   // Visual EXPLAIN: PG, MySQL (FORMAT=JSON) and SQLite plans open as a graph
   // tab; ExplainView parses per driver and surfaces server errors. Redis keeps
   // the button disabled and any other driver falls back to text EXPLAIN.
   const openExplainTab = useCallback(
-    (source: string, analyze: boolean) => {
+    async (source: string, analyze: boolean) => {
       if (!targetId) {
         setState({ kind: "error", message: t("query.placeholder") });
         return;
       }
-      useWorkspace.getState().openTab({
-        id: `${analyze ? "explain-analyze" : "explain"}:${crypto.randomUUID()}`,
-        kind: "explain",
-        title: analyze ? t("explain.analyze.title") : t("explain.title"),
-        subtitle: targetCfg?.name,
-        connectionId: targetId,
-        sql: source,
-      });
+      if (openingPlan.current || runSessionRef.current || pendingParameters) return;
+      openingPlan.current = true;
+      try {
+        // Never silently overwrite an existing target binding. The normal
+        // selector owns transaction confirmation and session teardown.
+        if (sessionTarget.current && sessionTarget.current !== targetId) {
+          throw new Error(t("parameters.target_changed"));
+        }
+        const sourceSessionIdentity = await api.editorSessionIdentity(targetId, tab.id);
+        if (!useWorkspace.getState().tabs.some(item => item.id === tab.id)) {
+          await api.closeEditorSession(tab.id);
+          return;
+        }
+        sessionTarget.current = targetId;
+        useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, connectionId: targetId } : item) }));
+        useWorkspace.getState().openTab({
+          id: `${analyze ? "explain-analyze" : "explain"}:${crypto.randomUUID()}`,
+          sourceQueryId: tab.id,
+          sourceSessionIdentity,
+          explainRequested: true,
+          kind: "explain",
+          title: analyze ? t("explain.analyze.title") : t("explain.title"),
+          subtitle: targetCfg?.name,
+          connectionId: targetId,
+          sql: source,
+          queryParameterDefaults: useWorkspace.getState().tabs.find(item => item.id === tab.id)?.queryParameterDefaults,
+        });
+      } catch (error) {
+        setState({ kind: "error", message: String(error) });
+      } finally {
+        openingPlan.current = false;
+      }
     },
-    [targetId, targetCfg, t]
+    [targetId, targetCfg, t, tab.id, pendingParameters]
   );
 
   // Same source rule as run(): editor selection wins over the buffer.
@@ -594,6 +653,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   }, [sql, targetCfg?.driver]);
 
   const chooseTarget = async (nextId: string) => {
+    if (openingPlan.current) return;
     const next = nextId || undefined;
     if (next && useConnections.getState().status[next] !== "connected") {
       setConnectingTarget(true);
@@ -622,6 +682,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       }
     }
     setUserTargetId(next);
+    useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, connectionId: next } : item) }));
   };
 
   const confirmTargetChange = async () => {
@@ -633,6 +694,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       setBackendNeedsReset(false);
       setSessionStatus({ connected: false, in_transaction: false });
       setUserTargetId(next);
+      useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id ? { ...item, connectionId: next } : item) }));
     } catch (error) {
       setState({ kind: "error", message: String(error) });
     }
@@ -660,6 +722,10 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   const running = state.kind === "running";
   const isRedis = targetCfg?.driver === "redis";
   const txBusy = !targetId || !!targetCfg?.read_only || running || sessionLost;
+  const resultList = state.kind === "ok" ? state.results ?? [state.result] : [];
+  const selectedResultIndex = state.kind === "ok" ? resultList.indexOf(state.result) : -1;
+  const selectedSet = state.kind === "ok" ? state.batchSets?.find(set => selectedResultIndex >= set.first_result && selectedResultIndex < set.first_result + set.result_count) : undefined;
+  const visibleResults = selectedSet ? resultList.slice(selectedSet.first_result, selectedSet.first_result + selectedSet.result_count) : resultList;
 
   return (
     <div
@@ -689,7 +755,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           <button
             onClick={() => void run()}
             disabled={!targetId}
-            title={`${t("query.toolbar.run")} (${modKey}↵)`}
+            title={`${t("query.toolbar.run")} (${modKey}↵) · ${t("parameters.syntax_hint")}`}
             className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-brand px-2.5 text-[12px] font-medium text-brand-foreground shadow-soft transition-colors hover:bg-brand/90 disabled:opacity-50"
           >
             <Play className="h-3.5 w-3.5 fill-current" />
@@ -878,6 +944,44 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
         )}
       </div>
 
+      {pendingParameters && activeTabId === tab.id && <QueryParametersDialog
+        driver={connections.find(c => c.id === pendingParameters.targetId)?.driver}
+        names={pendingParameters.names}
+        previous={parameterValues.current}
+        defaults={tab.queryParameterDefaults ?? []}
+        connectionName={connections.find(c => c.id === pendingParameters.targetId)?.name ?? pendingParameters.targetId}
+        previousBatch={parameterBatch.current?.source === pendingParameters.source && parameterBatch.current.targetId === pendingParameters.targetId ? parameterBatch.current.draft : undefined}
+        onPrepareBatch={async () => {
+          const analysis = await api.queryParameterNames(pendingParameters.targetId, [pendingParameters.source], tab.id, crypto.randomUUID(), true, true);
+          if (analysis.generation !== pendingParameters.generation) throw new Error(t("parameters.target_changed"));
+          return analysis.names;
+        }}
+        onBatchRun={pendingParameters.explain ? undefined : draft => {
+          const pending = pendingParameters;
+          if (pending.buffer !== sql || pending.targetId !== targetId) {
+            setPendingParameters(null);
+            setState({ kind: "error", message: t("parameters.query_changed") });
+            return;
+          }
+          parameterBatch.current = { source: pending.source, targetId: pending.targetId, draft };
+          setPendingParameters(null);
+          void run({ selection: pending.source, batch: draft, expectedTargetId: pending.targetId, generation: pending.generation });
+        }}
+        onClose={() => setPendingParameters(null)}
+        onRun={(parameters, inputs) => {
+          const pending = pendingParameters;
+          if (pending.buffer !== sql || pending.targetId !== targetId) {
+            setPendingParameters(null);
+            setState({ kind: "error", message: t("parameters.query_changed") });
+            return;
+          }
+          parameterValues.current = parameters;
+          useWorkspace.setState(workspace => ({ tabs: workspace.tabs.map(item => item.id === tab.id
+            ? { ...item, queryParameterDefaults: mergeParameterDefaults(item.queryParameterDefaults ?? [], inputs) } : item) }));
+          setPendingParameters(null);
+          void run({ selection: pending.source, explain: pending.explain, parameters, expectedTargetId: pending.targetId, generation: pending.generation });
+        }}
+      />}
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-[140px] flex-1 border-b border-border/60">
           <CodeMirrorEditor
@@ -892,9 +996,13 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           <ResultHeader state={state} targetName={targetCfg?.name} />
           {(state.kind === "ok" || pins.length > 0) && (
             <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border/70 px-2 text-[11.5px]">
+              {state.kind === "ok" && state.batchSets && <select aria-label={t("parameters.batch.choose_set")} value={selectedSet?.index ?? ""} className="max-w-40 rounded border border-border bg-background px-1 py-0.5 text-xs" onChange={e => {
+                const set = state.batchSets?.find(set => set.index === Number(e.target.value));
+                if (set && set.result_count) setState({ ...state, result: resultList[set.first_result + set.result_count - 1] });
+              }}>{state.batchSets.map(set => <option key={set.index} value={set.index} disabled={!set.result_count}>{t("parameters.batch.set_label", { n: set.index + 1 })}</option>)}</select>}
               <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
                 {state.kind === "ok" &&
-                  (state.results ?? [state.result]).map((result, index) => (
+                  visibleResults.map((result, index) => (
                     <button
                       key={index}
                       onClick={() => setState({ ...state, result })}
@@ -903,7 +1011,10 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
                         state.result === result && "bg-brand/15 text-brand hover:bg-brand/20 hover:text-brand"
                       )}
                     >
-                      {t("query.result.tab", { n: index + 1 })}
+                      {(() => {
+                        const set = selectedSet;
+                        return set ? t("parameters.batch.result", { set: set.index + 1, n: index + 1 }) : t("query.result.tab", { n: index + 1 });
+                      })()}
                       <span className="text-[10.5px] opacity-70">
                         {result.columns.length
                           ? t("query.result.rows_short", { n: result.rows.length })
@@ -938,6 +1049,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
                   className={cn(comparePins && "bg-accent text-foreground")}
                 />
               )}
+              {state.kind === "ok" && <ResultAnalysisButton columns={state.result.columns} rows={state.result.rows} scope="result" label={tab.title} compact={compact} />}
               <ToolButton
                 icon={Download}
                 label={t("query.toolbar.export")}

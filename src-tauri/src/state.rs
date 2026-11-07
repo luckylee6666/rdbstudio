@@ -150,6 +150,9 @@ pub struct AppState {
     pub store: ConnectionStore,
     pub history: HistoryStore,
     pub snippets: SnippetStore,
+    pub offline_models: Arc<crate::offline_models::ModelStore>,
+    pub analysis_presets: Arc<crate::analysis_presets::PresetStore>,
+    pub parameter_presets: Arc<crate::parameter_presets::PresetStore>,
     pub sessions: Arc<crate::db::sessions::EditorSessions>,
     pub pools: Arc<RwLock<HashMap<String, DbPool>>>,
     /// Live SSH tunnels keyed by connection id. Kept alive for as long as the
@@ -176,6 +179,9 @@ pub struct AppState {
 impl AppState {
     pub fn new(store: ConnectionStore, history: HistoryStore, snippets: SnippetStore) -> Self {
         Self {
+            offline_models: Arc::new(crate::offline_models::ModelStore::new(store.data_dir())),
+            analysis_presets: Arc::new(crate::analysis_presets::PresetStore::new(store.data_dir())),
+            parameter_presets: Arc::new(crate::parameter_presets::PresetStore::new(store.data_dir())),
             store,
             history,
             snippets,
