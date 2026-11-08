@@ -96,7 +96,15 @@ impl<C: PresetContent> PresetStore<C> {
         loop {
             match fs2::FileExt::try_lock_exclusive(&lock) {
                 Ok(()) => return Ok(FileLock(lock)),
-                Err(cause) if cause.kind() == std::io::ErrorKind::WouldBlock => {
+                // Windows lock contention does not necessarily map to WouldBlock.
+                // Compare fs2's platform-specific OS error as well, so another
+                // window holding the sidecar lock remains a retryable conflict.
+                Err(cause)
+                    if cause.kind() == std::io::ErrorKind::WouldBlock
+                        || cause.raw_os_error().is_some_and(|code| {
+                            Some(code) == fs2::lock_contended_error().raw_os_error()
+                        }) =>
+                {
                     if std::time::Instant::now() >= deadline {
                         return Err(error("conflict"));
                     }
