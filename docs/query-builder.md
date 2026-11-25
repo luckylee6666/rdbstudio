@@ -23,4 +23,11 @@ SQL 表达式用于计算等高级场景，输入不带语句结束分号或注�
 
 例如，在编辑器中选中 `SELECT region, SUM(amount) AS total FROM sales GROUP BY region ORDER BY total DESC` 后导入，即可在设计中调整分组、聚合或行数限制。预览后的 SQL 在新的编辑器中打开，由用户执行。
 
-CTE、子查询、集合操作、窗口函数、查询参数、注释及任意计算表达式暂不支持反向导入。遇到无法映射的写法时，编辑器会提示原因。导入限 65,536 个 UTF-16 码元、4,096 个词元和 16 层括号。其余差距见[完整功能矩阵](navicat-completeness.md)。
+CTE、子查询、集合操作、窗口函数、原生位置参数、注释及任意计算表达式暂不支持反向导入。遇到无法映射的写法时，编辑器会提示原因。导入限 65,536 个 UTF-16 码元、4,096 个词元和 16 层括号。其余差距见[完整功能矩阵](navicat-completeness.md)。
+
+
+## 在设计中使用命名参数
+
+例如，导入 `SELECT region, amount FROM sales WHERE amount >= :minimum ORDER BY amount DESC LIMIT :page_size OFFSET :skip`。条件编辑器中可以修改参数名，也可以将一个固定值的表达式类型改为「命名参数」。参数名输入框只填名称，LIMIT 和 OFFSET 输入框则填写完整的 `:name`。每处引用可独立编辑，同名引用在运行时共用一个值。聚合函数的参数位置目前只接受字段，COUNT 还可使用星号。
+
+点击「在 SQL 编辑器中打开」后运行，选择类型并输入实际值。分页参数预选整数类型。构建器保存并交接占位符，实际值由编辑器按[命名参数查询](query-parameters.md)的规则处理。单条语句至多使用 128 个不同名称、1,024 次参数引用，每个名称至多 128 个 ASCII 字符。

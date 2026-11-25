@@ -47,11 +47,29 @@ describe("SELECT import", () => {
     "SELECT 0x20 FROM t", "SELECT k ISNULL FROM t", "UPDATE t SET n=1", "SELECT * FROM t; SELECT * FROM u", "SELECT * FROM t UNION SELECT * FROM u",
     "WITH u AS (SELECT * FROM t) SELECT * FROM u", "SELECT * FROM (SELECT * FROM t) AS u",
     "SELECT * FROM t WHERE k IN (SELECT k FROM u)", "SELECT * FROM t WHERE n = 1 /* condition */",
-    "SELECT * FROM t WHERE id = :id", "SELECT * FROM a JOIN b USING(id)", "SELECT * FROM a JOIN b ON c.id=b.id CROSS JOIN c",
+    "SELECT * FROM t WHERE id = ?", "SELECT * FROM a JOIN b USING(id)", "SELECT * FROM a JOIN b ON c.id=b.id CROSS JOIN c",
     "SELECT SUM(n) OVER () FROM t", "SELECT * FROM t FOR UPDATE", "SELECT * FROM t WHERE x=1 OR",
     "SELECT * FROM t LIMIT 1, 5", "SELECT * FROM t WHERE k=0; DELETE FROM t",
   ])("rejects the complete statement when a clause cannot be mapped: %s", sql => {
     expect(() => importSelect(sql, "sqlite")).toThrow();
+  });
+
+  it.each(["sqlite", "postgres", "mysql"] as const)("round trips named parameters without binding in %s", driver => {
+    const query = importSelect("SELECT :Label AS label, ':unbound' AS note FROM t JOIN u ON t.id = :id WHERE t.n BETWEEN :min AND :max AND t.k IN (:id, :ID) HAVING COUNT(*) > :min ORDER BY t.id LIMIT :page_size OFFSET :offset", driver);
+    expect(query.columns[0].expression).toEqual({ kind: "parameter", name: "Label" });
+    expect(query.columns[1].expression).toMatchObject({ kind: "literal", value: ":unbound" });
+    expect(query.limit).toBe(":page_size");
+    expect(query.offset).toBe(":offset");
+    const sql = compileQuery(query, driver);
+    expect(sql).toContain("IN (:id, :ID)");
+    expect(sql).toContain("LIMIT :page_size\nOFFSET :offset;");
+    expect(convert(sql, driver)).toBe(sql);
+  });
+
+  it.each(["SELECT * FROM :table", "SELECT a AS :alias FROM t", "SELECT * FROM t WHERE a = :1",
+    "SELECT :x::integer FROM t", "SELECT :x, $1 FROM t", "SELECT :x, @other FROM t",
+    "SELECT * FROM t LIMIT :", "SELECT :x$extra FROM t"])("rejects unsupported marker usage in %s", sql => {
+    expect(() => importSelect(sql, "postgres")).toThrow();
   });
 
   it("bounds input and refuses mode-dependent strings", () => {

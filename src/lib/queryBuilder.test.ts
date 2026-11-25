@@ -108,6 +108,34 @@ describe("visual query SQL compiler", () => {
     expect(compileQuery(query, "sqlite")).toContain("LIMIT 0;");
   });
 
+  it("validates named parameter spellings and paging rules on generated designs", () => {
+    const query = base();
+    for (const name of ["", "2min", "a b", "naïve", "p.x", "x".repeat(129)]) {
+      query.columns = [{ id: "p", alias: "", expression: { kind: "parameter", name } }];
+      expectError(query, "parameter_name");
+    }
+    query.columns = [];
+    query.limit = ":page"; query.offset = ":p.q";
+    expectError(query, "parameter_name");
+    query.offset = ":skip"; query.limit = "";
+    expectError(query, "offset");
+    expect(compileQuery(query, "postgres")).toContain("OFFSET :skip;");
+  });
+
+  it("counts distinct names and repeated parameter occurrences including pagination", () => {
+    const query = base();
+    const fields = (count: number, distinct: boolean) => Array.from({ length: count }, (_, i) => ({
+      id: String(i), alias: "", expression: { kind: "parameter" as const, name: distinct ? `p${i}` : "p0" },
+    }));
+    query.columns = fields(128, true);
+    query.limit = ":p0";
+    expect(compileQuery(query, "sqlite")).toContain("LIMIT :p0");
+    query.offset = ":extra"; expectError(query, "parameter_limit");
+    query.columns = fields(1022, false);
+    expect(compileQuery(query, "sqlite")).toContain("OFFSET :extra");
+    query.columns = fields(1023, false); expectError(query, "parameter_limit");
+  });
+
   it("rejects unsupported FULL JOIN on MySQL", () => {
     const query = base(); const other = source("o", "orders"); other.join = "FULL";
     other.on.children = [rule(column("u", "id"), column("o", "user_id"))]; query.sources.push(other);

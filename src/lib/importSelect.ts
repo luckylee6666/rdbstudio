@@ -17,12 +17,12 @@ const reserved = new Set((
 
 function reject(code: string): never { throw new QueryBuilderError("import_" + code); }
 
-// Tokenize only the forms this design can render. Comments, parameters and
+// Tokenize only the forms this design can render. Comments, positional parameters and
 // session-dependent quoting must never be dropped while converting a query.
 function tokenize(sql: string, driver: SqlDriver): string[] {
   if (sql.length > 64 * 1024) reject("size");
   if (sql.includes("\0")) reject("syntax");
-  const token = /[ \t\r\n]+|[eE]'(?:\\[\s\S]|''|[^'\\])*'|[xX]'(?:[0-9a-fA-F]{2})*'|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[a-zA-Z_][a-zA-Z_0-9$]*|<>|!=|<=|>=|[(),.*;=<>+-]/y;
+  const token = /[ \t\r\n]+|[eE]'(?:\\[\s\S]|''|[^'\\])*'|[xX]'(?:[0-9a-fA-F]{2})*'|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|:[A-Za-z_][A-Za-z_0-9]*|[a-zA-Z_][a-zA-Z_0-9$]*|<>|!=|<=|>=|[(),.*;=<>+-]/y;
   const tokens: string[] = [];
   let depth = 0;
   while (token.lastIndex < sql.length) {
@@ -79,6 +79,10 @@ export function importSelect(sql: string, driver: SqlDriver): QueryDesign {
   }
   function expression(): Expression {
     const raw = tokens[pos] ?? "";
+    if (raw.startsWith(":")) {
+      pos++;
+      return { kind: "parameter", name: raw.slice(1) };
+    }
     if (driver === "postgres" && /^[eE]'/.test(raw)) {
       pos++;
       const body = raw.slice(2, -1);
@@ -211,13 +215,13 @@ export function importSelect(sql: string, driver: SqlDriver): QueryDesign {
       return { id: uuid(), expression: value, direction };
     });
   }
-  function integer() {
+  function pageValue() {
     const value = tokens[pos++];
-    if (!/^\d+$/.test(value ?? "")) reject("syntax");
+    if (!value || !(value.startsWith(":") || /^\d+$/.test(value))) reject("syntax");
     return value;
   }
-  if (take("LIMIT")) query.limit = integer();
-  if (take("OFFSET")) query.offset = integer();
+  if (take("LIMIT")) query.limit = pageValue();
+  if (take("OFFSET")) query.offset = pageValue();
   if (pos !== tokens.length) reject("syntax");
   compileQuery(query, driver);
   return query;

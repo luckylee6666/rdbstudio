@@ -94,13 +94,22 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
     const schema = entry.schema || draft.catalogSchema || (connection?.driver === "postgres" ? "public" : connection?.driver === "mysql" ? connection.database || undefined : undefined);
     changeQuery({ ...query, sources: [...query.sources, { id: crypto.randomUUID(), name: entry.name, schema, alias: `t${n}`, join: "INNER", on: emptyGroup() }] });
   };
+  const openEditor = () => {
+    if (!compiled.sql) return;
+    const pageParameters = new Set([query.limit, query.offset].filter(value => value.startsWith(":")));
+    useWorkspace.getState().openTab({
+      id: `query:${crypto.randomUUID()}`, kind: "query", title: nextQueryTitle(),
+      connectionId: draft.connectionId, sql: compiled.sql,
+      queryParameterDefaults: Array.from(pageParameters, marker => ({ name: marker.slice(1), kind: "integer" })),
+    });
+  };
   const refresh = () => { columnCache.current.clear(); setRevision(r => r + 1); };
 
   return <div className="flex h-full min-h-0 flex-col">
     <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border/70 bg-surface/40 px-4 py-3">
       <Workflow className="h-5 w-5 shrink-0 text-brand" />
       <div className="min-w-0 flex-1"><h2 className="text-sm font-semibold">{t("builder.title")}</h2><p className="text-xs text-muted-foreground">{t("builder.description")}</p></div>
-      <Button variant="primary" disabled={!compiled.sql} onClick={() => useWorkspace.getState().openTab({ id: `query:${crypto.randomUUID()}`, kind: "query", title: nextQueryTitle(), connectionId: draft.connectionId, sql: compiled.sql })}><ArrowUpRight className="h-3.5 w-3.5" />{t("builder.open_editor")}</Button>
+      <Button variant="primary" disabled={!compiled.sql} onClick={openEditor}><ArrowUpRight className="h-3.5 w-3.5" />{t("builder.open_editor")}</Button>
     </header>
     <div className="min-h-0 flex-1 overflow-auto p-4">
       <div className="mx-auto max-w-6xl space-y-4">
@@ -167,8 +176,8 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
 
         <ToolCard title={t("builder.preview")}>
           <div className="mb-3 flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2 text-xs">LIMIT<input className={`${builderInput} w-24`} value={query.limit} inputMode="numeric" placeholder="∞" onChange={e => changeQuery({ ...query, limit: e.target.value })} /></label>
-            <label className="flex items-center gap-2 text-xs">OFFSET<input className={`${builderInput} w-24`} value={query.offset} inputMode="numeric" onChange={e => changeQuery({ ...query, offset: e.target.value })} /></label>
+            <label className="flex items-center gap-2 text-xs">LIMIT<input className={`${builderInput} w-24`} value={query.limit} title={t("builder.page_value")} placeholder="∞" onChange={e => changeQuery({ ...query, limit: e.target.value })} /></label>
+            <label className="flex items-center gap-2 text-xs">OFFSET<input className={`${builderInput} w-24`} value={query.offset} title={t("builder.page_value")} onChange={e => changeQuery({ ...query, offset: e.target.value })} /></label>
           </div>
           {compiled.error ? <p role="status" className="text-sm text-muted-foreground">{t(`builder.error.${compiled.error.code}`, { detail: compiled.error.detail })}</p>
             : <pre aria-label={t("builder.preview")} className="max-h-96 overflow-auto rounded-lg bg-background p-3 font-mono text-xs leading-6">{compiled.sql}</pre>}

@@ -6,6 +6,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- 可视化查询支持导入、编辑和生成命名参数，分页参数交回 SQL 编辑器时自动预选整数类型。
 - 查询编辑器可将选中或整段的单条 SELECT 导入可视化查询构建器，继续编辑连接条件、分组、排序和分页。
 
 ### Fixed

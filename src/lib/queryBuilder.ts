@@ -3,6 +3,7 @@ import type { DriverKind } from "@/types";
 export type SqlDriver = Exclude<DriverKind, "redis">;
 export type ColumnExpression = { kind: "column"; tableId: string | null; name: string; bare?: boolean };
 export type Expression = ColumnExpression
+  | { kind: "parameter"; name: string }
   | { kind: "aggregate"; fn: "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"; column: ColumnExpression | null; distinct: boolean }
   | { kind: "literal"; type: "text" | "number" | "boolean" | "null"; value: string; plainString?: boolean }
   | { kind: "sql"; text: string };
@@ -85,6 +86,15 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
     aliases.add(alias);
     sources.set(source.id, source);
   }
+  const parameterNames = new Set<string>();
+  let parameterReferences = 0;
+  function parameter(name: string): string {
+    if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z_0-9]{0,127}$/.test(name)) fail("parameter_name");
+    parameterNames.add(name);
+    parameterReferences++;
+    if (parameterNames.size > 128 || parameterReferences > 1024) fail("parameter_limit");
+    return `:${name}`;
+  }
   function expression(value: Expression, allowed = sources): string {
     switch (value.kind) {
       case "column": {
@@ -102,6 +112,7 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
         if (!value.column && (value.fn !== "COUNT" || value.distinct)) fail("aggregate");
         return `${value.fn}(${value.distinct ? "DISTINCT " : ""}${value.column ? expression(value.column, allowed) : "*"})`;
       }
+      case "parameter": return parameter(value.name);
       case "literal": return literal(value, driver);
       case "sql": {
         // Deliberately conservative: advanced scripts can be edited after handoff.
@@ -154,14 +165,16 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
     if (item.direction !== "ASC" && item.direction !== "DESC") fail("order");
     return `${expression(item.expression)} ${item.direction}`;
   }).join(", ")}`);
-  const integer = (value: string) => {
+  const pageValue = (value: string) => {
+    if (value.startsWith(":")) return parameter(value.slice(1));
     if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) fail("limit");
     return String(Number(value));
   };
-  if (query.limit !== "") lines.push(`LIMIT ${integer(query.limit)}`);
-  if (query.offset !== "" && integer(query.offset) !== "0") {
+  if (query.limit !== "") lines.push(`LIMIT ${pageValue(query.limit)}`);
+  const offset = query.offset === "" ? "0" : pageValue(query.offset);
+  if (offset !== "0") {
     if (query.limit === "" && driver !== "postgres") fail("offset");
-    lines.push(`OFFSET ${integer(query.offset)}`);
+    lines.push(`OFFSET ${offset}`);
   }
   return lines.join("\n") + ";";
 }

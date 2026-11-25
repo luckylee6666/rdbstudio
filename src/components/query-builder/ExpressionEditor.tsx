@@ -42,11 +42,12 @@ export function ExpressionEditor({ value, onChange, context, label }: {
       switch (e.target.value) {
         case "column": onChange(defaultColumn(context)); break;
         case "aggregate": onChange({ kind: "aggregate", fn: "COUNT", column: null, distinct: false }); break;
+        case "parameter": onChange({ kind: "parameter", name: "" }); break;
         case "literal": onChange(textValue()); break;
         case "sql": onChange({ kind: "sql", text: "" }); break;
       }
     }}>
-      {(["column", "aggregate", "literal", "sql"] as const).map(kind => <option key={kind} value={kind}>{t(`builder.kind.${kind}`)}</option>)}
+      {(["column", "aggregate", "literal", "parameter", "sql"] as const).map(kind => <option key={kind} value={kind}>{t(`builder.kind.${kind}`)}</option>)}
     </ToolSelect>
     {value.kind === "column" && <ColumnPicker value={value} onChange={column => column && onChange(column)} context={context} label={label} />}
     {value.kind === "aggregate" && <>
@@ -63,6 +64,11 @@ export function ExpressionEditor({ value, onChange, context, label }: {
       {value.type === "boolean" ? <ToolSelect aria-label={label} value={value.value} onChange={e => onChange({ ...value, value: e.target.value })}><option value="true">TRUE</option><option value="false">FALSE</option></ToolSelect>
         : value.type !== "null" && <input aria-label={label} className={`${builderInput} flex-1`} value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} />}
     </>}
+    {value.kind === "parameter" && <label className="flex min-w-0 flex-1 items-center gap-1 font-mono">
+      <span aria-hidden="true">:</span>
+      <input className={`${builderInput} min-w-0 flex-1`} aria-label={`${label} · ${t("builder.parameter_name")}`} placeholder="min_total" spellCheck={false} value={value.name}
+        onChange={e => onChange({ kind: "parameter", name: e.target.value })} />
+    </label>}
     {value.kind === "sql" && <input aria-label={label} className={`${builderInput} min-w-[120px] flex-1 font-mono`} placeholder={t("builder.expression_hint")} value={value.text} onChange={e => onChange({ ...value, text: e.target.value })} />}
   </div>;
 }

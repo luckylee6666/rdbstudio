@@ -55,6 +55,27 @@ describe("QueryBuilderView", () => {
     expect(opened.sql).toBe('SELECT\n  "t1"."id"\nFROM "users" AS "t1"\nLIMIT 100;');
   });
 
+  it("edits parameter placeholders, restores the draft and hands off names only", async () => {
+    const view = render(<QueryBuilderView tab={tab} />); await ready(); addTable();
+    fireEvent.click(screen.getByRole("button", { name: "Add output column" }));
+    fireEvent.change(screen.getByLabelText(/1 · Expression kind$/), { target: { value: "parameter" } });
+    const name = screen.getByLabelText(/1 · Parameter name$/);
+    const handoff = screen.getByRole("button", { name: "Open in SQL editor" });
+    expect(handoff).toBeDisabled();
+    fireEvent.change(name, { target: { value: "label" } });
+    fireEvent.change(screen.getByLabelText("LIMIT"), { target: { value: ":page_size" } });
+    fireEvent.change(screen.getByLabelText("OFFSET"), { target: { value: ":page_size" } });
+    expect(handoff).toBeEnabled();
+    const saved = JSON.parse(localStorage.getItem("rdb:workspace")!).state.tabs[0];
+    expect(saved.builder.query.columns[0].expression).toEqual({ kind: "parameter", name: "label" });
+    view.unmount(); render(<QueryBuilderView tab={saved} />);
+    expect(screen.getByLabelText(/1 · Parameter name$/)).toHaveValue("label");
+    fireEvent.click(screen.getByRole("button", { name: "Open in SQL editor" }));
+    const opened = useWorkspace.getState().tabs.at(-1)!;
+    expect(opened.sql).toMatch(/SELECT\s+:label\s+FROM .*\nLIMIT :page_size\nOFFSET :page_size;/);
+    expect(opened.queryParameterDefaults).toEqual([{ name: "page_size", kind: "integer" }]);
+  });
+
   it("requires confirmation before resetting a nonempty design on connection change", async () => {
     render(<QueryBuilderView tab={tab} />); await ready(); addTable();
     fireEvent.change(screen.getByLabelText("Connection"), { target: { value: "b" } });
