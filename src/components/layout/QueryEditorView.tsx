@@ -21,9 +21,12 @@ import {
   Undo2,
   Unplug,
   WandSparkles,
+  Workflow,
   X,
   type LucideIcon,
 } from "lucide-react";
+import { importSelect } from "@/lib/importSelect";
+import { QueryBuilderError } from "@/lib/queryBuilder";
 import { format as formatSql } from "sql-formatter";
 import type { WorkspaceTab } from "@/types";
 import { api, type QueryResult, type ParameterSetSummary, type ParameterBatchOutcome } from "@/lib/api";
@@ -561,21 +564,35 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   );
 
   // Same source rule as run(): editor selection wins over the buffer.
-  const explainSource = useCallback(
+  const editorSource = useCallback(
     () => (selectionGetter.current?.() ?? sql).trim(),
     [sql]
   );
 
+  const openInBuilder = () => {
+    if (!targetId || !targetCfg || targetCfg.driver === "redis") return;
+    try {
+      const query = importSelect(editorSource(), targetCfg.driver);
+      useWorkspace.getState().openTab({
+        id: `builder:${crypto.randomUUID()}`, kind: "query-builder", title: "Query builder", connectionId: targetId,
+        builder: { version: 1, connectionId: targetId, catalogSchema: query.sources[0].schema ?? "", query },
+      });
+    } catch (error) {
+      const code = error instanceof QueryBuilderError ? error.code : "import_syntax";
+      toast.error(t("builder.import_failed"), t(`builder.error.${code}`, { detail: error instanceof QueryBuilderError ? error.detail : "" }));
+    }
+  };
+
   const onExplain = useCallback(() => {
     const driver = targetCfg?.driver;
     if (driver === "postgres" || driver === "sqlite" || driver === "mysql") {
-      const source = explainSource();
+      const source = editorSource();
       if (!source) return;
       openExplainTab(source, false);
       return;
     }
     void run({ explain: true });
-  }, [targetCfg, explainSource, openExplainTab, run]);
+  }, [targetCfg, editorSource, openExplainTab, run]);
 
   // EXPLAIN ANALYZE runs the statement for real: only PostgreSQL offers it
   // (SQLite has no query-plan ANALYZE; MySQL's text tree is out of scope).
@@ -583,14 +600,14 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
   // SELECT / WITH / VALUES / TABLE asks for explicit confirmation first.
   const onExplainAnalyze = useCallback(() => {
     if (targetCfg?.driver !== "postgres") return;
-    const source = explainSource();
+    const source = editorSource();
     if (!source) return;
     if (!isReadOnlyStatement(source)) {
       setAnalyzeConfirm(source);
       return;
     }
     openExplainTab(source, true);
-  }, [targetCfg, explainSource, openExplainTab]);
+  }, [targetCfg, editorSource, openExplainTab]);
 
   const onStop = useCallback(() => {
     const session = runSessionRef.current;
@@ -845,6 +862,13 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
           onClick={onFormat}
           disabled={!sql.trim() || isRedis}
           title={isRedis ? t("query.toolbar.format_na") : `${t("query.toolbar.format")} (${modKey}⇧F)`}
+        />
+        <ToolButton
+          icon={Workflow}
+          label={t("builder.import_select")}
+          compact={compact}
+          onClick={openInBuilder}
+          disabled={!targetCfg || isRedis || !sql.trim()}
         />
         <ToolButton
           icon={BookmarkPlus}

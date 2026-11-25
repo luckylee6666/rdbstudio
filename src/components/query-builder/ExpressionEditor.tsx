@@ -28,7 +28,7 @@ function ColumnPicker({ value, onChange, context, label, star = false }: {
     }
   }}>
     {star && <option value="*">*</option>}
-    {!options.some(option => option.key === selected) && value && <option value={selected}>{value.name ? `${context.sources.find(s => s.id === value.tableId)?.alias ?? "?"}.${value.name}` : t("builder.choose_column")}</option>}
+    {!options.some(option => option.key === selected) && value && <option value={selected}>{value.tableId === null ? value.name : value.name ? `${context.sources.find(s => s.id === value.tableId)?.alias ?? "?"}.${value.name}` : t("builder.choose_column")}</option>}
     {options.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}
   </ToolSelect>;
 }

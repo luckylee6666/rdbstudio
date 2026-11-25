@@ -1,10 +1,10 @@
 import type { DriverKind } from "@/types";
 
 export type SqlDriver = Exclude<DriverKind, "redis">;
-export type ColumnExpression = { kind: "column"; tableId: string; name: string };
+export type ColumnExpression = { kind: "column"; tableId: string | null; name: string; bare?: boolean };
 export type Expression = ColumnExpression
   | { kind: "aggregate"; fn: "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"; column: ColumnExpression | null; distinct: boolean }
-  | { kind: "literal"; type: "text" | "number" | "boolean" | "null"; value: string }
+  | { kind: "literal"; type: "text" | "number" | "boolean" | "null"; value: string; plainString?: boolean }
   | { kind: "sql"; text: string };
 export const comparisonOperators = ["=", "<>", ">", ">=", "<", "<=", "LIKE", "NOT LIKE", "IS NULL", "IS NOT NULL", "IN", "NOT IN", "BETWEEN", "NOT BETWEEN"] as const;
 export type ComparisonOperator = typeof comparisonOperators[number];
@@ -59,6 +59,8 @@ function literal(expression: Extract<Expression, { kind: "literal" }>, driver: S
     return value.toUpperCase();
   }
   if (value.includes("\0")) fail("nul");
+  // Preserve the connection collation of imported MySQL string literals.
+  if (expression.plainString && !value.includes("\\")) return "'" + value.replaceAll("'", "''") + "'";
   // Hex strings avoid dependence on MySQL's NO_BACKSLASH_ESCAPES mode.
   if (driver === "mysql") {
     const hex = Array.from(new TextEncoder().encode(value), b => b.toString(16).padStart(2, "0")).join("");
@@ -86,6 +88,11 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
   function expression(value: Expression, allowed = sources): string {
     switch (value.kind) {
       case "column": {
+        if (value.tableId === null) {
+          if (!value.bare) return quote(value.name);
+          if (!/^[A-Za-z_][A-Za-z_0-9$]*$/.test(value.name)) fail("identifier");
+          return value.name;
+        }
         const source = allowed.get(value.tableId);
         if (!source) fail("reference", value.name);
         return `${quote(source.alias)}.${quote(value.name)}`;

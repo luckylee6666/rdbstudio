@@ -5,6 +5,9 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- 查询编辑器可将选中或整段的单条 SELECT 导入可视化查询构建器，继续编辑连接条件、分组、排序和分页。
+
 ### Fixed
 - SQLite 结构导入按 SQLite 的标识符规则匹配外键，保留表名或列名仅有 ASCII 大小写差异的关系。
 - 数值、KPI 和仪表卡片的 CSV 导出按聚合方式列出总计和各系列小计，避免把合计误标为空值分组。

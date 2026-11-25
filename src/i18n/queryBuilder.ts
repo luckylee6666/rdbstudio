@@ -1,4 +1,12 @@
 export const queryBuilderEn = {
+  "builder.import_select": "Open in query builder",
+  "builder.import_failed": "Cannot import this SELECT",
+  "builder.error.import_statement": "Select a single SELECT statement in the editor.",
+  "builder.error.import_source": "Choose a SELECT with a table or view in FROM.",
+  "builder.error.import_syntax": "This SQL uses an unsupported clause or expression.",
+  "builder.error.import_quoting": "This quoting depends on the SQL dialect or session mode.",
+  "builder.error.import_reference": "A qualified column must reference a table alias in scope.",
+  "builder.error.import_size": "The query exceeds the import limit of 65,536 UTF-16 code units or 4,096 tokens.",
   "builder.title": "Query builder",
   "builder.description": "Build queries visually, then open SQL in the editor.",
   "builder.open_editor": "Open in SQL editor",
@@ -74,6 +82,14 @@ export const queryBuilderEn = {
 };
 
 export const queryBuilderZh: Record<keyof typeof queryBuilderEn, string> = {
+  "builder.import_select": "在查询构建器中打开",
+  "builder.import_failed": "无法导入此 SELECT",
+  "builder.error.import_statement": "请在编辑器中选中一条 SELECT 语句。",
+  "builder.error.import_source": "请选择包含 FROM 表或视图的 SELECT。",
+  "builder.error.import_syntax": "此 SQL 包含暂不支持的子句或表达式。",
+  "builder.error.import_quoting": "此引号或转义写法依赖方言或会话模式。",
+  "builder.error.import_reference": "带限定名的字段必须引用当前作用域中的表或别名。",
+  "builder.error.import_size": "查询超出导入上限（65,536 个 UTF-16 码元或 4,096 个词元）。",
   "builder.title": "可视化查询",
   "builder.description": "组合表、字段与条件，生成 SQL 后交给编辑器执行。",
   "builder.open_editor": "在 SQL 编辑器中打开",

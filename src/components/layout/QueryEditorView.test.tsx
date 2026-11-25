@@ -3,6 +3,7 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryEditorView } from "./QueryEditorView";
 import { useConnections } from "@/store/connections";
+import { useToasts } from "@/store/toasts";
 import { useI18n } from "@/store/i18n";
 import { useWorkspace } from "@/store/workspace";
 import type { ConnectionConfig, WorkspaceTab } from "@/types";
@@ -72,6 +73,37 @@ describe("QueryEditorView buffer persistence", () => {
     unmount();
 
     expect(localStorage.getItem(`rdb:buf:${tab.id}`)).toBeNull();
+  });
+});
+
+describe("Query editor SELECT import", () => {
+  it("opens an editable design on the same connection and preserves unsupported SQL", () => {
+    localStorage.clear(); sessionStorage.clear(); useToasts.getState().clear();
+    const tab: WorkspaceTab = { id: "query:import", kind: "query", title: "Orders", connectionId: "db" };
+    useWorkspace.setState({ tabs: [tab], activeTabId: tab.id });
+    useConnections.setState({ list: [{ id: "db", name: "Scratch", driver: "sqlite" }], status: { db: "connected" } });
+    useI18n.setState({ lang: "en" });
+    const commands: string[] = [];
+    mockIPC(cmd => { commands.push(cmd); });
+    render(<QueryEditorView tab={tab} />);
+    const editor = screen.getByLabelText("SQL editor");
+    const action = screen.getByRole("button", { name: "Open in query builder" });
+    const unsupported = "SELECT * FROM a UNION SELECT * FROM b";
+    fireEvent.change(editor, { target: { value: unsupported } });
+    fireEvent.click(action);
+    expect(editor).toHaveValue(unsupported);
+    expect(useWorkspace.getState().tabs.map(item => item.id)).toEqual([tab.id]);
+    expect(useToasts.getState().items.at(-1)?.title).toBe("Cannot import this SELECT");
+
+    const sql = "select id from orders where price > 10";
+    fireEvent.change(editor, { target: { value: sql } });
+    fireEvent.click(action);
+    expect(useWorkspace.getState().tabs[1]).toMatchObject({
+      kind: "query-builder", connectionId: "db", builder: { query: { sources: [{ name: "orders" }], limit: "" } },
+    });
+    expect(editor).toHaveValue(sql);
+    expect(commands.filter(cmd => cmd.startsWith("execute"))).toEqual([]);
+    clearMocks();
   });
 });
 
