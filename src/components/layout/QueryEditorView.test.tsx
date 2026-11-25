@@ -88,7 +88,7 @@ describe("Query editor SELECT import", () => {
     render(<QueryEditorView tab={tab} />);
     const editor = screen.getByLabelText("SQL editor");
     const action = screen.getByRole("button", { name: "Open in query builder" });
-    const unsupported = "SELECT * FROM a UNION SELECT * FROM b";
+    const unsupported = "SELECT * FROM a EXCEPT SELECT * FROM b";
     fireEvent.change(editor, { target: { value: unsupported } });
     fireEvent.click(action);
     expect(editor).toHaveValue(unsupported);

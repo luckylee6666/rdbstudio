@@ -86,7 +86,7 @@ pub fn quote_ident(driver: DriverKind, ident: &str) -> String {
     }
 }
 
-fn qualified(driver: DriverKind, schema: Option<&str>, table: &str) -> String {
+pub(crate) fn qualified(driver: DriverKind, schema: Option<&str>, table: &str) -> String {
     match schema {
         Some(s) if !s.is_empty() => format!(
             "{}.{}",

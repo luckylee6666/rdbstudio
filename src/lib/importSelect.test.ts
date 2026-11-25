@@ -44,7 +44,7 @@ describe("SELECT import", () => {
   });
 
   it.each([
-    "SELECT 0x20 FROM t", "SELECT k ISNULL FROM t", "UPDATE t SET n=1", "SELECT * FROM t; SELECT * FROM u", "SELECT * FROM t UNION SELECT * FROM u",
+    "SELECT 0x20 FROM t", "SELECT k ISNULL FROM t", "UPDATE t SET n=1", "SELECT * FROM t; SELECT * FROM u", "SELECT * FROM t INTERSECT SELECT * FROM u",
     "WITH u AS (SELECT * FROM t) SELECT * FROM u", "SELECT * FROM (SELECT * FROM t) AS u",
     "SELECT * FROM t WHERE k IN (SELECT k FROM u)", "SELECT * FROM t WHERE n = 1 /* condition */",
     "SELECT * FROM t WHERE id = ?", "SELECT * FROM a JOIN b USING(id)", "SELECT * FROM a JOIN b ON c.id=b.id CROSS JOIN c",
@@ -70,6 +70,37 @@ describe("SELECT import", () => {
     "SELECT :x::integer FROM t", "SELECT :x, $1 FROM t", "SELECT :x, @other FROM t",
     "SELECT * FROM t LIMIT :", "SELECT :x$extra FROM t"])("rejects unsupported marker usage in %s", sql => {
     expect(() => importSelect(sql, "postgres")).toThrow();
+  });
+
+  it.each(["sqlite", "postgres", "mysql"] as const)("imports mixed UNION branches and a single result tail in %s", driver => {
+    const sql = "SELECT a.id AS k FROM current_rows a WHERE a.id >= :min UNION ALL SELECT a.id FROM archive a UNION SELECT 42 ORDER BY k DESC, 1 LIMIT :size OFFSET 2";
+    const model = importSelect(sql, driver);
+    expect(model.unions?.map(a => a.operator)).toEqual(["UNION ALL", "UNION"]);
+    expect(model.unions?.[0].select.sources[0].id).not.toBe(model.sources[0].id);
+    expect(model.unions?.[1].select.sources).toEqual([]);
+    expect(model.orderBy).toHaveLength(2);
+    const generated = compileQuery(model, driver);
+    expect(generated).toContain("UNION\nSELECT\n  42\nORDER BY k DESC, 1 ASC\nLIMIT :size\nOFFSET 2;");
+    expect(convert(generated, driver)).toBe(generated);
+    expect(convert("SELECT 'UNION ALL' AS phrase UNION SELECT 'x'", driver)).toContain("'UNION ALL'");
+  });
+
+  it.each([
+    "SELECT id FROM t ORDER BY id UNION SELECT id FROM u",
+    "SELECT id FROM t OFFSET 0 UNION SELECT id FROM u",
+    "SELECT 1 LIMIT 1 UNION SELECT 1",
+    "SELECT 1 UNION (SELECT 2 LIMIT 1)", "SELECT 1 UNION", "SELECT 1 UNION ALL ALL SELECT 2",
+    "SELECT 1, 2 UNION SELECT 1", "SELECT 1 UNION SELECT 1 ORDER BY 2",
+    "SELECT 1 UNION SELECT 2 ORDER BY :sort", "SELECT id FROM t UNION SELECT id FROM u ORDER BY u.id",
+    "SELECT 1 UNION SELECT * FROM (SELECT 2)",
+  ])("rejects an unsupported compound scope or shape: %s", sql => {
+    expect(() => convert(sql)).toThrow();
+  });
+
+  it("enforces budgets across the whole compound query", () => {
+    expect(() => convert(Array(33).fill("SELECT 1").join(" UNION ALL "))).toThrow("union_limit");
+    const arm = (start: number) => "SELECT " + Array.from({ length: 65 }, (_, i) => `:p${i + start}`).join(",");
+    expect(() => convert(arm(0) + " UNION ALL " + arm(65))).toThrow("parameter_limit");
   });
 
   it("bounds input and refuses mode-dependent strings", () => {

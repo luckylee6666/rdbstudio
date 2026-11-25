@@ -575,7 +575,7 @@ export function QueryEditorView({ tab }: { tab: WorkspaceTab }) {
       const query = importSelect(editorSource(), targetCfg.driver);
       useWorkspace.getState().openTab({
         id: `builder:${crypto.randomUUID()}`, kind: "query-builder", title: "Query builder", connectionId: targetId,
-        builder: { version: 1, connectionId: targetId, catalogSchema: query.sources[0].schema ?? "", query },
+        builder: { version: 1, connectionId: targetId, catalogSchema: query.sources[0]?.schema ?? "", query },
       });
     } catch (error) {
       const code = error instanceof QueryBuilderError ? error.code : "import_syntax";

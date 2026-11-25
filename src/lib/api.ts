@@ -130,6 +130,8 @@ export const api = {
     invoke<string[]>("list_schemas", { id, database: database ?? null }),
   listTables: (id: string, schema?: string) =>
     invoke<TreeEntry[]>("list_tables", { id, schema: schema ?? null }),
+  queryBuilderStarWidth: (id: string, table: string, schema?: string) =>
+    invoke<number | null>("query_builder_star_width", { id, table, schema: schema ?? null }),
   listColumns: (id: string, table: string, schema?: string) =>
     invoke<ColumnInfo[]>("list_columns", { id, table, schema: schema ?? null }),
   scanRedisKeys: (id: string, cursor: number, limit?: number) =>

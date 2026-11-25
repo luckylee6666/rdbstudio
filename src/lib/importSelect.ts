@@ -1,7 +1,7 @@
 import {
-  compileQuery, emptyGroup, emptyQuery, QueryBuilderError,
+  compileQuery, MAX_SELECT_ARMS, emptyGroup, emptyQuery, QueryBuilderError,
   type ColumnExpression, type ComparisonOperator, type Condition, type ConditionGroup,
-  type Expression, type QueryDesign, type QuerySource, type SqlDriver,
+  type Expression, type QueryDesign, type QuerySource, type SqlDriver, type UnionOperator, type UnionArm,
 } from "./queryBuilder";
 
 const uuid = () => crypto.randomUUID();
@@ -50,6 +50,38 @@ function tokenize(sql: string, driver: SqlDriver): string[] {
 
 export function importSelect(sql: string, driver: SqlDriver): QueryDesign {
   const tokens = tokenize(sql, driver);
+  const parts: { operator: UnionOperator; tokens: string[] }[] = [];
+  let start = 0, depth = 0;
+  let operator: UnionOperator = "UNION";
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "(") depth++;
+    if (tokens[i] === ")") depth--;
+    if (depth || tokens[i].toUpperCase() !== "UNION") continue;
+    parts.push({ operator, tokens: tokens.slice(start, i) });
+    if (parts.length >= MAX_SELECT_ARMS) throw new QueryBuilderError("union_limit");
+    const all = tokens[i + 1]?.toUpperCase() === "ALL";
+    if (all) i++;
+    else if (driver !== "sqlite" && tokens[i + 1]?.toUpperCase() === "DISTINCT") i++;
+    operator = all ? "UNION ALL" : "UNION";
+    start = i + 1;
+  }
+  parts.push({ operator, tokens: tokens.slice(start) });
+  const parsed = parts.map((part, index) => parseSelect(part.tokens, driver, index === parts.length - 1));
+  const head = parsed[0];
+  if (parts.length > 1) {
+    const tail = parsed[parsed.length - 1];
+    head.orderBy = tail.orderBy; head.limit = tail.limit; head.offset = tail.offset;
+    head.unions = parsed.slice(1).map((arm, i): UnionArm => {
+      const { orderBy, limit, offset, ...select } = arm;
+      return { id: uuid(), operator: parts[i + 1].operator, select };
+    });
+  }
+  compileQuery(head, driver);
+  return head;
+}
+
+function parseSelect(tokens: string[], driver: SqlDriver, allowTail: boolean): QueryDesign {
+  if (tokens[0]?.toUpperCase() !== "SELECT") reject("syntax");
   let pos = 1;
   const peek = () => tokens[pos]?.toUpperCase() ?? "";
   const take = (word: string) => { if (peek() !== word) return false; pos++; return true; };
@@ -182,15 +214,16 @@ export function importSelect(sql: string, driver: SqlDriver): QueryDesign {
   // Bind qualified projection columns after the sources and JOIN scopes exist.
   const projectionStart = pos;
   const from = tokens.findIndex(t => t.toUpperCase() === "FROM");
-  if (from < pos) reject("source");
-  pos = from + 1;
-  source("INNER");
-  while (["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS"].includes(peek())) {
-    const join = peek() === "JOIN" ? "INNER" : tokens[pos++].toUpperCase() as QuerySource["join"];
-    if (["LEFT", "RIGHT", "FULL"].includes(join)) take("OUTER");
-    need("JOIN");
-    const item = source(join);
-    if (join !== "CROSS") { need("ON"); item.on = group(disjunction()); }
+  if (from !== -1) {
+    pos = from + 1;
+    source("INNER");
+    while (["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS"].includes(peek())) {
+      const join = peek() === "JOIN" ? "INNER" : tokens[pos++].toUpperCase() as QuerySource["join"];
+      if (["LEFT", "RIGHT", "FULL"].includes(join)) take("OUTER");
+      need("JOIN");
+      const item = source(join);
+      if (join !== "CROSS") { need("ON"); item.on = group(disjunction()); }
+    }
   }
   const afterSources = pos;
   pos = projectionStart;
@@ -201,11 +234,14 @@ export function importSelect(sql: string, driver: SqlDriver): QueryDesign {
     const alias = take("AS") || isName(tokens[pos]) ? name() : "";
     return { id: uuid(), expression: value, alias };
   });
-  if (pos !== from) reject("syntax");
-  pos = afterSources;
+  if (from !== -1) {
+    if (pos !== from) reject("syntax");
+    pos = afterSources;
+  }
   if (take("WHERE")) query.where = group(disjunction());
   if (take("GROUP")) { need("BY"); query.groupBy = list(() => ({ id: uuid(), expression: expression() })); }
   if (take("HAVING")) query.having = group(disjunction());
+  if (!allowTail && pos !== tokens.length) reject("syntax");
   if (take("ORDER")) {
     need("BY");
     query.orderBy = list(() => {
@@ -223,6 +259,5 @@ export function importSelect(sql: string, driver: SqlDriver): QueryDesign {
   if (take("LIMIT")) query.limit = pageValue();
   if (take("OFFSET")) query.offset = pageValue();
   if (pos !== tokens.length) reject("syntax");
-  compileQuery(query, driver);
   return query;
 }

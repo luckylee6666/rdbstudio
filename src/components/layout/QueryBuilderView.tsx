@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Plus, RefreshCw, Workflow } from "lucide-react";
 import { api } from "@/lib/api";
-import { compileQuery, emptyGroup, emptyQuery, QueryBuilderError, type BuilderDraft, type QueryDesign, type QuerySource } from "@/lib/queryBuilder";
+import { compileQuery, emptyGroup, emptyQuery, emptySelect, isUnionSortKey, MAX_SELECT_ARMS, QueryBuilderError, type BuilderDraft, type Expression, type SelectCore, type UnionOperator, type QuerySource } from "@/lib/queryBuilder";
 import { useConnections } from "@/store/connections";
 import { nextQueryTitle, useWorkspace } from "@/store/workspace";
 import { useT } from "@/store/i18n";
@@ -11,6 +11,9 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { SchemaPicker, ToolCard, ToolSelect } from "@/components/tools/ToolKit";
 import { builderInput, defaultColumn, ExpressionEditor, type ExpressionContext } from "@/components/query-builder/ExpressionEditor";
 import { ConditionEditor, RemoveButton, smallButton } from "@/components/query-builder/ConditionEditor";
+
+import { useUnionWidths } from "@/components/query-builder/useUnionWidths";
+import { UnionOrderEditor } from "@/components/query-builder/UnionEditor";
 
 export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
   const t = useT();
@@ -26,7 +29,12 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
   const connectionGeneration = useRef(0);
   const connection = connections.find(c => c.id === draft.connectionId && c.driver !== "redis");
   const connected = !!connection && statuses[connection.id] === "connected";
-  const query = draft.query;
+  const design = draft.query;
+  const arms = design.unions ?? [];
+  const [selectedArm, setSelectedArm] = useState(0);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const arm = arms[selectedArm - 1];
+  const query: SelectCore = arm?.select ?? design;
   const catalogKey = JSON.stringify([draft.connectionId, draft.catalogSchema, connected, revision]);
   const [catalog, setCatalog] = useState<{ key: string; entries: TreeEntry[]; error: string; loading: boolean }>({ key: "", entries: [], error: "", loading: false });
   const sourceKey = JSON.stringify(query.sources.map(({ id, name, schema }) => ({ id, name, schema })));
@@ -38,11 +46,24 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
     setDraft(next);
     useWorkspace.setState(state => ({ tabs: state.tabs.map(item => item.id === tab.id ? { ...item, builder: next, connectionId: next.connectionId || undefined } : item) }));
   };
-  const changeQuery = (next: QueryDesign) => change({ ...draft, query: next });
+  const changeQuery = (next: SelectCore) => change({ ...draft, query: arm
+    ? { ...design, unions: arms.map(item => item.id === arm.id ? { ...item, select: next } : item) }
+    : { ...design, ...next } });
+  const addArm = () => {
+    change({ ...draft, query: { ...design, unions: [...arms, { id: crypto.randomUUID(), operator: "UNION ALL", select: emptySelect() }] } });
+    setSelectedArm(arms.length + 1);
+  };
+  const removeArm = () => {
+    if (!arms.length) return;
+    const remaining = arms.filter((_, i) => i !== Math.max(0, selectedArm - 1));
+    change({ ...draft, query: { ...design, ...(selectedArm === 0 ? arms[0].select : {}), unions: remaining } });
+    setSelectedArm(Math.max(0, selectedArm - 1));
+  };
   const selectConnection = (connectionId: string) => {
     connectionGeneration.current += 1;
     setConnectError("");
     columnCache.current.clear();
+    setSelectedArm(0);
     change({ version: 1, connectionId, catalogSchema: "", query: emptyQuery() });
   };
   useEffect(() => () => { connectionGeneration.current += 1; }, []);
@@ -83,11 +104,12 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
   }, [metadataKey]);
 
   const context: ExpressionContext = { sources: query.sources, columns: metadata.key === metadataKey ? metadata.columns : {} };
+  const { widths, pending, unknown } = useUnionWidths(design, draft.connectionId, connected, revision);
   const compiled = useMemo(() => {
     if (!connection || connection.driver === "redis") return { sql: "", error: new QueryBuilderError("connection") };
-    try { return { sql: compileQuery(query, connection.driver), error: null }; }
+    try { return { sql: compileQuery(design, connection.driver, widths), error: null }; }
     catch (error) { return { sql: "", error: error instanceof QueryBuilderError ? error : new QueryBuilderError("expression") }; }
-  }, [query, connection]);
+  }, [design, connection, widths]);
   const addTable = (entry: TreeEntry) => {
     let n = query.sources.length + 1;
     while (query.sources.some(source => source.alias.toLowerCase() === `t${n}`)) n += 1;
@@ -95,8 +117,8 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
     changeQuery({ ...query, sources: [...query.sources, { id: crypto.randomUUID(), name: entry.name, schema, alias: `t${n}`, join: "INNER", on: emptyGroup() }] });
   };
   const openEditor = () => {
-    if (!compiled.sql) return;
-    const pageParameters = new Set([query.limit, query.offset].filter(value => value.startsWith(":")));
+    if (!compiled.sql || pending) return;
+    const pageParameters = new Set([design.limit, design.offset].filter(value => value.startsWith(":")));
     useWorkspace.getState().openTab({
       id: `query:${crypto.randomUUID()}`, kind: "query", title: nextQueryTitle(),
       connectionId: draft.connectionId, sql: compiled.sql,
@@ -109,14 +131,29 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
     <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border/70 bg-surface/40 px-4 py-3">
       <Workflow className="h-5 w-5 shrink-0 text-brand" />
       <div className="min-w-0 flex-1"><h2 className="text-sm font-semibold">{t("builder.title")}</h2><p className="text-xs text-muted-foreground">{t("builder.description")}</p></div>
-      <Button variant="primary" disabled={!compiled.sql} onClick={openEditor}><ArrowUpRight className="h-3.5 w-3.5" />{t("builder.open_editor")}</Button>
+      <Button variant="primary" disabled={!compiled.sql || pending} onClick={openEditor}><ArrowUpRight className="h-3.5 w-3.5" />{t("builder.open_editor")}</Button>
     </header>
     <div className="min-h-0 flex-1 overflow-auto p-4">
       <div className="mx-auto max-w-6xl space-y-4">
+        <div className="flex flex-wrap items-center gap-2">
+          {arms.length > 0 && <>
+            <ToolSelect aria-label={t("builder.select_arm")} value={selectedArm} onChange={e => setSelectedArm(Number(e.target.value))}>
+              {Array.from({ length: arms.length + 1 }, (_, i) => <option key={i} value={i}>SELECT {i + 1}</option>)}
+            </ToolSelect>
+            {arm && <ToolSelect aria-label={t("builder.union_operator")} value={arm.operator} onChange={e => change({ ...draft, query: {
+              ...design, unions: arms.map(item => item.id === arm.id ? { ...item, operator: e.target.value as UnionOperator } : item),
+            } })}><option>UNION</option><option>UNION ALL</option></ToolSelect>}
+            <button className={smallButton} onClick={() => setConfirmRemove(true)}>{t("builder.remove_arm")}</button>
+          </>}
+          <Button disabled={arms.length + 1 >= MAX_SELECT_ARMS || design.orderBy.some(item => !isUnionSortKey(item.expression))} onClick={addArm}>
+            <Plus className="h-3.5 w-3.5" />{t("builder.add_arm")}
+          </Button>
+          {!arms.length && design.orderBy.some(item => !isUnionSortKey(item.expression)) && <span className="text-xs text-muted-foreground">{t("builder.error.union_order")}</span>}
+        </div>
         <ToolCard title={t("builder.sources")}>
           <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] items-start gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground" htmlFor={`${tab.id}-connection`}>{t("builder.connection")}</label>
-              <ToolSelect id={`${tab.id}-connection`} value={draft.connectionId} onChange={e => query.sources.length ? setPendingConnection(e.target.value) : selectConnection(e.target.value)}>
+              <ToolSelect id={`${tab.id}-connection`} value={draft.connectionId} onChange={e => arms.length || design.sources.length || design.columns.length ? setPendingConnection(e.target.value) : selectConnection(e.target.value)}>
                 <option value="">{t("builder.choose_connection")}</option>
                 {!connection && draft.connectionId && <option value={draft.connectionId}>{t("builder.missing_connection")}</option>}
                 {connections.filter(c => c.driver !== "redis").map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -152,7 +189,6 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
           {query.sources.length > 0 && <p className="mt-2 text-xs text-muted-foreground">{t("builder.remove_hint")}</p>}
         </ToolCard>
 
-        {query.sources.length > 0 && <>
           <ToolCard title={t("builder.columns")} aside={<label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={query.distinct} onChange={e => changeQuery({ ...query, distinct: e.target.checked })} />DISTINCT</label>}>
             {!query.columns.length && <p className="mb-2 text-xs text-muted-foreground">{t("builder.all_columns")}</p>}
             <div className="space-y-2">{query.columns.map((column, index) => <div key={column.id} className="flex flex-wrap items-center gap-2">
@@ -163,28 +199,52 @@ export function QueryBuilderView({ tab }: { tab: WorkspaceTab }) {
             <button className={`${smallButton} mt-2`} onClick={() => changeQuery({ ...query, columns: [...query.columns, { id: crypto.randomUUID(), expression: defaultColumn(context), alias: "" }] })}><Plus className="h-3 w-3" />{t("builder.add_column")}</button>
           </ToolCard>
           <ToolCard title="WHERE"><ConditionEditor value={query.where} onChange={where => changeQuery({ ...query, where })} context={context} label="WHERE" /></ToolCard>
-          {(["groupBy", "orderBy"] as const).map(section => <ToolCard key={section} title={t(`builder.${section}`)}>
-            <div className="space-y-2">{query[section].map((item, index) => <div key={item.id} className="flex flex-wrap items-center gap-2">
-              <ExpressionEditor value={item.expression} onChange={expression => changeQuery({ ...query, [section]: query[section].map(c => c.id === item.id ? { ...c, expression } : c) })} context={context} label={`${t(`builder.${section}`)} ${index + 1}`} />
-              {"direction" in item && <ToolSelect aria-label={`${t("builder.direction")} ${index + 1}`} value={item.direction} onChange={e => changeQuery({ ...query, orderBy: query.orderBy.map(c => c.id === item.id ? { ...c, direction: e.target.value as "ASC" | "DESC" } : c) })}><option>ASC</option><option>DESC</option></ToolSelect>}
-              <RemoveButton label={`${t(`builder.${section}`)} · ${t("builder.remove_expression")} ${index + 1}`} onClick={() => changeQuery({ ...query, [section]: query[section].filter(c => c.id !== item.id) })} />
-            </div>)}</div>
-            <button className={`${smallButton} mt-2`} onClick={() => changeQuery({ ...query, [section]: [...query[section], { id: crypto.randomUUID(), expression: defaultColumn(context), ...(section === "orderBy" ? { direction: "ASC" } : {}) }] })}><Plus className="h-3 w-3" />{t("builder.add_expression")}</button>
-          </ToolCard>)}
+          <ExpressionList title={t("builder.groupBy")} items={query.groupBy} context={context}
+            onChange={groupBy => changeQuery({ ...query, groupBy })}
+            newItem={() => ({ id: crypto.randomUUID(), expression: defaultColumn(context) })} />
+          {!arms.length && <ExpressionList title={t("builder.orderBy")} items={design.orderBy} context={context}
+            onChange={orderBy => change({ ...draft, query: { ...design, orderBy } })}
+            newItem={() => ({ id: crypto.randomUUID(), expression: defaultColumn(context), direction: "ASC" as const })}
+            extra={(item, i) => <ToolSelect aria-label={`${t("builder.direction")} ${i + 1}`} value={item.direction}
+              onChange={e => change({ ...draft, query: { ...design, orderBy: design.orderBy.map(c => c.id === item.id
+                ? { ...c, direction: e.target.value === "DESC" ? "DESC" : "ASC" } : c) } })}><option>ASC</option><option>DESC</option></ToolSelect>} />}
           <ToolCard title="HAVING"><ConditionEditor value={query.having} onChange={having => changeQuery({ ...query, having })} context={context} label="HAVING" /></ToolCard>
-        </>}
+        {arms.length > 0 && <UnionOrderEditor order={design.orderBy} onChange={orderBy => change({ ...draft, query: { ...design, orderBy } })} />}
 
         <ToolCard title={t("builder.preview")}>
           <div className="mb-3 flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2 text-xs">LIMIT<input className={`${builderInput} w-24`} value={query.limit} title={t("builder.page_value")} placeholder="∞" onChange={e => changeQuery({ ...query, limit: e.target.value })} /></label>
-            <label className="flex items-center gap-2 text-xs">OFFSET<input className={`${builderInput} w-24`} value={query.offset} title={t("builder.page_value")} onChange={e => changeQuery({ ...query, offset: e.target.value })} /></label>
+            <label className="flex items-center gap-2 text-xs">LIMIT<input className={`${builderInput} w-24`} value={design.limit} title={t("builder.page_value")} placeholder="∞" onChange={e => change({ ...draft, query: { ...design, limit: e.target.value } })} /></label>
+            <label className="flex items-center gap-2 text-xs">OFFSET<input className={`${builderInput} w-24`} value={design.offset} title={t("builder.page_value")} onChange={e => change({ ...draft, query: { ...design, offset: e.target.value } })} /></label>
           </div>
+          {arms.length > 0 && <p className="mb-2 text-xs text-muted-foreground">{t("builder.union_page")}</p>}
+          {pending && <p role="status" className="mb-2 text-xs text-muted-foreground">{t("common.loading")}</p>}
+          {unknown && <p className="mb-2 text-xs text-muted-foreground">{t("builder.star_unknown")}</p>}
           {compiled.error ? <p role="status" className="text-sm text-muted-foreground">{t(`builder.error.${compiled.error.code}`, { detail: compiled.error.detail })}</p>
             : <pre aria-label={t("builder.preview")} className="max-h-96 overflow-auto rounded-lg bg-background p-3 font-mono text-xs leading-6">{compiled.sql}</pre>}
           <p className="mt-2 text-xs text-muted-foreground">{t("builder.preview_hint")}</p>
         </ToolCard>
       </div>
     </div>
+    <ConfirmDialog open={confirmRemove} title={t("builder.remove_arm")} message={t("builder.remove_arm_hint", { n: selectedArm + 1 })}
+      confirmLabel={t("builder.remove_arm")} cancelLabel={t("common.cancel")} onClose={() => setConfirmRemove(false)} onConfirm={removeArm} />
     <ConfirmDialog open={pendingConnection !== null} title={t("builder.change_connection")} message={t("builder.change_connection_hint")} confirmLabel={t("builder.change_connection")} cancelLabel={t("common.cancel")} onClose={() => setPendingConnection(null)} onConfirm={() => { if (pendingConnection !== null) selectConnection(pendingConnection); setPendingConnection(null); }} />
   </div>;
+}
+
+function ExpressionList<T extends { id: string; expression: Expression }>({ title, items, context, onChange, newItem, extra }: {
+  title: string; items: T[]; context: ExpressionContext; onChange: (items: T[]) => void;
+  newItem: () => T; extra?: (item: T, index: number) => ReactNode;
+}) {
+  const t = useT();
+  return <ToolCard title={title}>
+    <div className="space-y-2">{items.map((item, index) => <div key={item.id} className="flex flex-wrap items-center gap-2">
+      <ExpressionEditor value={item.expression} context={context} label={`${title} ${index + 1}`}
+        onChange={expression => onChange(items.map(c => c.id === item.id ? { ...c, expression } : c))} />
+      {extra?.(item, index)}
+      <RemoveButton label={`${title} · ${t("builder.remove_expression")} ${index + 1}`} onClick={() => onChange(items.filter(c => c.id !== item.id))} />
+    </div>)}</div>
+    <button className={`${smallButton} mt-2`} onClick={() => onChange([...items, newItem()])}>
+      <Plus className="h-3 w-3" />{t("builder.add_expression")}
+    </button>
+  </ToolCard>;
 }

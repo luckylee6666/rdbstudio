@@ -92,6 +92,7 @@ fn command_handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> boo
         commands::meta::list_schemas,
         commands::meta::list_tables,
         commands::meta::list_columns,
+        commands::meta::query_builder_star_width,
         commands::maintenance::maintain_table,
         commands::meta::scan_redis_keys,
         commands::schema_objects::list_schema_objects,

@@ -48,6 +48,22 @@ pub async fn list_columns(
 }
 
 #[tauri::command]
+pub async fn query_builder_star_width(
+    state: State<'_, AppState>,
+    id: String,
+    schema: Option<String>,
+    table: String,
+) -> AppResult<Option<usize>> {
+    let pool = require_pool(&state, &id)?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        db::meta::star_width(&pool, schema.as_deref(), &table),
+    )
+    .await
+    .unwrap_or(Ok(None))
+}
+
+#[tauri::command]
 pub async fn scan_redis_keys(
     state: State<'_, AppState>,
     id: String,

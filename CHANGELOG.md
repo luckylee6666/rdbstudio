@@ -6,6 +6,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- 查询构建器支持导入和编辑 UNION、UNION ALL 复合查询，统一设置合并结果的排序与分页。
 - 可视化查询支持导入、编辑和生成命名参数，分页参数交回 SQL 编辑器时自动预选整数类型。
 - 查询编辑器可将选中或整段的单条 SELECT 导入可视化查询构建器，继续编辑连接条件、分组、排序和分页。
 

@@ -1,12 +1,13 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { importSelect } from "@/lib/importSelect";
 import { QueryBuilderView } from "./QueryBuilderView";
 import { useConnections } from "@/store/connections";
 import { useWorkspace } from "@/store/workspace";
 import { useI18n } from "@/store/i18n";
 import type { ColumnInfo, TreeEntry, WorkspaceTab } from "@/types";
 
-const mocks = vi.hoisted(() => ({ listTables: vi.fn(), listColumns: vi.fn(), listDatabases: vi.fn(), closeEditorSession: vi.fn(async () => {}) }));
+const mocks = vi.hoisted(() => ({ queryBuilderStarWidth: vi.fn(), listTables: vi.fn(), listColumns: vi.fn(), listDatabases: vi.fn(), closeEditorSession: vi.fn(async () => {}) }));
 vi.mock("@/lib/api", () => ({ api: mocks }));
 const tab: WorkspaceTab = { id: "builder:test", kind: "query-builder", title: "Query builder", connectionId: "a" };
 function addTable() { fireEvent.change(screen.getByLabelText("Add a table or view…"), { target: { value: "0" } }); }
@@ -16,6 +17,7 @@ beforeEach(() => {
   useI18n.setState({ lang: "en" });
   useConnections.setState({ list: [{ id: "a", name: "First", driver: "sqlite" }, { id: "b", name: "Second", driver: "sqlite" }], status: { a: "connected", b: "connected" } });
   useWorkspace.setState({ tabs: [tab], activeTabId: tab.id });
+  mocks.queryBuilderStarWidth.mockResolvedValue(2);
   mocks.listTables.mockResolvedValue([{ name: "users", kind: "table" }]);
   mocks.listColumns.mockResolvedValue([{ name: "id", data_type: "INTEGER", nullable: false, is_primary_key: true }, { name: "name", data_type: "TEXT", nullable: false, is_primary_key: false }]);
 });
@@ -74,6 +76,39 @@ describe("QueryBuilderView", () => {
     const opened = useWorkspace.getState().tabs.at(-1)!;
     expect(opened.sql).toMatch(/SELECT\s+:label\s+FROM .*\nLIMIT :page_size\nOFFSET :page_size;/);
     expect(opened.queryParameterDefaults).toEqual([{ name: "page_size", kind: "integer" }]);
+  });
+
+  it("edits UNION branches independently and preserves the result tail through restore and removal", async () => {
+    const query = importSelect("SELECT 1 AS k UNION ALL SELECT 2 AS k ORDER BY k LIMIT :size", "sqlite");
+    const seeded: WorkspaceTab = { ...tab, builder: {version: 1, connectionId: "a", catalogSchema: "", query} };
+    useWorkspace.setState({ tabs: [seeded], activeTabId: tab.id });
+    const view = render(<QueryBuilderView tab={seeded} />); await ready();
+    fireEvent.change(screen.getByLabelText("Edit SELECT branch"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText("Combine with previous SELECT"), { target: { value: "UNION" } });
+    fireEvent.change(screen.getByLabelText("Sort direction 1"), { target: { value: "DESC" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add UNION branch" }));
+    expect(screen.getByRole("button", { name: "Open in SQL editor" })).toBeDisabled();
+    addTable();
+    await screen.findByText("The SELECT branches must return the same number of columns.");
+    expect(screen.getByRole("button", { name: "Open in SQL editor" })).toBeDisabled();
+    await waitFor(() => expect(mocks.listColumns).toHaveBeenCalledWith("a", "users", undefined));
+    fireEvent.click(screen.getByRole("button", { name: "Add output column" }));
+    const saved = JSON.parse(localStorage.getItem("rdb:workspace")!).state.tabs[0];
+    expect(saved.builder.query.unions.map((item: {operator: string}) => item.operator)).toEqual(["UNION", "UNION ALL"]);
+    view.unmount(); render(<QueryBuilderView tab={saved} />); await ready();
+    const remove = screen.getByRole("button", { name: "Remove branch" });
+    fireEvent.click(remove); fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByLabelText("SQL preview")).toHaveTextContent("1 AS");
+    fireEvent.click(remove);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove branch" }));
+    const preview = screen.getByLabelText("SQL preview").textContent!;
+    expect(preview).toContain('SELECT\n  2 AS "k"\nUNION ALL\nSELECT\n  "t1"."id"');
+    expect(preview).not.toContain("1 AS");
+    expect(preview).toContain("ORDER BY k DESC\nLIMIT :size;");
+    fireEvent.click(screen.getByRole("button", { name: "Open in SQL editor" }));
+    expect(useWorkspace.getState().tabs.at(-1)).toMatchObject({
+      sql: preview, queryParameterDefaults: [{ name: "size", kind: "integer" }],
+    });
   });
 
   it("requires confirmation before resetting a nonempty design on connection change", async () => {

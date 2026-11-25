@@ -55,3 +55,40 @@ async fn server_version_starts_with_sqlite() {
     let v = meta::server_version(&pool).await.expect("server_version");
     assert!(v.starts_with("SQLite"), "unexpected version string: {}", v);
 }
+
+#[tokio::test]
+async fn star_width_counts_generated_columns_and_uses_the_requested_schema() {
+    use rdbstudio_lib::db::pool::DbPool;
+    let pool = common::mem_pool().await;
+    let DbPool::Sqlite(sqlite) = &pool else {
+        unreachable!()
+    };
+    sqlx::raw_sql(
+        "CREATE TABLE cells(x INTEGER, doubled INTEGER AS (x*2));
+         CREATE TEMP TABLE cells(x INTEGER);
+         CREATE VIEW measured AS SELECT x, doubled FROM main.cells;",
+    )
+    .execute(sqlite)
+    .await
+    .unwrap();
+    assert_eq!(
+        meta::star_width(&pool, Some("main"), "cells")
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        meta::star_width(&pool, None, "cells").await.unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        meta::star_width(&pool, Some("main"), "measured")
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        meta::star_width(&pool, None, "missing").await.unwrap(),
+        None
+    );
+}

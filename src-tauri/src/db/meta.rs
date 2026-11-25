@@ -276,3 +276,53 @@ pub async fn list_columns(
         }
     }
 }
+
+/// Number of columns exposed by an unqualified star on this table or view.
+/// Read catalog metadata only. A missing object has no known width.
+pub async fn star_width(
+    pool: &DbPool,
+    schema: Option<&str>,
+    table: &str,
+) -> AppResult<Option<usize>> {
+    let width = match pool {
+        DbPool::Sqlite(p) => {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pragma_table_xinfo(?, ?) WHERE hidden != 1",
+            )
+            .bind(table)
+            .bind(schema)
+            .fetch_one(p)
+            .await?;
+            count as usize
+        }
+        DbPool::Postgres(p) => {
+            let name = super::data::qualified(pool.driver(), schema, table);
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_catalog.pg_attribute WHERE attrelid = pg_catalog.to_regclass($1) AND attnum > 0 AND NOT attisdropped",
+            )
+            .bind(name).fetch_one(p).await?;
+            count as usize
+        }
+        DbPool::Mysql(p) => {
+            let name = super::data::qualified(pool.driver(), schema, table);
+            let rows = sqlx::query(&format!("SHOW COLUMNS FROM {name}"))
+                .fetch_all(p)
+                .await?;
+            let mut count = 0;
+            for row in &rows {
+                let Some(extra) = mysql_show_str(row, "Extra", 5) else {
+                    return Ok(None);
+                };
+                if !extra
+                    .split_ascii_whitespace()
+                    .any(|word| word.eq_ignore_ascii_case("INVISIBLE"))
+                {
+                    count += 1;
+                }
+            }
+            count
+        }
+        DbPool::Redis(_) => return Ok(None),
+    };
+    Ok((width > 0).then_some(width))
+}

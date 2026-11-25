@@ -16,13 +16,19 @@ export interface QuerySource {
   join: "INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS";
   on: ConditionGroup;
 }
-export interface QueryDesign {
+export interface SelectCore {
   sources: QuerySource[];
   columns: Array<{ id: string; expression: Expression; alias: string }>;
   distinct: boolean;
   where: ConditionGroup;
   groupBy: Array<{ id: string; expression: Expression }>;
   having: ConditionGroup;
+}
+export type UnionOperator = "UNION" | "UNION ALL";
+export interface UnionArm { id: string; operator: UnionOperator; select: SelectCore }
+export const MAX_SELECT_ARMS = 32;
+export interface QueryDesign extends SelectCore {
+  unions?: UnionArm[];
   orderBy: Array<{ id: string; expression: Expression; direction: "ASC" | "DESC" }>;
   limit: string;
   offset: string;
@@ -32,8 +38,11 @@ export interface BuilderDraft { version: 1; connectionId: string; catalogSchema:
 export function emptyGroup(): ConditionGroup {
   return { id: crypto.randomUUID(), kind: "group", logic: "AND", not: false, children: [] };
 }
+export function emptySelect(): SelectCore {
+  return { sources: [], columns: [], distinct: false, where: emptyGroup(), groupBy: [], having: emptyGroup() };
+}
 export function emptyQuery(): QueryDesign {
-  return { sources: [], columns: [], distinct: false, where: emptyGroup(), groupBy: [], having: emptyGroup(), orderBy: [], limit: "100", offset: "0" };
+  return { ...emptySelect(), orderBy: [], limit: "100", offset: "0" };
 }
 
 export class QueryBuilderError extends Error {
@@ -71,10 +80,8 @@ function literal(expression: Extract<Expression, { kind: "literal" }>, driver: S
   return driver === "postgres" ? `E'${escaped.replaceAll("\\", "\\\\")}'` : `'${escaped}'`;
 }
 
-/** Compiles only; execution and authorization stay in the existing SQL editor. */
-export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
-  if (!["sqlite", "postgres", "mysql"].includes(driver)) fail("driver");
-  if (!query.sources.length) fail("source");
+function compileSelect(query: SelectCore, driver: SqlDriver, parameter: (name: string) => string) {
+  if (!query.sources.length && !query.columns.length) fail("source");
   const quote = (name: string) => quoteBuilderIdentifier(name, driver);
   const sources = new Map<string, QuerySource>();
   const aliases = new Set<string>();
@@ -85,15 +92,6 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
     quote(source.alias);
     aliases.add(alias);
     sources.set(source.id, source);
-  }
-  const parameterNames = new Set<string>();
-  let parameterReferences = 0;
-  function parameter(name: string): string {
-    if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z_0-9]{0,127}$/.test(name)) fail("parameter_name");
-    parameterNames.add(name);
-    parameterReferences++;
-    if (parameterNames.size > 128 || parameterReferences > 1024) fail("parameter_limit");
-    return `:${name}`;
   }
   function expression(value: Expression, allowed = sources): string {
     switch (value.kind) {
@@ -150,8 +148,13 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
   const projection = query.columns.length
     ? query.columns.map(column => `${expression(column.expression)}${column.alias ? ` AS ${quote(column.alias)}` : ""}`).join(",\n  ")
     : "*";
-  const lines = [`SELECT${query.distinct ? " DISTINCT" : ""}\n  ${projection}`, `FROM ${table(query.sources[0])}`];
-  const visible = new Map<string, QuerySource>([[query.sources[0].id, query.sources[0]]]);
+  const lines = [`SELECT${query.distinct ? " DISTINCT" : ""}\n  ${projection}`];
+  const visible = new Map<string, QuerySource>();
+  if (query.sources.length) {
+    const first = query.sources[0];
+    lines.push(`FROM ${table(first)}`);
+    visible.set(first.id, first);
+  }
   for (const source of query.sources.slice(1)) {
     if (!["INNER", "LEFT", "RIGHT", "FULL", "CROSS"].includes(source.join)) fail("join");
     if (driver === "mysql" && source.join === "FULL") fail("full_join");
@@ -161,7 +164,57 @@ export function compileQuery(query: QueryDesign, driver: SqlDriver): string {
   if (query.where.children.length) lines.push(`WHERE ${condition(query.where)}`);
   if (query.groupBy.length) lines.push(`GROUP BY ${query.groupBy.map(item => expression(item.expression)).join(", ")}`);
   if (query.having.children.length) lines.push(`HAVING ${condition(query.having)}`);
+  return { lines, expression };
+}
+
+export function isUnionSortKey(value: Expression): boolean {
+  return (value.kind === "column" && value.tableId === null) ||
+    (value.kind === "literal" && value.type === "number" && /^[1-9][0-9]*$/.test(value.value) && Number.isSafeInteger(Number(value.value)));
+}
+
+export const sourceWidthKey = (source: Pick<QuerySource, "schema" | "name">) =>
+  JSON.stringify([source.schema ?? null, source.name]);
+
+function projectionWidth(select: SelectCore, widths: ReadonlyMap<string, number>): number {
+  if (select.columns.length) return select.columns.length;
+  let total = 0;
+  for (const source of select.sources) {
+    const width = widths.get(sourceWidthKey(source));
+    if (!width) return 0;
+    total += width;
+  }
+  return total;
+}
+
+/** Compiles the complete statement; each SELECT owns its aliases, while the
+ * result ordering, pagination and parameter budget belong to the statement. */
+export function compileQuery(query: QueryDesign, driver: SqlDriver, widths: ReadonlyMap<string, number> = new Map()): string {
+  if (!["sqlite", "postgres", "mysql"].includes(driver)) fail("driver");
+  const parameterNames = new Set<string>();
+  let parameterReferences = 0;
+  function parameter(name: string): string {
+    if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z_0-9]{0,127}$/.test(name)) fail("parameter_name");
+    parameterNames.add(name);
+    parameterReferences++;
+    if (parameterNames.size > 128 || parameterReferences > 1024) fail("parameter_limit");
+    return `:${name}`;
+  }
+  const arms = query.unions ?? [];
+  if (arms.length >= MAX_SELECT_ARMS) fail("union_limit");
+  const { lines, expression } = compileSelect(query, driver, parameter);
+  let width = projectionWidth(query, widths);
+  for (const arm of arms) {
+    if (arm.operator !== "UNION" && arm.operator !== "UNION ALL") fail("union_operator");
+    const count = projectionWidth(arm.select, widths);
+    if (count && width && count !== width) fail("union_width");
+    if (count) width = count;
+    lines.push(arm.operator, compileSelect(arm.select, driver, parameter).lines.join("\n"));
+  }
   if (query.orderBy.length) lines.push(`ORDER BY ${query.orderBy.map(item => {
+    if (arms.length) {
+      if (!isUnionSortKey(item.expression)) fail("union_order");
+      if (width && item.expression.kind === "literal" && Number(item.expression.value) > width) fail("union_order");
+    }
     if (item.direction !== "ASC" && item.direction !== "DESC") fail("order");
     return `${expression(item.expression)} ${item.direction}`;
   }).join(", ")}`);
