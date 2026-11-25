@@ -182,6 +182,28 @@ fn project(dialect: &str, sources: Vec<Source>) -> AppResult<Preview> {
     }
     let mut tables = Vec::new();
     let mut by_source = HashMap::new();
+    // SQLite PRAGMAs retain the spelling used in REFERENCES. Only ASCII case
+    // is insignificant for SQLite identifiers; keep catalog names in the model.
+    let table_key = |table: &SourceTable| {
+        let mut key = table.clone();
+        if dialect == "sqlite" {
+            key.name.make_ascii_lowercase();
+        }
+        key
+    };
+    let column_id = |columns: &[Column], name: &str| {
+        columns
+            .iter()
+            .find(|c| {
+                if dialect == "sqlite" {
+                    c.name.eq_ignore_ascii_case(name)
+                } else {
+                    c.name == name
+                }
+            })
+            .map(|c| c.id.clone())
+            .ok_or_else(|| fail("changed"))
+    };
     for source in &sources {
         let mut primary: Vec<_> = source.fields.iter().filter(|c| c.pk > 0).collect();
         primary.sort_by_key(|c| c.pk);
@@ -202,13 +224,6 @@ fn project(dialect: &str, sources: Vec<Source>) -> AppResult<Preview> {
                 comment: c.comment.clone(),
             })
             .collect();
-        let column_id = |name: &str| {
-            columns
-                .iter()
-                .find(|c| c.name == name)
-                .map(|c| c.id.clone())
-                .ok_or_else(|| fail("changed"))
-        };
         let keys = source
             .keys
             .iter()
@@ -219,16 +234,16 @@ fn project(dialect: &str, sources: Vec<Source>) -> AppResult<Preview> {
                     columns: k
                         .columns
                         .iter()
-                        .map(|c| column_id(c))
+                        .map(|c| column_id(&columns, c))
                         .collect::<AppResult<_>>()?,
                 })
             })
             .collect::<AppResult<Vec<_>>>()?;
         let pk = primary
             .iter()
-            .map(|c| column_id(&c.name))
+            .map(|c| column_id(&columns, &c.name))
             .collect::<AppResult<Vec<_>>>()?;
-        by_source.insert(source.table.clone(), tables.len());
+        by_source.insert(table_key(&source.table), tables.len());
         tables.push(Table {
             id: id(),
             name: source.table.name.clone(),
@@ -264,7 +279,7 @@ fn project(dialect: &str, sources: Vec<Source>) -> AppResult<Preview> {
     for (i, source) in sources.iter().enumerate() {
         for fk in &source.foreign {
             let object = format!("{}.{}", label(&source.table), fk.name);
-            let Some(&parent_index) = by_source.get(&fk.target) else {
+            let Some(&parent_index) = by_source.get(&table_key(&fk.target)) else {
                 notice(&mut warnings, "external_fk", object);
                 continue;
             };
@@ -273,14 +288,7 @@ fn project(dialect: &str, sources: Vec<Source>) -> AppResult<Preview> {
             let from = fk
                 .columns
                 .iter()
-                .map(|name| {
-                    child
-                        .columns
-                        .iter()
-                        .find(|c| c.name == *name)
-                        .map(|c| c.id.clone())
-                        .ok_or_else(|| fail("changed"))
-                })
+                .map(|name| column_id(&child.columns, name))
                 .collect::<AppResult<Vec<_>>>()?;
             let target_names = if fk.targets.iter().all(String::is_empty) {
                 sources[parent_index]
@@ -300,14 +308,7 @@ fn project(dialect: &str, sources: Vec<Source>) -> AppResult<Preview> {
             target_names.sort_by_key(|v| v.0);
             let to = target_names
                 .iter()
-                .map(|(_, name)| {
-                    parent
-                        .columns
-                        .iter()
-                        .find(|c| c.name == *name)
-                        .map(|c| c.id.clone())
-                        .ok_or_else(|| fail("changed"))
-                })
+                .map(|(_, name)| column_id(&parent.columns, name))
                 .collect::<AppResult<Vec<_>>>()?;
             if from.is_empty() || from.len() != to.len() || from.len() > 16 {
                 return Err(fail("reference"));
@@ -846,6 +847,52 @@ mod tests {
         .await
         .is_ok());
         p.close().await;
+    }
+    #[tokio::test]
+    async fn sqlite_resolves_foreign_keys_with_ascii_case_differences() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE Parent(First TEXT, Second TEXT, PRIMARY KEY(Second, First));
+             CREATE TABLE Child(A TEXT, B TEXT, FOREIGN KEY(a,b) REFERENCES pArEnT(sECOND,fIRST));
+             CREATE TABLE Ä(ID INTEGER PRIMARY KEY);
+             CREATE TABLE ä(ID INTEGER PRIMARY KEY);
+             CREATE TABLE ExternalRef(k INTEGER REFERENCES ä(id));",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let preview = inspect(
+            &DbPool::Sqlite(pool),
+            &selected("main", &["Child", "Parent", "Ä", "ExternalRef"]),
+        )
+        .await
+        .unwrap();
+        let child = &preview.model.tables[0];
+        let parent = &preview.model.tables[1];
+        assert_eq!(preview.model.relations.len(), 1);
+        let fk = &preview.model.relations[0];
+        assert_eq!((&fk.from_table, &fk.to_table), (&child.id, &parent.id));
+        assert_eq!(
+            fk.from_columns,
+            [child.columns[0].id.clone(), child.columns[1].id.clone()]
+        );
+        assert_eq!(
+            fk.to_columns,
+            [parent.columns[1].id.clone(), parent.columns[0].id.clone()]
+        );
+        assert_eq!(parent.name, "Parent");
+        assert_eq!(parent.columns[1].name, "Second");
+        let external: Vec<_> = preview
+            .warnings
+            .iter()
+            .filter(|i| i.code == "external_fk")
+            .collect();
+        assert_eq!(external.len(), 1);
+        assert!(external[0].object.contains("ExternalRef"));
     }
     #[tokio::test]
     async fn sqlite_does_not_report_rowid_alias_as_nullable_primary_key() {

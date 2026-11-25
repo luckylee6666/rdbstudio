@@ -177,6 +177,24 @@ describe("ResultAnalysis", () => {
     await waitFor(() => expect(saveTextFile).toHaveBeenCalledTimes(2));
     expect(JSON.parse(vi.mocked(saveTextFile).mock.calls[1][1])).toMatchObject({ configuration: { scatterX: 1, scatterY: 2, scatterLabel: 0, sample: true }, result: { kind: "scatter", sampled: false, numeric: 2 } });
   });
+  it.each(["value", "kpi", "gauge"])("exports %s card CSV with one summary row and optional series", async chart => {
+    render(<ResultAnalysis snapshot={{ ...snapshot, rows: [["East", 10, "=x"], ["West", 20, "y"]] }} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chart" }));
+    fireEvent.change(screen.getByLabelText("Aggregation"), { target: { value: "sum" } });
+    fireEvent.change(screen.getByLabelText("Chart type"), { target: { value: chart } });
+    finish();
+    const expectCsv = async (contents: string) => {
+      const button = screen.getByRole("button", { name: "Export pivot CSV" });
+      fireEvent.click(button);
+      await waitFor(() => expect(saveTextFile).toHaveBeenLastCalledWith("result-analysis.csv", contents, "csv"));
+      await waitFor(() => expect(button).toBeEnabled());
+    };
+    await expectCsv("Aggregation,Total\nSum,30");
+
+    fireEvent.change(screen.getByLabelText("Column dimension"), { target: { value: "2" } });
+    finish();
+    await expectCsv("Aggregation,'=x [string],y [string],Total\nSum,10,20,30");
+  });
   it("collapses card rows, preserves weighted means and gates target/range exports without recomputing", () => {
     render(<ResultAnalysis snapshot={{ ...snapshot, rows: [["A", 2, "x"], ["A", 4, "x"], ["B", 30, "y"]] }} onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Chart" }));

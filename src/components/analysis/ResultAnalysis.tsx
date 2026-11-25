@@ -146,6 +146,12 @@ export function ResultAnalysis({ snapshot, onClose }: { snapshot: AnalysisSnapsh
       if (format === "svg") {
         if (!svg.current) return;
         content = new XMLSerializer().serializeToString(svg.current);
+      } else if (format === "csv" && result.kind === "pivot" && collapseRows) {
+        const headers = split < 0 ? [] : result.columns.map(bucketLabel);
+        const totals = split < 0 ? [] : result.columnTotals.map(text);
+        content = toCSV([t("analysis.aggregate"), ...headers.map(csvLabel), t("analysis.total")], [
+          [t(`analysis.${aggregate}`), ...totals, text(result.total)],
+        ]);
       } else if (format === "csv" && result.kind === "pivot") {
         const dimension = columns[row].name;
         const header = result.axis?.kind === "time" ? `${dimension} · UTC · ${t(`analysis.time_bucket.${result.axis.time.bucket}`)} · ${t(`analysis.time_input.${result.axis.time.input}`)}`
